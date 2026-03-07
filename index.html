@@ -94,7 +94,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .btn-outline:hover{background:rgba(255,255,255,.1)}
 .btn-solid{padding:8px 16px;border:none;background:var(--teal);color:#fff;border-radius:6px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:600;cursor:pointer;transition:all .15s}
 .btn-solid:hover{background:#0a6357}
-.score-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
+.score-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px}
 .score-tile{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;box-shadow:var(--shadow)}
 .score-tile-value{font-family:'Source Serif 4',serif;font-size:1.8rem;font-weight:600;line-height:1;margin-bottom:4px}
 .score-tile-label{font-size:.7rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
@@ -343,6 +343,20 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="section-body" id="anglesBody"></div>
     </div>
 
+    <!-- Bar path -->
+    <div class="report-section full" id="barPathSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head"><span class="sh-icon">🎯</span><h3>Barbell Path Analysis</h3></div>
+      <div class="section-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;">
+          <div>
+            <img id="barPathImg" src="" style="width:100%;border-radius:6px;display:block;" alt="Bar path overlay">
+            <p style="font-size:.72rem;color:var(--muted);margin-top:6px;">🔴 Actual path &nbsp;|&nbsp; 🟢 Ideal vertical &nbsp;|&nbsp; Numbers = frame sequence</p>
+          </div>
+          <div id="barPathStats"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="report-grid" id="reportGrid"></div>
   </div>
 
@@ -375,11 +389,11 @@ async function initMediaPipe() {
       locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`
     });
     poseInstance.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: false,
+      modelComplexity: 2,        // Highest accuracy — better with occlusion
+      smoothLandmarks: false,    // Off for multi-frame analysis (no temporal smoothing)
       enableSegmentation: false,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5
+      minDetectionConfidence: 0.4,  // Lower threshold = track partially occluded bodies
+      minTrackingConfidence: 0.4
     });
     await poseInstance.initialize();
     mpReady = true;
@@ -587,58 +601,303 @@ async function runMediaPipeOnFrames(frames) {
   return results;
 }
 
-// Draw skeleton on canvas and return annotated base64
-function drawSkeleton(imageBase64, poseResult) {
+// Draw skeleton with confidence-based rendering (solid=confident, dashed=estimated)
+function drawSkeleton(imageBase64, poseResult, barPoint=null) {
   return new Promise(resolve => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement('canvas');
       canvas.width = img.width; canvas.height = img.height;
       const ctx = canvas.getContext('2d');
-      ctx.drawImage(img,0,0);
+      ctx.drawImage(img, 0, 0);
 
-      if(!poseResult || !poseResult.poseLandmarks) {
-        resolve({canvas, base64: canvas.toDataURL('image/jpeg',0.85).split(',')[1]});
-        return;
+      if(poseResult && poseResult.poseLandmarks) {
+        const lm = poseResult.poseLandmarks;
+        const W = canvas.width, H = canvas.height;
+        const lw = Math.max(2, W/220);
+
+        const connections = [
+          [11,12],[11,13],[13,15],[12,14],[14,16],
+          [11,23],[12,24],[23,24],
+          [23,25],[25,27],[27,29],[29,31],
+          [24,26],[26,28],[28,30],[30,32],
+          [15,17],[15,19],[16,18],[16,20]
+        ];
+
+        // Draw connections — solid if both joints confident, dashed if estimated
+        connections.forEach(([a,b]) => {
+          if(!lm[a]||!lm[b]) return;
+          const visA = lm[a].visibility, visB = lm[b].visibility;
+          if(visA < 0.2 && visB < 0.2) return; // skip very low confidence
+          const conf = Math.min(visA, visB);
+          ctx.save();
+          ctx.lineWidth = lw;
+          if(conf < 0.4) {
+            // Dashed line for low-confidence / occluded joints
+            ctx.setLineDash([6, 4]);
+            ctx.strokeStyle = 'rgba(255,200,0,0.7)';
+          } else {
+            ctx.setLineDash([]);
+            ctx.strokeStyle = 'rgba(0,229,204,0.9)';
+          }
+          ctx.beginPath();
+          ctx.moveTo(lm[a].x*W, lm[a].y*H);
+          ctx.lineTo(lm[b].x*W, lm[b].y*H);
+          ctx.stroke();
+          ctx.restore();
+        });
+
+        // Draw joints — color by confidence
+        const jr = Math.max(4, W/110);
+        lm.forEach((p, i) => {
+          if(p.visibility < 0.2) return;
+          const conf = p.visibility;
+          ctx.beginPath();
+          ctx.arc(p.x*W, p.y*H, jr, 0, 2*Math.PI);
+          if(conf >= 0.6) {
+            ctx.fillStyle = i < 11 ? '#ffeb3b' : '#00e5cc'; // high confidence
+          } else if(conf >= 0.35) {
+            ctx.fillStyle = '#ffa500'; // medium — orange = estimated/occluded
+          } else {
+            ctx.fillStyle = 'rgba(255,100,100,0.7)'; // low confidence
+          }
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        });
+
+        // Confidence legend (small, bottom-left)
+        ctx.font = `${Math.max(10, W/70)}px sans-serif`;
+        const legendItems = [
+          {color:'#00e5cc', label:'High confidence'},
+          {color:'#ffa500', label:'Estimated (occluded)'},
+          {color:'rgba(255,100,100,0.9)', label:'Low confidence'},
+        ];
+        const lx = 8, ly = H - legendItems.length * Math.max(16, H/40) - 8;
+        legendItems.forEach((item, idx) => {
+          const lineH = Math.max(16, H/40);
+          const y = ly + idx * lineH;
+          ctx.fillStyle = item.color;
+          ctx.fillRect(lx, y, 12, 10);
+          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.fillText(item.label, lx + 16, y + 10);
+        });
       }
-      const lm = poseResult.poseLandmarks;
-      const W = canvas.width, H = canvas.height;
 
-      // Draw connections
-      const connections = [
-        [11,12],[11,13],[13,15],[12,14],[14,16], // arms
-        [11,23],[12,24],[23,24],                  // torso
-        [23,25],[25,27],[27,29],[29,31],           // left leg
-        [24,26],[26,28],[28,30],[30,32],           // right leg
-        [15,17],[15,19],[16,18],[16,20]            // hands/feet
-      ];
-      ctx.strokeStyle = '#00e5cc';
-      ctx.lineWidth = Math.max(2, W/200);
-      connections.forEach(([a,b]) => {
-        if(!lm[a]||!lm[b]||lm[a].visibility<0.4||lm[b].visibility<0.4) return;
+      // Draw bar point if detected
+      if(barPoint) {
+        const W = canvas.width, H = canvas.height;
+        const bx = barPoint.x * W, by = barPoint.y * H;
+        // Outer glow
         ctx.beginPath();
-        ctx.moveTo(lm[a].x*W, lm[a].y*H);
-        ctx.lineTo(lm[b].x*W, lm[b].y*H);
+        ctx.arc(bx, by, Math.max(12, W/60), 0, 2*Math.PI);
+        ctx.strokeStyle = 'rgba(255,60,60,0.4)';
+        ctx.lineWidth = 6;
         ctx.stroke();
-      });
-
-      // Draw joints
-      const jointRadius = Math.max(4, W/100);
-      lm.forEach((p,i) => {
-        if(p.visibility < 0.4) return;
+        // Inner dot
         ctx.beginPath();
-        ctx.arc(p.x*W, p.y*H, jointRadius, 0, 2*Math.PI);
-        ctx.fillStyle = i<11 ? '#ffeb3b' : '#00e5cc';
+        ctx.arc(bx, by, Math.max(6, W/120), 0, 2*Math.PI);
+        ctx.fillStyle = '#ff3c3c';
         ctx.fill();
         ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 2;
         ctx.stroke();
-      });
+        // Label
+        ctx.font = `bold ${Math.max(11, W/65)}px sans-serif`;
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = 3;
+        ctx.strokeText('BAR', bx + Math.max(10, W/80), by - Math.max(8, W/100));
+        ctx.fillText('BAR', bx + Math.max(10, W/80), by - Math.max(8, W/100));
+      }
 
-      resolve({canvas, base64: canvas.toDataURL('image/jpeg',0.85).split(',')[1]});
+      resolve({canvas, base64: canvas.toDataURL('image/jpeg', 0.88).split(',')[1]});
     };
     img.src = 'data:image/jpeg;base64,' + imageBase64;
   });
+}
+
+// ── Bar Path Detection ──
+// Detects barbell position using hand landmark midpoint + color scanning
+function detectBarPosition(imageBase64, poseLandmarks) {
+  return new Promise(resolve => {
+    if(!poseLandmarks) { resolve(null); return; }
+    const img = new Image();
+    img.onload = () => {
+      const W = img.width, H = img.height;
+      const canvas = document.createElement('canvas');
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+
+      const lm = poseLandmarks;
+      // Use wrist landmarks (15=left wrist, 16=right wrist) as starting search region
+      const lw = lm[15], rw = lm[16];
+      const lwOk = lw && lw.visibility > 0.3;
+      const rwOk = rw && rw.visibility > 0.3;
+
+      if(!lwOk && !rwOk) { resolve(null); return; }
+
+      // Bar center estimate: midpoint between wrists (or whichever is visible)
+      let bx, by;
+      if(lwOk && rwOk) {
+        bx = (lw.x + rw.x) / 2;
+        by = (lw.y + rw.y) / 2;
+      } else if(lwOk) {
+        bx = lw.x; by = lw.y;
+      } else {
+        bx = rw.x; by = rw.y;
+      }
+
+      // Scan a region around the wrist midpoint for metallic/dark bar colors
+      // Search in a horizontal band (bar is horizontal)
+      const searchW = Math.round(W * 0.5);
+      const searchH = Math.round(H * 0.08);
+      const sx = Math.max(0, Math.round(bx * W) - searchW/2);
+      const sy = Math.max(0, Math.round(by * H) - searchH/2);
+      const sw = Math.min(searchW, W - sx);
+      const sh = Math.min(searchH, H - sy);
+
+      if(sw <= 0 || sh <= 0) { resolve({x: bx, y: by, confidence: 'wrist-estimated'}); return; }
+
+      const imageData = ctx.getImageData(sx, sy, sw, sh);
+      const pixels = imageData.data;
+
+      // Find horizontal band with most metallic (silver/grey) or dark (black plate) pixels
+      let bestY = null, bestScore = 0;
+      for(let row = 0; row < sh; row++) {
+        let score = 0;
+        for(let col = 0; col < sw; col++) {
+          const idx = (row * sw + col) * 4;
+          const r = pixels[idx], g = pixels[idx+1], b = pixels[idx+2];
+          const brightness = (r + g + b) / 3;
+          const saturation = Math.max(r,g,b) - Math.min(r,g,b);
+          // Silver/chrome bar: high brightness, low saturation
+          if(brightness > 140 && saturation < 40) score += 2;
+          // Dark/black plates: very low brightness
+          if(brightness < 50) score += 1.5;
+          // Colored plates (red/blue/green bumper plates)
+          if(r > 150 && g < 80 && b < 80) score += 1; // red
+          if(b > 150 && r < 80 && g < 80) score += 1; // blue
+        }
+        if(score > bestScore) { bestScore = score; bestY = row; }
+      }
+
+      if(bestY !== null && bestScore > sw * 0.3) {
+        // Refine x position: find horizontal center of bar pixels in that row
+        let xSum = 0, xCount = 0;
+        for(let col = 0; col < sw; col++) {
+          const idx = (bestY * sw + col) * 4;
+          const r = pixels[idx], g = pixels[idx+1], b = pixels[idx+2];
+          const brightness = (r+g+b)/3;
+          const sat = Math.max(r,g,b)-Math.min(r,g,b);
+          if((brightness > 140 && sat < 40) || brightness < 50) {
+            xSum += col; xCount++;
+          }
+        }
+        const refX = xCount > 0 ? sx + xSum/xCount : sx + sw/2;
+        const refY = sy + bestY;
+        resolve({x: refX/W, y: refY/H, confidence: 'color-detected', score: bestScore});
+      } else {
+        // Fallback to wrist midpoint
+        resolve({x: bx, y: by, confidence: 'wrist-estimated'});
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = 'data:image/jpeg;base64,' + imageBase64;
+  });
+}
+
+// Draw complete bar path overlay on a reference frame
+function drawBarPath(imageBase64, barPoints) {
+  return new Promise(resolve => {
+    if(!barPoints || barPoints.length < 2) { resolve(null); return; }
+    const img = new Image();
+    img.onload = () => {
+      const W = img.width, H = img.height;
+      const canvas = document.createElement('canvas');
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+
+      // Draw path line
+      ctx.beginPath();
+      ctx.moveTo(barPoints[0].x*W, barPoints[0].y*H);
+      barPoints.forEach(p => ctx.lineTo(p.x*W, p.y*H));
+      ctx.strokeStyle = 'rgba(255,60,60,0.85)';
+      ctx.lineWidth = Math.max(3, W/160);
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      // Draw ideal vertical reference line from start point
+      const startX = barPoints[0].x * W;
+      ctx.beginPath();
+      ctx.setLineDash([8, 6]);
+      ctx.moveTo(startX, barPoints[0].y*H);
+      ctx.lineTo(startX, Math.min(...barPoints.map(p=>p.y))*H);
+      ctx.strokeStyle = 'rgba(0,229,204,0.7)';
+      ctx.lineWidth = Math.max(2, W/200);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw numbered points
+      const r = Math.max(8, W/80);
+      barPoints.forEach((p, i) => {
+        ctx.beginPath();
+        ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
+        ctx.fillStyle = i===0 ? '#00e5cc' : i===barPoints.length-1 ? '#ffeb3b' : '#ff3c3c';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = '#fff';
+        ctx.font = `bold ${Math.max(10, W/80)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText(i+1, p.x*W, p.y*H + Math.max(4, W/160));
+      });
+      ctx.textAlign = 'left';
+
+      // Legend
+      const lx = 10, fs = Math.max(11, W/70);
+      ctx.font = `bold ${fs}px sans-serif`;
+      [[`#ff3c3c`,'— Actual bar path'],[`#00e5cc`,'-- Ideal vertical path']].forEach(([col,lbl],i) => {
+        const y = 20 + i*(fs+6);
+        ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(lx-2, y-fs+2, 180, fs+2);
+        ctx.fillStyle=col; ctx.fillText(lbl, lx, y);
+      });
+
+      resolve(canvas.toDataURL('image/jpeg', 0.88).split(',')[1]);
+    };
+    img.src = 'data:image/jpeg;base64,' + imageBase64;
+  });
+}
+
+// Calculate bar path stats
+function analyzeBarPath(barPoints, frameH) {
+  if(!barPoints || barPoints.length < 2) return null;
+  const startX = barPoints[0].x;
+  const maxDrift = Math.max(...barPoints.map(p => Math.abs(p.x - startX)));
+  const avgDrift = barPoints.reduce((s,p) => s + Math.abs(p.x - startX), 0) / barPoints.length;
+  const totalVertical = Math.abs(barPoints[0].y - barPoints[barPoints.length-1].y);
+  // Convert normalized units to approximate cm (assuming ~1.8m person fills ~80% of frame height)
+  const pixelsPerMeter = frameH / (1.8 / 0.8);
+  const maxDriftCm = Math.round(maxDrift * pixelsPerMeter * 100) / 10; // normalized -> cm
+  const avgDriftCm = Math.round(avgDrift * pixelsPerMeter * 100) / 10;
+
+  // Determine direction of drift
+  const endX = barPoints[barPoints.length-1].x;
+  const midX = barPoints[Math.floor(barPoints.length/2)]?.x || startX;
+  const driftDir = midX > startX ? 'anterior (forward)' : midX < startX ? 'posterior (backward)' : 'minimal';
+
+  return {
+    maxDriftCm,
+    avgDriftCm,
+    driftDir,
+    frameCount: barPoints.length,
+    quality: maxDriftCm < 3 ? 'Optimal' : maxDriftCm < 6 ? 'Acceptable' : 'Significant deviation',
+    flag: maxDriftCm < 3 ? 'flag-ok' : maxDriftCm < 6 ? 'flag-med' : 'flag-high'
+  };
 }
 
 // ── Joint Angle Calculations ──
@@ -767,22 +1026,45 @@ async function runAnalysis() {
   document.getElementById('loadingState').style.display='block';
   animateSteps();
 
-  // Step 1-2: MediaPipe on all frames
+  // Step 1-2: MediaPipe on all frames + bar detection
   let annotatedFrames = [];
   let allAngles = [];
+  let barPoints = [];      // normalized {x,y} per frame
+  let frameHeight = 480;   // fallback
+
+  const isLift = /deadlift|squat|press|hinge|push|pull/i.test(movement);
 
   if(mpReady && poseInstance) {
     const mpResults = await runMediaPipeOnFrames(extractedFrames);
     for(let i=0; i<extractedFrames.length; i++) {
-      const {canvas, base64} = await drawSkeleton(extractedFrames[i].imageData, mpResults[i]);
+      const frame = extractedFrames[i];
+      const mpResult = mpResults[i];
+
+      // Bar detection (runs on all frames for lifts)
+      let barPt = null;
+      if(isLift) {
+        barPt = await detectBarPosition(frame.imageData, mpResult?.poseLandmarks || null);
+        if(barPt) barPoints.push(barPt);
+      }
+
+      // Draw skeleton + bar dot on this frame
+      const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, barPt);
       annotatedFrames.push({base64, canvas});
-      if(mpResults[i] && mpResults[i].poseLandmarks) {
-        allAngles.push(extractAngles(mpResults[i].poseLandmarks));
+      if(canvas) frameHeight = Math.max(frameHeight, canvas.height);
+
+      if(mpResult && mpResult.poseLandmarks) {
+        allAngles.push(extractAngles(mpResult.poseLandmarks));
       }
     }
   } else {
-    // No MediaPipe — use raw frames
+    // No MediaPipe — raw frames, still attempt color-based bar detection
     annotatedFrames = extractedFrames.map(f => ({base64: f.imageData, canvas: null}));
+    if(isLift) {
+      for(const frame of extractedFrames) {
+        const bp = await detectBarPosition(frame.imageData, null);
+        if(bp) barPoints.push(bp);
+      }
+    }
   }
 
   // Step 3: Aggregate angles
@@ -791,36 +1073,45 @@ async function runAnalysis() {
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
 
+  // Bar path stats
+  const barStats = barPoints.length >= 2 ? analyzeBarPath(barPoints, frameHeight) : null;
+  const barPathLine = barStats
+    ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}`
+    : '';
+
   // Step 4: Send up to 8 annotated frames to Claude
   const framesToSend = annotatedFrames.slice(0, 8);
   const frameCount = framesToSend.length;
 
-  const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay showing tracked joints.
+  const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay: cyan joints/lines = high confidence, orange joints = estimated position (body was partially occluded, e.g. by a barbell), dashed lines = low confidence segment. A red dot labeled BAR marks the detected barbell position where applicable.
 
 PATIENT: ${patientName}${age ? `, Age ${age}` : ''}
 DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
 MOVEMENT ASSESSED: ${movement}
 CLINICAL FOCUS: ${focusText}
 ${notes ? `CLINICAL NOTES: ${notes}` : ''}
-${frameCount > 1 ? `FRAMES: ${frameCount} frames sampled across the full movement cycle (beginning through end).` : ''}
+${frameCount > 1 ? `FRAMES: ${frameCount} frames sampled evenly across the full movement cycle.` : ''}
 
-${angleLines ? `MEASURED JOINT ANGLES (from MediaPipe across all frames):\n${angleLines}` : ''}
+${angleLines ? `MEASURED JOINT ANGLES (MediaPipe across all frames):\n${angleLines}` : ''}
+${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
 
-Use the skeleton overlays and measured angles to provide a precise, data-driven clinical analysis. Reference specific angle measurements where available.
+OCCLUSION NOTE: Where orange or dashed skeleton segments appear, the barbell was obscuring the body. Use the surrounding landmark positions and the measured angle data to make clinically informed inferences about those positions rather than ignoring them.
+
+Use all available data — skeleton overlays, joint angles${barStats ? ', and bar path deviation' : ''} — for a precise, data-driven clinical report. Reference specific measurements throughout.
 
 Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
 {
   "score": <integer 1-10>,
   "score_summary": "<one-sentence overall assessment>",
   "findings": [
-    { "priority": "high|medium|positive", "title": "<short title>", "detail": "<specific clinical observation referencing measured angles where possible>" }
+    { "priority": "high|medium|positive", "title": "<short title>", "detail": "<specific observation referencing measured angles${barStats ? ' and/or bar drift' : ''} where possible>" }
   ],
-  "biomechanical_analysis": "<2-3 paragraph clinical narrative referencing specific angle measurements, symmetry, and movement patterns across the frames>",
-  "clinical_impressions": "<1-2 paragraph narrative about clinical significance, risk factors, functional implications>",
+  "biomechanical_analysis": "<2-3 paragraph narrative referencing angle measurements, symmetry, movement patterns${barStats ? ', and bar path quality' : ''}>",
+  "clinical_impressions": "<1-2 paragraph narrative: clinical significance, risk factors, functional implications>",
   "recommendations": ["<specific actionable PT recommendation>"],
   "patient_education": ["<simple patient-facing explanation>"]
 }
-Include 3-5 findings, 4-6 recommendations, and 2-3 patient education points.`;
+Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
   try {
     const content = [
@@ -914,16 +1205,55 @@ Include 3-5 findings, 4-6 recommendations, and 2-3 patient education points.`;
       document.getElementById('anglesSection').style.display='block';
     }
 
-    report ? renderReport(report, movement, allAngles.length) : renderRaw(raw, movement);
+    // Render bar path
+    if(barStats && barPoints.length >= 2) {
+      const refFrameIdx = Math.floor(annotatedFrames.length / 2); // use middle frame as background
+      const refBase64 = extractedFrames[refFrameIdx]?.imageData || extractedFrames[0]?.imageData;
+      if(refBase64) {
+        const barPathB64 = await drawBarPath(refBase64, barPoints);
+        if(barPathB64) {
+          document.getElementById('barPathImg').src = 'data:image/jpeg;base64,' + barPathB64;
+          const flagClass = barStats.flag;
+          document.getElementById('barPathStats').innerHTML = `
+            <div style="margin-bottom:14px;">
+              <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">Bar Path Metrics</div>
+              <table class="angles-table">
+                <tbody>
+                  <tr><td>Max Horizontal Drift</td><td><span class="val ${flagClass}">${barStats.maxDriftCm} cm</span></td></tr>
+                  <tr><td>Average Drift</td><td><span class="val">${barStats.avgDriftCm} cm</span></td></tr>
+                  <tr><td>Drift Direction</td><td><span class="val">${barStats.driftDir}</span></td></tr>
+                  <tr><td>Path Quality</td><td><span class="val ${flagClass}">${barStats.quality}</span></td></tr>
+                  <tr><td>Frames Tracked</td><td><span class="val">${barStats.frameCount}</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div style="background:var(--navy-light);border-radius:6px;padding:12px;font-size:.78rem;color:var(--navy-mid);line-height:1.6;">
+              <strong>Reference ranges:</strong><br>
+              🟢 &lt;3 cm drift = Optimal bar path<br>
+              🟡 3–6 cm = Acceptable, monitor closely<br>
+              🔴 &gt;6 cm = Significant deviation — increased lumbar load risk<br><br>
+              <em>Note: Estimates based on assumed ~1.8m subject height. Confidence improves with side-view camera angle.</em>
+            </div>`;
+          document.getElementById('barPathSection').style.display='block';
+        }
+      }
+    }
+
+    report ? renderReport(report, movement, allAngles.length, barStats) : renderRaw(raw, movement);
     document.getElementById('resultsSection').scrollIntoView({behavior:'smooth'});
 
   } catch(err) { showErr('Analysis failed: ' + err.message); }
 }
 
-function renderReport(r, movement, trackedFrames) {
+function renderReport(r, movement, trackedFrames, barStats=null) {
   const score = r.score||null;
   const sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
   const highCount = (r.findings||[]).filter(f=>f.priority==='high').length;
+  const barTile = barStats ? `
+    <div class="score-tile">
+      <div class="score-tile-value ${barStats.flag}" style="font-size:1.3rem;">${barStats.maxDriftCm}cm</div>
+      <div class="score-tile-label">Max Bar Drift</div>
+    </div>` : '';
 
   document.getElementById('scoreStrip').innerHTML = `
     <div class="score-tile">
@@ -938,6 +1268,7 @@ function renderReport(r, movement, trackedFrames) {
       <div class="score-tile-value ${highCount>0?'score-poor':'score-good'}">${highCount}</div>
       <div class="score-tile-label">High Priority Findings</div>
     </div>
+    ${barTile}
     <div class="score-tile">
       <div class="score-tile-value" style="font-size:.72rem;color:var(--muted);padding-top:4px;line-height:1.4;">${r.score_summary||'—'}</div>
       <div class="score-tile-label">Summary</div>
