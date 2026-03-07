@@ -149,6 +149,42 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .mp-badge.loading{background:#fff8e0;color:#92600a}
 .mp-badge.error{background:#fdf2f2;color:var(--red)}
 
+
+/* Bar-click overlay */
+.bar-click-overlay{position:relative;cursor:crosshair;user-select:none}
+.bar-click-overlay canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.bar-click-hint{background:#fff8e0;border:1px solid #f0c040;border-radius:6px;padding:10px 14px;font-size:.8rem;color:#92600a;margin-top:10px;display:none}
+.bar-click-hint.show{display:flex;align-items:center;gap:8px}
+.bar-click-done{background:var(--teal-light);border:1px solid var(--teal);color:var(--teal);border-radius:6px;padding:8px 14px;font-size:.78rem;font-weight:600;display:none;align-items:center;gap:8px;margin-top:8px}
+.bar-click-done.show{display:flex}
+
+/* Camera guide modal */
+.guide-modal{display:none;position:fixed;inset:0;background:rgba(15,39,68,.7);z-index:500;align-items:center;justify-content:center}
+.guide-modal.open{display:flex}
+.guide-box{background:var(--surface);border-radius:12px;padding:28px;max-width:480px;width:90%;box-shadow:0 8px 40px rgba(0,0,0,.3)}
+.guide-box h3{font-family:'Source Serif 4',serif;font-size:1.2rem;color:var(--navy);margin-bottom:6px}
+.guide-box .guide-sub{font-size:.78rem;color:var(--muted);margin-bottom:18px}
+.guide-tip{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--bg)}
+.guide-tip:last-of-type{border-bottom:none}
+.guide-icon{font-size:1.4rem;flex-shrink:0}
+.guide-tip-text strong{display:block;font-size:.83rem;color:var(--ink);margin-bottom:2px}
+.guide-tip-text span{font-size:.76rem;color:var(--muted)}
+.guide-close{width:100%;margin-top:18px;padding:11px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-family:'Inter',sans-serif;font-weight:600;font-size:.88rem;cursor:pointer}
+.guide-close:hover{background:var(--teal)}
+
+/* Phase badge on frame cards */
+.phase-badge{display:inline-block;font-size:.65rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:3px;margin-left:6px}
+.phase-setup{background:#e8f0f8;color:var(--navy)}
+.phase-liftoff{background:#fff3e0;color:#c27000}
+.phase-midpull{background:#fce8e8;color:var(--red)}
+.phase-lockout{background:#e6f4f1;color:var(--teal)}
+.phase-descent{background:#fff3e0;color:#c27000}
+.phase-bottom{background:#fce8e8;color:var(--red)}
+.phase-ascent{background:#e6f4f1;color:var(--teal)}
+.phase-stance{background:#e8f0f8;color:var(--navy)}
+.phase-swing{background:#fff3e0;color:#c27000}
+.phase-frame{background:#f0f0f0;color:var(--muted)}
+
 @media print{header,.report-header-right{display:none}#inputSection,#loadingState{display:none!important}#resultsSection{display:block!important}}
 @media(max-width:680px){
   header{padding:0 16px}.container{padding:20px 14px 60px}
@@ -247,7 +283,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <span class="upload-icon">📁</span>
           <div class="upload-title">Drop file here or click to browse</div>
           <div class="upload-sub">MP4, MOV, AVI · JPG, PNG</div>
-          <div class="upload-tip">💡 Side-view or frontal-view works best for joint tracking</div>
+          <div class="upload-tip" style="cursor:pointer" onclick="showGuide()">💡 Side-view or frontal-view works best — <u>view camera tips</u></div>
         </div>
 
         <div class="file-preview" id="filePreview">
@@ -259,6 +295,15 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <div class="frame-status" id="frameStatus">
             <span id="frameStatusText">Processing...</span>
             <div class="frame-bar"><div class="frame-bar-fill" id="frameBarFill" style="width:0%"></div></div>
+          </div>
+          <div class="bar-click-hint" id="barClickHint">
+            <span>🎯</span>
+            <div><strong>Click the barbell in the image below to improve bar tracking accuracy.</strong><br>
+            <span style="font-size:.74rem;">This seeds the bar detection for all frames. Optional — auto-detection will run if skipped.</span></div>
+          </div>
+          <div id="barClickFrame" style="display:none;margin-top:10px;border-radius:8px;overflow:hidden;position:relative;cursor:crosshair;">
+            <canvas id="barClickCanvas" style="display:block;width:100%;"></canvas>
+            <div class="bar-click-done" id="barClickDone">✓ Bar marked at this position — tracking seeded. <button class="btn-link" onclick="clearBarSeed()" style="margin-left:8px;">Clear</button></div>
           </div>
         </div>
 
@@ -360,6 +405,16 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="report-grid" id="reportGrid"></div>
   </div>
 
+</div>
+
+<!-- Camera guide modal -->
+<div class="guide-modal" id="guideModal">
+  <div class="guide-box">
+    <h3 id="guideTitle">Camera Setup Tips</h3>
+    <div class="guide-sub" id="guideSub">For best joint tracking accuracy, follow these guidelines.</div>
+    <div id="guideTips"></div>
+    <button class="guide-close" onclick="document.getElementById('guideModal').classList.remove('open')">Got it</button>
+  </div>
 </div>
 
 <!-- Hidden video element for frame extraction -->
@@ -469,22 +524,25 @@ function startFrameExtraction(file, vid) {
       statusText.textContent = 'Trying playback capture...';
       await captureViaPlay(vid, barFill, statusText); return;
     }
-    // Extract up to 8 frames evenly spaced
-    const count = Math.min(8, Math.max(2, Math.ceil(dur * 2)));
-    const times = Array.from({length:count}, (_,i) =>
-      i === 0 ? 0.1 : (i/(count-1)) * (dur * 0.95)
-    );
-    statusText.textContent = `Extracting ${count} frames...`;
+    // Smart phase-based frame extraction
+    const movement = document.getElementById('movementType').value || '';
+    const {times: phaseTimeProportions, labels: phaseLabels} = getPhaseTimes(movement, dur);
+    const times = phaseTimeProportions.map(t => t * dur);
+    statusText.textContent = `Extracting ${times.length} phase-targeted frames...`;
     const frames = [];
     for(let i = 0; i < times.length; i++) {
-      const b64 = await seekCapture(vid, times[i]);
-      if(b64) frames.push({imageData: b64});
+      const b64 = await seekCapture(vid, Math.max(0.05, times[i]));
+      if(b64) frames.push({imageData: b64, phase: phaseLabels[i]});
       barFill.style.width = `${Math.round(((i+1)/times.length)*90)}%`;
     }
     if(frames.length > 0) {
       extractedFrames = frames;
       barFill.style.width = '100%';
-      statusText.textContent = `✓ ${frames.length} frame${frames.length>1?'s':''} extracted — ready for analysis`;
+      const phaseNames = frames.filter(f=>f.phase?.id !== 'frame').map(f=>f.phase?.label).filter(Boolean);
+      statusText.textContent = `✓ ${frames.length} frames extracted${phaseNames.length ? ' — phases: ' + phaseNames.slice(0,4).join(', ') : ''} — ready for analysis`;
+      // Show bar-click UI for lifts using first captured frame
+      const isLift = /deadlift|squat|press|hinge|push|pull|lunge|sit/i.test(movement);
+      if(isLift && frames[0]) setupBarClickFrame(frames[0].imageData);
     } else {
       statusText.textContent = 'Seek failed — trying playback...';
       await captureViaPlay(vid, barFill, statusText);
@@ -739,9 +797,11 @@ function detectBarPosition(imageBase64, poseLandmarks) {
 
       if(!lwOk && !rwOk) { resolve(null); return; }
 
-      // Bar center estimate: midpoint between wrists (or whichever is visible)
+      // Use user-clicked seed if available (highest priority), else wrists
       let bx, by;
-      if(lwOk && rwOk) {
+      if(barSeedPoint) {
+        bx = barSeedPoint.x; by = barSeedPoint.y;
+      } else if(lwOk && rwOk) {
         bx = (lw.x + rw.x) / 2;
         by = (lw.y + rw.y) / 2;
       } else if(lwOk) {
@@ -964,6 +1024,316 @@ const REF_RANGES = {
   'Right Shoulder Flexion':   {label:'Normal: 0-180°'},
 };
 
+// ── Movement-Specific Angle Norms ──
+const MOVEMENT_NORMS = {
+  'Hip Hinge / Deadlift Pattern': {
+    'Left Hip Flexion':   {ideal:[60,100], warn:45, label:'Deadlift hip hinge: 60-100° at setup'},
+    'Right Hip Flexion':  {ideal:[60,100], warn:45, label:'Deadlift hip hinge: 60-100° at setup'},
+    'Left Knee Flexion':  {ideal:[30,70],  warn:20, label:'Deadlift knee: 30-70° at setup'},
+    'Right Knee Flexion': {ideal:[30,70],  warn:20, label:'Deadlift knee: 30-70° at setup'},
+    'Trunk Lean':         {max:45, warn:55, label:'Deadlift torso: up to 45° acceptable'},
+    'Left Ankle Dorsiflexion':  {min:90, warn:85, label:'>90° (neutral or slight DF)'},
+    'Right Ankle Dorsiflexion': {min:90, warn:85, label:'>90° (neutral or slight DF)'},
+  },
+  'Squat (Double-Leg)': {
+    'Left Hip Flexion':   {ideal:[80,130], warn:70, label:'Squat hip: 80-130° at bottom'},
+    'Right Hip Flexion':  {ideal:[80,130], warn:70, label:'Squat hip: 80-130° at bottom'},
+    'Left Knee Flexion':  {ideal:[80,140], warn:70, label:'Squat knee: 80-140° at bottom'},
+    'Right Knee Flexion': {ideal:[80,140], warn:70, label:'Squat knee: 80-140° at bottom'},
+    'Trunk Lean':         {max:25, warn:40, label:'Squat torso: <25° preferred'},
+    'Left Ankle Dorsiflexion':  {min:95, warn:90, label:'>95° (10°+ DF needed for depth)'},
+    'Right Ankle Dorsiflexion': {min:95, warn:90, label:'>95° (10°+ DF needed for depth)'},
+  },
+  'Single-Leg Squat': {
+    'Left Hip Flexion':   {ideal:[60,110], warn:50, label:'SL squat hip: 60-110°'},
+    'Right Hip Flexion':  {ideal:[60,110], warn:50, label:'SL squat hip: 60-110°'},
+    'Left Knee Flexion':  {ideal:[60,120], warn:50, label:'SL squat knee: 60-120°'},
+    'Right Knee Flexion': {ideal:[60,120], warn:50, label:'SL squat knee: 60-120°'},
+    'Trunk Lean':         {max:20, warn:30, label:'<20° lateral trunk lean'},
+  },
+  'Lunge': {
+    'Left Knee Flexion':  {ideal:[80,100], warn:70, label:'Front knee: 80-100° at bottom'},
+    'Right Knee Flexion': {ideal:[80,100], warn:70, label:'Front knee: 80-100° at bottom'},
+    'Left Hip Flexion':   {ideal:[80,110], warn:70, label:'Front hip: 80-110° at bottom'},
+    'Right Hip Flexion':  {ideal:[80,110], warn:70, label:'Front hip: 80-110° at bottom'},
+    'Trunk Lean':         {max:15, warn:25, label:'<15° trunk lean preferred'},
+  },
+  'Gait / Walking': {
+    'Left Hip Flexion':   {ideal:[20,40], warn:15, label:'Gait hip flexion: 20-40°'},
+    'Right Hip Flexion':  {ideal:[20,40], warn:15, label:'Gait hip flexion: 20-40°'},
+    'Left Knee Flexion':  {ideal:[0,70],  warn:0,  label:'Stance: ~0°; swing: up to 70°'},
+    'Right Knee Flexion': {ideal:[0,70],  warn:0,  label:'Stance: ~0°; swing: up to 70°'},
+    'Left Ankle Dorsiflexion':  {min:95, warn:90, label:'Min 5° DF during stance phase'},
+    'Right Ankle Dorsiflexion': {min:95, warn:90, label:'Min 5° DF during stance phase'},
+    'Trunk Lean':         {max:10, warn:15, label:'<10° in gait'},
+  },
+  'Running': {
+    'Left Hip Flexion':   {ideal:[30,60], warn:25, label:'Running hip: 30-60° at peak'},
+    'Right Hip Flexion':  {ideal:[30,60], warn:25, label:'Running hip: 30-60° at peak'},
+    'Left Knee Flexion':  {ideal:[20,90], warn:15, label:'Running knee: 20-90° swing'},
+    'Right Knee Flexion': {ideal:[20,90], warn:15, label:'Running knee: 20-90° swing'},
+    'Trunk Lean':         {max:12, warn:20, label:'Forward lean: 5-12° optimal'},
+  },
+  'Sit to Stand': {
+    'Left Hip Flexion':   {ideal:[80,120], warn:70, label:'STS hip at initiation: 80-120°'},
+    'Right Hip Flexion':  {ideal:[80,120], warn:70, label:'STS hip at initiation: 80-120°'},
+    'Left Knee Flexion':  {ideal:[90,110], warn:80, label:'STS knee at initiation: 90-110°'},
+    'Right Knee Flexion': {ideal:[90,110], warn:80, label:'STS knee at initiation: 90-110°'},
+    'Trunk Lean':         {max:35, warn:50, label:'Forward trunk lean at initiation: up to 35°'},
+  },
+  'Overhead Press / Reach': {
+    'Left Shoulder Flexion':  {ideal:[150,180], warn:130, label:'Full OH: 150-180°'},
+    'Right Shoulder Flexion': {ideal:[150,180], warn:130, label:'Full OH: 150-180°'},
+    'Trunk Lean':             {max:10, warn:20, label:'Minimal lumbar extension: <10°'},
+  },
+};
+
+// Get norms for the current movement, fall back to generic REF_RANGES
+function getNormsForMovement(movement) {
+  // Try exact match first, then partial
+  if(MOVEMENT_NORMS[movement]) return MOVEMENT_NORMS[movement];
+  for(const [key, val] of Object.entries(MOVEMENT_NORMS)) {
+    if(movement.toLowerCase().includes(key.toLowerCase().split(' ')[0])) return val;
+  }
+  return null;
+}
+
+function flagAngleForMovement(name, val, movement) {
+  const norms = getNormsForMovement(movement);
+  const norm = norms?.[name];
+  if(!norm || val === null) return flagAngle(name, val); // fall back to generic
+  if(norm.max !== undefined) {
+    if(val > norm.warn) return 'flag-high';
+    if(val > norm.max)  return 'flag-med';
+    return 'flag-ok';
+  }
+  if(norm.min !== undefined) {
+    if(val < norm.warn) return 'flag-high';
+    if(val < norm.min)  return 'flag-med';
+    return 'flag-ok';
+  }
+  if(norm.ideal) {
+    const [lo, hi] = norm.ideal;
+    if(val < norm.warn || val > hi + 20) return 'flag-high';
+    if(val < lo || val > hi)             return 'flag-med';
+    return 'flag-ok';
+  }
+  return 'flag-ok';
+}
+
+function getNormLabel(name, movement) {
+  const norms = getNormsForMovement(movement);
+  return norms?.[name]?.label || REF_RANGES[name]?.label || '';
+}
+
+// ── Smart Frame Selection (phase-based) ──
+// Movement phase definitions: times are proportional (0-1) within video
+const PHASE_MAPS = {
+  'Hip Hinge / Deadlift Pattern': [
+    {id:'setup',   label:'Setup',    time:0.05, desc:'Starting position'},
+    {id:'liftoff', label:'Liftoff',  time:0.25, desc:'Bar leaving floor'},
+    {id:'midpull', label:'Mid-Pull', time:0.50, desc:'Knees nearly straight, hips still low'},
+    {id:'lockout', label:'Lockout',  time:0.88, desc:'Full hip extension'},
+  ],
+  'Squat (Double-Leg)': [
+    {id:'stance',  label:'Standing', time:0.05, desc:'Starting position'},
+    {id:'descent', label:'Descent',  time:0.30, desc:'Initiating descent'},
+    {id:'bottom',  label:'Bottom',   time:0.55, desc:'Deepest point'},
+    {id:'ascent',  label:'Ascent',   time:0.80, desc:'Rising phase'},
+  ],
+  'Single-Leg Squat': [
+    {id:'stance',  label:'Standing', time:0.05, desc:'Start'},
+    {id:'descent', label:'Descent',  time:0.30, desc:'Lowering'},
+    {id:'bottom',  label:'Bottom',   time:0.55, desc:'Deepest point'},
+    {id:'ascent',  label:'Ascent',   time:0.80, desc:'Return'},
+  ],
+  'Lunge': [
+    {id:'stance',  label:'Start',    time:0.05, desc:'Standing'},
+    {id:'descent', label:'Step Out', time:0.30, desc:'Stepping forward'},
+    {id:'bottom',  label:'Bottom',   time:0.55, desc:'Deepest lunge'},
+    {id:'ascent',  label:'Return',   time:0.80, desc:'Returning to start'},
+  ],
+  'Gait / Walking': [
+    {id:'stance',  label:'Heel Strike',  time:0.05, desc:'Initial contact'},
+    {id:'midpull', label:'Mid Stance',   time:0.25, desc:'Single limb support'},
+    {id:'liftoff', label:'Toe Off',      time:0.50, desc:'Terminal stance/toe off'},
+    {id:'swing',   label:'Mid Swing',    time:0.75, desc:'Swing phase'},
+  ],
+  'Running': [
+    {id:'stance',  label:'Initial Contact', time:0.05, desc:'Foot strike'},
+    {id:'midpull', label:'Mid Stance',      time:0.25, desc:'Loading response'},
+    {id:'liftoff', label:'Propulsion',      time:0.50, desc:'Toe off'},
+    {id:'swing',   label:'Float Phase',     time:0.75, desc:'Both feet off ground'},
+  ],
+  'Sit to Stand': [
+    {id:'setup',   label:'Seated',   time:0.05, desc:'Starting position'},
+    {id:'descent', label:'Lean',     time:0.30, desc:'Forward trunk lean'},
+    {id:'liftoff', label:'Liftoff',  time:0.55, desc:'Seat departure'},
+    {id:'lockout', label:'Standing', time:0.90, desc:'Full extension'},
+  ],
+};
+
+// Get phase times for a movement (returns array of 0-1 proportions)
+function getPhaseTimes(movement, videoDuration) {
+  let phases = MOVEMENT_NORMS[movement] ? PHASE_MAPS[movement] : null;
+  if(!phases) {
+    // Try partial match
+    for(const [key, val] of Object.entries(PHASE_MAPS)) {
+      if(movement.toLowerCase().includes(key.toLowerCase().split(' ')[0])) {
+        phases = val; break;
+      }
+    }
+  }
+  if(!phases) {
+    // Generic: evenly spaced 8 frames
+    return {
+      times: Array.from({length:8}, (_,i) => i===0 ? 0.03 : i/7 * 0.95),
+      labels: Array.from({length:8}, (_,i) => ({id:'frame', label:`Frame ${i+1}`, desc:''}))
+    };
+  }
+  // Add 4 extra frames in between phase keyframes for more coverage
+  const expanded = [];
+  const expandedLabels = [];
+  phases.forEach((phase, i) => {
+    expanded.push(phase.time);
+    expandedLabels.push(phase);
+    // Add an interpolated frame between each phase
+    if(i < phases.length - 1) {
+      const mid = (phase.time + phases[i+1].time) / 2;
+      expanded.push(mid);
+      expandedLabels.push({id:'frame', label:`Inter ${i+1}`, desc:'Between phases'});
+    }
+  });
+  return {times: expanded.map(t => Math.max(0.02, Math.min(0.97, t))), labels: expandedLabels};
+}
+
+// ── Camera Guide Data ──
+const CAMERA_GUIDES = {
+  'Hip Hinge / Deadlift Pattern': {
+    title: 'Deadlift Camera Setup',
+    sub: 'Side view gives the most accurate hip hinge and bar path data.',
+    tips: [
+      {icon:'📐', title:'Camera angle: strict 90° side view', desc:'Position camera perpendicular to the lifter. Even 15° of rotation significantly distorts hip/knee angles.'},
+      {icon:'📏', title:'Camera height: mid-thigh to hip level', desc:'Align lens with approximately the bar height at setup — this captures the full kinetic chain without distortion.'},
+      {icon:'🎽', title:'Clothing: fitted, contrasting color', desc:'Avoid baggy shorts. Bright top / dark bottom helps MediaPipe distinguish trunk from leg. Joint stickers on hip and knee dramatically improve accuracy.'},
+      {icon:'💡', title:'Lighting: consistent, avoid backlight', desc:'Side windows behind the lifter cause silhouetting. Front or overhead lighting is ideal.'},
+      {icon:'📱', title:'Capture the full lift + 1 second each side', desc:'Start recording before setup and stop after returning to standing. Capture at 60fps if possible.'},
+    ]
+  },
+  'Squat (Double-Leg)': {
+    title: 'Squat Camera Setup',
+    sub: 'Side view for sagittal mechanics; add frontal for valgus assessment.',
+    tips: [
+      {icon:'📐', title:'Side view: 90° perpendicular', desc:'Essential for knee and hip flexion angles. Stand camera at knee-to-hip height.'},
+      {icon:'➕', title:'Add frontal view for knee valgus', desc:'A second recording from the front captures medial knee collapse that side view misses entirely.'},
+      {icon:'🎽', title:'Shorts above the knee', desc:'Knee joint must be visible. Kneecap position and tibial angle are critical for squat assessment.'},
+      {icon:'👟', title:'Capture footwear', desc:'Heel lift or flat shoe changes ankle dorsiflexion demands significantly — include feet in frame.'},
+      {icon:'📏', title:'Full body in frame', desc:'Ensure head through feet are all visible. Cropping changes landmark confidence.'},
+    ]
+  },
+  'Gait / Walking': {
+    title: 'Gait Analysis Camera Setup',
+    sub: '3-4 metres of walking in frame gives the best full cycle capture.',
+    tips: [
+      {icon:'📐', title:'True lateral view, camera stationary', desc:'Do not pan with the patient. Camera should be still and capture 3-4 full steps in frame.'},
+      {icon:'📏', title:'Camera at greater trochanter height', desc:'Hip-level camera minimises perspective distortion of knee and ankle angles.'},
+      {icon:'👣', title:'Capture at least 3 full gait cycles', desc:'Upload 3-4 seconds of continuous walking. More cycles = better phase detection.'},
+      {icon:'🎽', title:'Shorts and close-fitting top', desc:'Belt line, greater trochanter, knee centre, and lateral malleolus should all be clearly visible.'},
+      {icon:'📏', title:'Even surface, no incline', desc:'Inclined surfaces alter all joint angles systematically and confound the norms.'},
+    ]
+  },
+  '_default': {
+    title: 'Camera Setup Tips',
+    sub: 'General guidelines for best joint tracking accuracy.',
+    tips: [
+      {icon:'📐', title:'Side view (sagittal plane) as default', desc:'90° perpendicular to movement direction gives the most accurate joint angle measurements.'},
+      {icon:'💡', title:'Consistent, front-facing lighting', desc:'Avoid backlighting. Natural light or overhead LED is ideal.'},
+      {icon:'🎽', title:'Fitted, contrasting clothing', desc:'Loose clothing obscures joint positions. Bright top / dark bottoms or vice versa improves detection.'},
+      {icon:'📱', title:'Stable camera, 60fps if available', desc:'Use a tripod or prop your phone. Higher frame rates improve phase detection.'},
+      {icon:'📏', title:'Full body in frame with margin', desc:'All joints head-to-toe should be visible with some space around the body.'},
+    ]
+  }
+};
+
+function showGuide() {
+  const movement = document.getElementById('movementType').value;
+  const guide = CAMERA_GUIDES[movement] || CAMERA_GUIDES['_default'];
+  document.getElementById('guideTitle').textContent = guide.title;
+  document.getElementById('guideSub').textContent = guide.sub;
+  document.getElementById('guideTips').innerHTML = guide.tips.map(t =>
+    `<div class="guide-tip"><div class="guide-icon">${t.icon}</div><div class="guide-tip-text"><strong>${t.title}</strong><span>${t.desc}</span></div></div>`
+  ).join('');
+  document.getElementById('guideModal').classList.add('open');
+}
+
+// ── Bar Click Seed ──
+let barSeedPoint = null;   // normalized {x, y} from user click
+let barClickSourceB64 = null;
+
+function setupBarClickFrame(imageB64) {
+  barClickSourceB64 = imageB64;
+  const canvas = document.getElementById('barClickCanvas');
+  const container = document.getElementById('barClickFrame');
+  const hint = document.getElementById('barClickHint');
+
+  const img = new Image();
+  img.onload = () => {
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    container.style.display = 'block';
+    hint.classList.add('show');
+    drawBarSeedOnCanvas(ctx, img.width, img.height);
+  };
+  img.src = 'data:image/jpeg;base64,' + imageB64;
+
+  canvas.onclick = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    // Scale click coords to actual canvas dimensions
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const cx = (e.clientX - rect.left) * scaleX;
+    const cy = (e.clientY - rect.top) * scaleY;
+    barSeedPoint = {x: cx / canvas.width, y: cy / canvas.height};
+    const ctx = canvas.getContext('2d');
+    const i = new Image();
+    i.onload = () => { ctx.drawImage(i,0,0); drawBarSeedOnCanvas(ctx, canvas.width, canvas.height); };
+    i.src = 'data:image/jpeg;base64,' + barClickSourceB64;
+    document.getElementById('barClickDone').classList.add('show');
+  };
+}
+
+function drawBarSeedOnCanvas(ctx, W, H) {
+  if(!barSeedPoint) return;
+  const bx = barSeedPoint.x * W, by = barSeedPoint.y * H;
+  ctx.beginPath();
+  ctx.arc(bx, by, Math.max(10, W/60), 0, 2*Math.PI);
+  ctx.strokeStyle = '#ff3c3c';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(bx, by, Math.max(4, W/150), 0, 2*Math.PI);
+  ctx.fillStyle = '#ff3c3c';
+  ctx.fill();
+  // Crosshair
+  ctx.strokeStyle = 'rgba(255,60,60,0.6)';
+  ctx.lineWidth = 1.5;
+  const r = Math.max(20, W/40);
+  ctx.beginPath(); ctx.moveTo(bx-r, by); ctx.lineTo(bx+r, by); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bx, by-r); ctx.lineTo(bx, by+r); ctx.stroke();
+}
+
+function clearBarSeed() {
+  barSeedPoint = null;
+  document.getElementById('barClickDone').classList.remove('show');
+  const canvas = document.getElementById('barClickCanvas');
+  const ctx = canvas.getContext('2d');
+  const i = new Image();
+  i.onload = () => ctx.drawImage(i,0,0);
+  i.src = 'data:image/jpeg;base64,' + barClickSourceB64;
+}
+
 function flagAngle(name, val) {
   const ref = REF_RANGES[name];
   if(!ref || val === null) return 'flag-ok';
@@ -1090,10 +1460,17 @@ DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
 MOVEMENT ASSESSED: ${movement}
 CLINICAL FOCUS: ${focusText}
 ${notes ? `CLINICAL NOTES: ${notes}` : ''}
-${frameCount > 1 ? `FRAMES: ${frameCount} frames sampled evenly across the full movement cycle.` : ''}
+${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
 ${angleLines ? `MEASURED JOINT ANGLES (MediaPipe across all frames):\n${angleLines}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
+
+MOVEMENT-SPECIFIC NORMS: Use the following reference ranges for ${movement} when interpreting angles:
+${(() => {
+  const norms = getNormsForMovement(movement);
+  if(!norms) return 'Standard clinical ranges apply.';
+  return Object.entries(norms).map(([joint, ref]) => `  ${joint}: ${ref.label||''}`).join('\n');
+})()}
 
 OCCLUSION NOTE: Where orange or dashed skeleton segments appear, the barbell was obscuring the body. Use the surrounding landmark positions and the measured angle data to make clinically informed inferences about those positions rather than ignoring them.
 
@@ -1180,7 +1557,10 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         imgWrap.appendChild(img);
         const lbl = document.createElement('div');
         lbl.className = 'frame-label';
-        lbl.textContent = `Frame ${i+1}${allAngles.length>0?' · Tracked':''}`;
+        const phase = extractedFrames[i]?.phase;
+        const phaseId = phase?.id || 'frame';
+        const phaseLabel = phase?.label || `Frame ${i+1}`;
+        lbl.innerHTML = `<span>${phaseLabel}</span><span class="phase-badge phase-${phaseId}">${phaseId === 'frame' ? '#'+(i+1) : phase?.desc || ''}</span>`;
         card.appendChild(imgWrap); card.appendChild(lbl);
         gallery.appendChild(card);
       });
@@ -1189,10 +1569,12 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     // Render angle table
     if(Object.keys(aggregated).length > 0) {
-      let tableHtml = '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range</th><th>Reference</th></tr></thead><tbody>';
+      const movNorm = movement;
+      let tableHtml = `<div style="font-size:.73rem;color:var(--muted);margin-bottom:10px;">📐 Norms calibrated for: <strong style="color:var(--navy);">${movNorm || 'General movement'}</strong></div>`;
+      tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
       Object.entries(aggregated).forEach(([k,v]) => {
-        const flag = flagAngle(k, v.avg);
-        const ref = REF_RANGES[k]?.label || '';
+        const flag = flagAngleForMovement(k, v.avg, movNorm);
+        const ref = getNormLabel(k, movNorm);
         tableHtml += `<tr>
           <td>${k}</td>
           <td><span class="val ${flag}">${v.avg}°</span></td>
