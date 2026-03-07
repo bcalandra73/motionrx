@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MotionRx — Clinical Motion Analysis</title>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,300;0,400;0,600;1,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --navy: #0f2744;
+  --navy-mid: #1a3a5c;
+  --navy-light: #e8f0f8;
+  --teal: #0e7c6a;
+  --teal-light: #e6f4f1;
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --border: #d5dce8;
+  --ink: #1a2332;
+  --muted: #6b7a8d;
+  --red: #c0392b;
+  --amber: #d97706;
+  --green: #0e7c6a;
+  --shadow: 0 1px 4px rgba(15,39,68,0.08), 0 4px 16px rgba(15,39,68,0.06);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--ink); min-height: 100vh; font-size: 14px; }
+
+header {
+  background: var(--navy); padding: 0 40px; height: 60px;
+  display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; z-index: 100;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+.logo { display: flex; align-items: center; gap: 12px; }
+.logo-mark { width: 34px; height: 34px; background: var(--teal); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1rem; }
+.logo-text { color: #fff; font-weight: 600; font-size: 1rem; letter-spacing: -0.3px; }
+.logo-text span { color: #7ec8c0; }
+.header-right { display: flex; align-items: center; gap: 16px; }
+.header-badge { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: #7ec8c0; border: 1px solid #7ec8c033; padding: 3px 10px; border-radius: 4px; }
+.header-date { font-size: 0.75rem; color: #8fa5c0; }
+
+.container { max-width: 1040px; margin: 0 auto; padding: 32px 24px 80px; }
+.page-header { margin-bottom: 28px; }
+.page-header h1 { font-family: 'Source Serif 4', serif; font-size: 1.75rem; font-weight: 600; color: var(--navy); margin-bottom: 4px; }
+.page-header p { color: var(--muted); font-size: 0.88rem; }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
+.card.no-mb { margin-bottom: 0; }
+.card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.card-header-icon { width: 30px; height: 30px; border-radius: 6px; background: var(--navy-light); display: flex; align-items: center; justify-content: center; font-size: 0.9rem; }
+.card-header h2 { font-size: 0.88rem; font-weight: 600; color: var(--navy); }
+.card-header p { font-size: 0.75rem; color: var(--muted); margin-top: 1px; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.form-group { display: flex; flex-direction: column; gap: 5px; }
+.form-group.full { grid-column: 1 / -1; }
+.form-label { font-size: 0.76rem; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.form-label .req { color: var(--red); margin-left: 2px; }
+input[type=text], input[type=number], select, textarea {
+  font-family: 'Inter', sans-serif; font-size: 0.88rem; padding: 9px 12px;
+  border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--ink);
+  transition: border-color 0.15s, box-shadow 0.15s; outline: none; width: 100%;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(14,124,106,0.1); }
+textarea { resize: vertical; min-height: 72px; line-height: 1.5; }
+select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7a8d' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
+
+.upload-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 36px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--bg); position: relative; }
+.upload-zone:hover, .upload-zone.drag-over { border-color: var(--teal); background: var(--teal-light); }
+.upload-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+.upload-icon { font-size: 2rem; margin-bottom: 10px; display: block; }
+.upload-title { font-size: 0.9rem; font-weight: 600; color: var(--navy); margin-bottom: 4px; }
+.upload-sub { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
+.upload-tip { margin-top: 10px; display: inline-block; background: var(--navy-light); color: var(--navy-mid); font-size: 0.72rem; font-weight: 500; padding: 4px 10px; border-radius: 20px; }
+
+.file-preview { display: none; }
+.preview-wrap { border-radius: 8px; overflow: hidden; background: #000; position: relative; }
+.preview-badge { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.65); color: #fff; font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; padding: 3px 9px; border-radius: 4px; }
+.preview-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.preview-filename { font-size: 0.8rem; color: var(--muted); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.btn-link { background: none; border: none; color: var(--teal); font-size: 0.8rem; font-weight: 500; cursor: pointer; font-family: 'Inter', sans-serif; text-decoration: underline; padding: 0; }
+
+.frame-status { margin-top: 10px; background: var(--navy-light); border-radius: 6px; padding: 10px 14px; font-size: 0.78rem; color: var(--navy-mid); display: none; }
+.frame-status.visible { display: block; }
+.frame-bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.frame-bar-fill { height: 100%; background: var(--teal); border-radius: 2px; transition: width 0.3s; }
+
+.focus-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.focus-chip { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: all 0.15s; font-size: 0.8rem; color: var(--muted); user-select: none; }
+.focus-chip:hover { border-color: var(--teal); color: var(--teal); background: var(--teal-light); }
+.focus-chip.on { border-color: var(--teal); background: var(--teal-light); color: var(--teal); font-weight: 500; }
+.focus-chip input { display: none; }
+.focus-dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; flex-shrink: 0; }
+.focus-chip.on .focus-dot { background: var(--teal); border-color: var(--teal); }
+
+.analyze-btn { width: 100%; padding: 14px; background: var(--navy); color: #fff; border: none; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; letter-spacing: -0.2px; }
+.analyze-btn:hover { background: var(--teal); }
+.analyze-btn:disabled { background: #b0bec5; cursor: not-allowed; }
+
+.error-box { display: none; background: #fdf2f2; border: 1px solid #f5c6c6; border-radius: 6px; padding: 12px 16px; color: var(--red); font-size: 0.82rem; line-height: 1.5; margin-top: 14px; }
+
+#loadingState { display: none; padding: 60px 24px; text-align: center; }
+.spinner { width: 44px; height: 44px; border: 3px solid var(--navy-light); border-top-color: var(--navy); border-radius: 50%; animation: spin 0.7s linear infinite; margin: 0 auto 20px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-title { font-family: 'Source Serif 4', serif; font-size: 1.3rem; font-weight: 600; color: var(--navy); margin-bottom: 6px; }
+.loading-sub { font-size: 0.82rem; color: var(--muted); margin-bottom: 28px; }
+.step-list { display: inline-flex; flex-direction: column; gap: 8px; text-align: left; }
+.step-item { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
+.step-item.active { color: var(--navy); font-weight: 500; }
+.step-item.done { color: var(--teal); }
+.step-icon { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 0.6rem; flex-shrink: 0; }
+.step-item.active .step-icon { border-color: var(--navy); background: var(--navy); color: #fff; }
+.step-item.done .step-icon { border-color: var(--teal); background: var(--teal); color: #fff; }
+
+#resultsSection { display: none; }
+.report-header { background: var(--navy); border-radius: 10px; padding: 24px 28px; margin-bottom: 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.report-title { font-family: 'Source Serif 4', serif; font-size: 1.4rem; font-weight: 600; color: #fff; margin-bottom: 2px; }
+.report-subtitle { font-size: 0.78rem; color: #8fa5c0; }
+.report-header-right { display: flex; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
+.btn-outline { padding: 8px 16px; border: 1px solid #ffffff33; background: transparent; color: #fff; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 0.78rem; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+.btn-outline:hover { background: rgba(255,255,255,0.1); }
+.btn-solid { padding: 8px 16px; border: none; background: var(--teal); color: #fff; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 0.78rem; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+.btn-solid:hover { background: #0a6357; }
+
+.score-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+.score-tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; box-shadow: var(--shadow); }
+.score-tile-value { font-family: 'Source Serif 4', serif; font-size: 1.8rem; font-weight: 600; line-height: 1; margin-bottom: 4px; }
+.score-tile-label { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.score-good { color: var(--green); }
+.score-warn { color: var(--amber); }
+.score-poor { color: var(--red); }
+
+.report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.report-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; box-shadow: var(--shadow); }
+.report-section.full { grid-column: 1 / -1; }
+.section-head { padding: 12px 18px; background: var(--navy); display: flex; align-items: center; gap: 8px; }
+.section-head h3 { font-size: 0.78rem; font-weight: 600; color: #fff; letter-spacing: 0.04em; text-transform: uppercase; }
+.section-head .sh-icon { font-size: 0.85rem; }
+.section-body { padding: 16px 18px; }
+
+.finding { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--bg); }
+.finding:last-child { border-bottom: none; padding-bottom: 0; }
+.finding-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+.dot-high { background: var(--red); }
+.dot-med { background: var(--amber); }
+.dot-low { background: var(--green); }
+.finding-title { font-size: 0.82rem; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
+.finding-desc { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
+
+.rec-item { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--bg); align-items: flex-start; }
+.rec-item:last-child { border-bottom: none; }
+.rec-num { width: 22px; height: 22px; border-radius: 4px; background: var(--navy); color: #fff; font-size: 0.68rem; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+.rec-text { font-size: 0.82rem; color: var(--ink); line-height: 1.55; }
+
+.narrative { font-size: 0.84rem; color: var(--ink); line-height: 1.7; }
+.narrative p { margin-bottom: 8px; }
+.narrative p:last-child { margin-bottom: 0; }
+
+.edu-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; background: var(--teal-light); border-radius: 6px; margin-bottom: 8px; }
+.edu-item:last-child { margin-bottom: 0; }
+.edu-icon { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+.edu-text { font-size: 0.82rem; color: var(--teal); font-weight: 500; line-height: 1.5; }
+
+.raw-report { font-size: 0.83rem; color: var(--ink); line-height: 1.75; white-space: pre-wrap; }
+
+@media print {
+  header, .report-header-right { display: none; }
+  #inputSection, #loadingState { display: none !important; }
+  #resultsSection { display: block !important; }
+}
+@media (max-width: 680px) {
+  header { padding: 0 16px; }
+  .container { padding: 20px 14px 60px; }
+  .two-col, .form-grid, .report-grid, .score-strip { grid-template-columns: 1fr; }
+  .focus-grid { grid-template-columns: 1fr 1fr; }
+  .report-section.full { grid-column: 1; }
+  .report-header { flex-direction: column; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-mark">🦴</div>
+    <div class="logo-text">Motion<span>Rx</span></div>
+  </div>
+  <div class="header-right">
+    <div class="header-badge">Clinical Prototype</div>
+    <div class="header-date" id="headerDate"></div>
+  </div>
+</header>
+
+<div class="container">
+
+  <div id="inputSection">
+    <div class="page-header">
+      <h1>New Motion Assessment</h1>
+      <p>Complete patient details, upload media, and select focus areas to generate a clinical AI report.</p>
+    </div>
+
+    <div class="two-col">
+      <!-- Left: Patient Info -->
+      <div class="card no-mb">
+        <div class="card-header">
+          <div class="card-header-icon">👤</div>
+          <div><h2>Patient Information</h2><p>Demographics and clinical context</p></div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Patient Name</label>
+            <input type="text" id="patientName" placeholder="Full name">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Age</label>
+            <input type="number" id="patientAge" placeholder="Years" min="1" max="120">
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Chief Complaint / Diagnosis</label>
+            <input type="text" id="diagnosis" placeholder="e.g. Right knee pain, post-ACL reconstruction">
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Movement Being Assessed <span class="req">*</span></label>
+            <select id="movementType">
+              <option value="">Select movement type...</option>
+              <optgroup label="Lower Extremity">
+                <option>Gait / Walking</option>
+                <option>Running</option>
+                <option>Squat (Double-Leg)</option>
+                <option>Single-Leg Squat</option>
+                <option>Lunge</option>
+                <option>Step Up / Step Down</option>
+                <option>Hip Hinge / Deadlift Pattern</option>
+              </optgroup>
+              <optgroup label="Upper Extremity">
+                <option>Overhead Press / Reach</option>
+                <option>Shoulder Flexion / Abduction</option>
+                <option>Pushing / Pulling Pattern</option>
+              </optgroup>
+              <optgroup label="Functional">
+                <option>Sit to Stand</option>
+                <option>Balance / Single-Leg Stance</option>
+                <option>Stairs</option>
+                <option>Other / General Posture</option>
+              </optgroup>
+            </select>
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Clinical Notes</label>
+            <textarea id="clinicalNotes" placeholder="Relevant history, surgical dates, prior findings, areas of concern..."></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Upload + Focus -->
+      <div class="card no-mb">
+        <div class="card-header">
+          <div class="card-header-icon">🎬</div>
+          <div><h2>Media Upload</h2><p>Video or still image of the movement</p></div>
+        </div>
+
+        <div id="uploadZone" class="upload-zone">
+          <input type="file" id="fileInput" accept="video/*,image/*">
+          <span class="upload-icon">📁</span>
+          <div class="upload-title">Drop file here or click to browse</div>
+          <div class="upload-sub">Accepts MP4, MOV, AVI · JPG, PNG</div>
+          <div class="upload-tip">💡 Side-view or frontal-view recordings work best</div>
+        </div>
+
+        <div class="file-preview" id="filePreview">
+          <div class="preview-wrap" id="previewWrap"></div>
+          <div class="preview-actions">
+            <span class="preview-filename" id="previewFilename"></span>
+            <button class="btn-link" onclick="resetUpload()">Remove</button>
+          </div>
+          <div class="frame-status" id="frameStatus">
+            <span id="frameStatusText">Processing video...</span>
+            <div class="frame-bar"><div class="frame-bar-fill" id="frameBarFill" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <div style="margin-top: 20px;">
+          <div class="card-header" style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+            <div class="card-header-icon">🎯</div>
+            <div><h2>Analysis Focus Areas</h2><p>Select all that apply</p></div>
+          </div>
+          <div class="focus-grid" id="focusGrid">
+            <label class="focus-chip"><input type="checkbox" value="posture and spinal alignment"><div class="focus-dot"></div> Posture & Spine</label>
+            <label class="focus-chip"><input type="checkbox" value="knee alignment and tracking"><div class="focus-dot"></div> Knee Alignment</label>
+            <label class="focus-chip"><input type="checkbox" value="hip symmetry and mobility"><div class="focus-dot"></div> Hip Symmetry</label>
+            <label class="focus-chip"><input type="checkbox" value="ankle and foot mechanics"><div class="focus-dot"></div> Ankle & Foot</label>
+            <label class="focus-chip"><input type="checkbox" value="shoulder girdle mechanics"><div class="focus-dot"></div> Shoulder Girdle</label>
+            <label class="focus-chip"><input type="checkbox" value="balance and weight distribution"><div class="focus-dot"></div> Balance & Load</label>
+            <label class="focus-chip"><input type="checkbox" value="compensation patterns"><div class="focus-dot"></div> Compensations</label>
+            <label class="focus-chip"><input type="checkbox" value="range of motion limitations"><div class="focus-dot"></div> ROM Limitations</label>
+            <label class="focus-chip"><input type="checkbox" value="pain-avoidance movement patterns"><div class="focus-dot"></div> Pain Avoidance</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="error-box" id="errorBox"></div>
+    <button class="analyze-btn" onclick="runAnalysis()">
+      <span>🔬</span> Generate Clinical Report
+    </button>
+  </div>
+
+  <!-- Loading -->
+  <div id="loadingState">
+    <div class="spinner"></div>
+    <div class="loading-title">Generating Assessment Report</div>
+    <div class="loading-sub">Claude AI is analyzing the movement and preparing clinical findings</div>
+    <div class="step-list">
+      <div class="step-item active" id="s1"><div class="step-icon">✓</div> Processing media input</div>
+      <div class="step-item" id="s2"><div class="step-icon">✓</div> Identifying body landmarks &amp; posture</div>
+      <div class="step-item" id="s3"><div class="step-icon">✓</div> Evaluating biomechanical patterns</div>
+      <div class="step-item" id="s4"><div class="step-icon">✓</div> Compiling clinical report</div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="resultsSection">
+    <div class="report-header">
+      <div>
+        <div class="report-title">Clinical Motion Assessment Report</div>
+        <div class="report-subtitle" id="reportSubtitle"></div>
+      </div>
+      <div class="report-header-right">
+        <button class="btn-outline" onclick="resetAll()">+ New Assessment</button>
+        <button class="btn-solid" onclick="window.print()">🖨 Print Report</button>
+      </div>
+    </div>
+    <div class="score-strip" id="scoreStrip"></div>
+    <div class="report-grid" id="reportGrid"></div>
+  </div>
+
+</div>
+
+<script>
+let uploadedFile = null;
+let fileType = null;
+let extractedFrames = [];
+
+document.getElementById('headerDate').textContent =
+  new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+
+const fileInput = document.getElementById('fileInput');
+fileInput.addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+
+const uploadZone = document.getElementById('uploadZone');
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault(); uploadZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+
+async function handleFile(file) {
+  uploadedFile = file;
+  fileType = file.type.startsWith('image/') ? 'image' : 'video';
+  extractedFrames = [];
+
+  uploadZone.style.display = 'none';
+  document.getElementById('filePreview').style.display = 'block';
+  document.getElementById('previewFilename').textContent = file.name;
+
+  const wrap = document.getElementById('previewWrap');
+  wrap.innerHTML = '';
+  const url = URL.createObjectURL(file);
+  const badge = document.createElement('div');
+  badge.className = 'preview-badge';
+
+  if (fileType === 'image') {
+    badge.textContent = 'IMAGE';
+    const img = document.createElement('img');
+    img.src = url;
+    img.style.cssText = 'width:100%;max-height:280px;object-fit:contain;display:block;';
+    wrap.appendChild(img);
+    wrap.appendChild(badge);
+    const reader = new FileReader();
+    reader.onload = () => { extractedFrames = [reader.result.split(',')[1]]; };
+    reader.readAsDataURL(file);
+  } else {
+    badge.textContent = 'VIDEO';
+    const vid = document.createElement('video');
+    vid.src = url; vid.controls = true; vid.muted = true; vid.playsInline = true;
+    vid.style.cssText = 'width:100%;max-height:280px;object-fit:contain;display:block;';
+    wrap.appendChild(vid);
+    wrap.appendChild(badge);
+    startFrameExtraction(file, vid);
+  }
+}
+
+function startFrameExtraction(file, vid) {
+  const statusEl = document.getElementById('frameStatus');
+  const statusText = document.getElementById('frameStatusText');
+  const barFill = document.getElementById('frameBarFill');
+  statusEl.classList.add('visible');
+  statusText.textContent = 'Loading video...';
+  barFill.style.width = '5%';
+
+  let extractionStarted = false;
+
+  async function doExtraction() {
+    if (extractionStarted) return;
+    extractionStarted = true;
+    const dur = vid.duration;
+    if (!dur || !isFinite(dur) || dur === 0) {
+      statusText.textContent = 'Trying playback capture...';
+      await captureViaPlay(vid, barFill, statusText);
+      return;
+    }
+    const count = Math.min(5, Math.max(2, Math.floor(dur)));
+    const times = Array.from({ length: count }, (_, i) =>
+      i === 0 ? 0.1 : (i / (count - 1)) * (dur * 0.92)
+    );
+    statusText.textContent = `Extracting ${count} frames...`;
+    const frames = [];
+    for (let i = 0; i < times.length; i++) {
+      const f = await seekCapture(vid, times[i]);
+      if (f) frames.push(f);
+      barFill.style.width = `${Math.round(((i + 1) / times.length) * 90)}%`;
+    }
+    if (frames.length > 0) {
+      extractedFrames = frames;
+      barFill.style.width = '100%';
+      statusText.textContent = `✓ ${frames.length} frame${frames.length > 1 ? 's' : ''} ready for analysis`;
+    } else {
+      statusText.textContent = 'Seek failed — trying playback capture...';
+      await captureViaPlay(vid, barFill, statusText);
+    }
+  }
+
+  // Fire on whichever event the browser supports first
+  vid.addEventListener('loadedmetadata', doExtraction);
+  vid.addEventListener('canplay', doExtraction);
+  vid.addEventListener('canplaythrough', doExtraction);
+
+  // Hard fallback: 8s after upload, force a playback capture attempt
+  setTimeout(async () => {
+    if (extractedFrames.length === 0 && !extractionStarted) {
+      extractionStarted = true;
+      statusText.textContent = 'Timeout — forcing playback capture...';
+      await captureViaPlay(vid, barFill, statusText);
+    }
+  }, 8000);
+
+  vid.addEventListener('error', () => {
+    statusText.textContent = '⚠️ This video format may not be supported in your browser. Upload a JPG/PNG screenshot instead.';
+    barFill.style.width = '0%';
+  });
+}
+
+function seekCapture(vid, t) {
+  return new Promise(resolve => {
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 5000);
+    const onSeeked = () => {
+      if (done) return; done = true;
+      clearTimeout(timer);
+      vid.removeEventListener('seeked', onSeeked);
+      resolve(captureFromVideo(vid));
+    };
+    vid.addEventListener('seeked', onSeeked);
+    try { vid.currentTime = t; } catch(e) { resolve(null); }
+  });
+}
+
+async function captureViaPlay(vid, barFill, statusText) {
+  vid.muted = true;
+  try {
+    await vid.play();
+    await new Promise(r => setTimeout(r, 600));
+    vid.pause();
+    const f = captureFromVideo(vid);
+    if (f) {
+      extractedFrames = [f];
+      barFill.style.width = '100%';
+      statusText.textContent = '✓ Frame captured — ready for analysis';
+    } else {
+      statusText.textContent = '⚠️ Could not extract frame. Upload a JPG/PNG screenshot for best results.';
+    }
+  } catch(e) {
+    statusText.textContent = '⚠️ Video capture unavailable in this browser. Please upload a JPG/PNG image instead.';
+  }
+}
+
+function captureFromVideo(vid) {
+  try {
+    const w = vid.videoWidth || 640, h = vid.videoHeight || 480;
+    if (w === 0 || h === 0) return null;
+    const scale = Math.min(1, 800 / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(w * scale); canvas.height = Math.round(h * scale);
+    canvas.getContext('2d').drawImage(vid, 0, 0, canvas.width, canvas.height);
+    const b64 = canvas.toDataURL('image/jpeg', 0.82).split(',')[1];
+    return (b64 && b64.length > 300) ? b64 : null;
+  } catch(e) { return null; }
+}
+
+function resetUpload() {
+  uploadedFile = null; fileType = null; extractedFrames = [];
+  fileInput.value = '';
+  document.getElementById('uploadZone').style.display = 'block';
+  document.getElementById('filePreview').style.display = 'none';
+  document.getElementById('frameStatus').classList.remove('visible');
+}
+
+function toggleFocus(label) { label.classList.toggle('on'); }
+
+// Focus chip click handling - use event delegation to avoid double-fire from label+input
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.focus-chip').forEach(chip => {
+    chip.addEventListener('click', function(e) {
+      e.preventDefault();
+      this.classList.toggle('on');
+      const cb = this.querySelector('input[type=checkbox]');
+      if (cb) cb.checked = this.classList.contains('on');
+    });
+  });
+});
+
+function resetAll() {
+  document.getElementById('resultsSection').style.display = 'none';
+  document.getElementById('inputSection').style.display = 'block';
+  resetUpload();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function animateSteps() {
+  const ids = ['s1','s2','s3','s4']; let i = 0;
+  const iv = setInterval(() => {
+    if (i > 0) { document.getElementById(ids[i-1]).classList.remove('active'); document.getElementById(ids[i-1]).classList.add('done'); }
+    if (i < ids.length) { document.getElementById(ids[i]).classList.add('active'); i++; }
+    else clearInterval(iv);
+  }, 1600);
+}
+
+async function runAnalysis() {
+  const movement = document.getElementById('movementType').value;
+  document.getElementById('errorBox').style.display = 'none';
+
+  if (!uploadedFile) { showErr('Please upload a video or image before running analysis.'); return; }
+  if (!movement) { showErr('Please select the movement type being assessed.'); return; }
+  if (fileType === 'video' && extractedFrames.length === 0) {
+    showErr('Video frames are still processing. Please wait a moment, then try again — or upload a JPG/PNG screenshot of the movement for immediate analysis.');
+    return;
+  }
+
+  const patientName = document.getElementById('patientName').value.trim() || 'Patient';
+  const age = document.getElementById('patientAge').value;
+  const diagnosis = document.getElementById('diagnosis').value.trim();
+  const notes = document.getElementById('clinicalNotes').value.trim();
+  const focusAreas = [...document.querySelectorAll('#focusGrid .focus-chip.on input')].map(i => i.value);
+  const focusText = focusAreas.length ? focusAreas.join(', ') : 'general movement quality';
+  const frameCount = extractedFrames.length;
+
+  document.getElementById('inputSection').style.display = 'none';
+  document.getElementById('loadingState').style.display = 'block';
+  animateSteps();
+
+  const prompt = `You are an expert physical therapist and clinical movement analyst reviewing ${fileType === 'image' ? 'a clinical image' : `${frameCount} frame(s) extracted from a patient movement video`} for a formal PT assessment.
+
+PATIENT: ${patientName}${age ? `, Age ${age}` : ''}
+DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
+MOVEMENT ASSESSED: ${movement}
+CLINICAL FOCUS: ${focusText}
+${notes ? `CLINICAL NOTES: ${notes}` : ''}
+${frameCount > 1 ? `NOTE: You are viewing ${frameCount} frames sampled from across the full movement clip — beginning, middle, and end of the movement cycle.` : ''}
+
+Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
+{
+  "score": <integer 1-10>,
+  "score_summary": "<one-sentence overall assessment>",
+  "findings": [
+    { "priority": "high|medium|positive", "title": "<short title>", "detail": "<specific clinical observation>" }
+  ],
+  "biomechanical_analysis": "<2-3 paragraph clinical narrative about mechanics, joint angles, weight distribution, symmetry>",
+  "clinical_impressions": "<1-2 paragraph narrative about clinical significance, risk factors, functional implications>",
+  "recommendations": ["<specific actionable PT recommendation>"],
+  "patient_education": ["<simple patient-facing explanation>"]
+}
+Include 3-5 findings, 4-5 recommendations, and 2-3 patient education points. Be specific and clinically grounded.`;
+
+  try {
+    const framesToSend = extractedFrames.slice(0, 3);
+    const content = [
+      ...framesToSend.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } })),
+      { type: 'text', text: prompt }
+    ];
+
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 2000, messages: [{ role: 'user', content }] })
+    });
+
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error?.message || `API error ${res.status}`);
+    const raw = data.content.map(b => b.text || '').join('');
+
+    let report = null;
+    try {
+      const clean = raw.replace(/```json|```/g, '').trim();
+      report = JSON.parse(clean);
+    } catch(e) {
+      // Salvage partial/malformed JSON by extracting fields with regex
+      try {
+        const r = {};
+        const sm = raw.match(/"score"\s*:\s*(\d+)/); if (sm) r.score = parseInt(sm[1]);
+        const sum = raw.match(/"score_summary"\s*:\s*"([^"]+)"/); if (sum) r.score_summary = sum[1];
+        const bioM = raw.match(/"biomechanical_analysis"\s*:\s*"((?:[^"\\]|\\[\s\S])*?)"/);
+        if (bioM) r.biomechanical_analysis = bioM[1].replace(/\\n/g,'\n');
+        const clinM = raw.match(/"clinical_impressions"\s*:\s*"((?:[^"\\]|\\[\s\S])*?)"/);
+        if (clinM) r.clinical_impressions = clinM[1].replace(/\\n/g,'\n');
+        // Extract individual finding objects
+        const findObjs = [];
+        const fiter = raw.matchAll(/\{[^{}]*?"priority"\s*:\s*"([^"]+)"[^{}]*?"title"\s*:\s*"([^"]+)"[^{}]*?"detail"\s*:\s*"([^"]+)"[^{}]*?\}/g);
+        for (const m of fiter) findObjs.push({ priority: m[1], title: m[2], detail: m[3] });
+        if (findObjs.length) r.findings = findObjs;
+        // Extract string arrays
+        const recsBlock = raw.match(/"recommendations"\s*:\s*\[([\s\S]*?)\]/)?.[1] || '';
+        r.recommendations = [...recsBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
+        const eduBlock = raw.match(/"patient_education"\s*:\s*\[([\s\S]*?)\]/)?.[1] || '';
+        r.patient_education = [...eduBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
+        if (r.score || (r.findings && r.findings.length) || r.recommendations?.length) report = r;
+      } catch(e2) { report = null; }
+    }
+
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('resultsSection').style.display = 'block';
+
+    const now = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    document.getElementById('reportSubtitle').textContent =
+      `${patientName}${age ? ` · Age ${age}` : ''} · ${movement} · ${now}${frameCount > 1 ? ` · ${frameCount} frames analyzed` : ''}`;
+
+    report ? renderReport(report, movement) : renderRaw(raw, movement);
+    document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
+
+  } catch(err) { showErr('Analysis failed: ' + err.message); }
+}
+
+function renderReport(r, movement) {
+  const score = r.score || null;
+  const sc = !score ? '' : score >= 7 ? 'score-good' : score >= 5 ? 'score-warn' : 'score-poor';
+  const highCount = (r.findings || []).filter(f => f.priority === 'high').length;
+
+  document.getElementById('scoreStrip').innerHTML = `
+    <div class="score-tile">
+      <div class="score-tile-value ${sc}">${score !== null ? score + '/10' : '—'}</div>
+      <div class="score-tile-label">Movement Quality</div>
+    </div>
+    <div class="score-tile">
+      <div class="score-tile-value" style="font-size:0.88rem;color:var(--navy);padding-top:6px;line-height:1.3;">${movement}</div>
+      <div class="score-tile-label">Movement Assessed</div>
+    </div>
+    <div class="score-tile">
+      <div class="score-tile-value ${highCount > 0 ? 'score-poor' : 'score-good'}">${highCount}</div>
+      <div class="score-tile-label">High Priority Findings</div>
+    </div>
+    <div class="score-tile">
+      <div class="score-tile-value" style="font-size:0.75rem;color:var(--muted);padding-top:4px;line-height:1.4;">${r.score_summary || '—'}</div>
+      <div class="score-tile-label">Summary</div>
+    </div>`;
+
+  const findings = (r.findings || []).map(f => {
+    const dc = f.priority === 'high' ? 'dot-high' : f.priority === 'positive' ? 'dot-low' : 'dot-med';
+    return `<div class="finding"><div class="finding-dot ${dc}"></div><div><div class="finding-title">${esc(f.title)}</div><div class="finding-desc">${esc(f.detail)}</div></div></div>`;
+  }).join('') || '<p class="finding-desc">No findings returned.</p>';
+
+  const recs = (r.recommendations || []).map((rec, i) =>
+    `<div class="rec-item"><div class="rec-num">${i+1}</div><div class="rec-text">${esc(rec)}</div></div>`
+  ).join('') || '<p class="finding-desc">No recommendations returned.</p>';
+
+  const edu = (r.patient_education || []).map(pt =>
+    `<div class="edu-item"><div class="edu-icon">💬</div><div class="edu-text">${esc(pt)}</div></div>`
+  ).join('') || '<p class="finding-desc">No education points returned.</p>';
+
+  document.getElementById('reportGrid').innerHTML = `
+    <div class="report-section">
+      <div class="section-head"><span class="sh-icon">🔍</span><h3>Key Findings</h3></div>
+      <div class="section-body">${findings}</div>
+    </div>
+    <div class="report-section">
+      <div class="section-head"><span class="sh-icon">📋</span><h3>Recommendations</h3></div>
+      <div class="section-body">${recs}</div>
+    </div>
+    <div class="report-section full">
+      <div class="section-head"><span class="sh-icon">🦿</span><h3>Biomechanical Analysis</h3></div>
+      <div class="section-body"><div class="narrative">${narrativeHtml(r.biomechanical_analysis)}</div></div>
+    </div>
+    <div class="report-section">
+      <div class="section-head"><span class="sh-icon">🏥</span><h3>Clinical Impressions</h3></div>
+      <div class="section-body"><div class="narrative">${narrativeHtml(r.clinical_impressions)}</div></div>
+    </div>
+    <div class="report-section">
+      <div class="section-head"><span class="sh-icon">🗣</span><h3>Patient Education</h3></div>
+      <div class="section-body">${edu}</div>
+    </div>`;
+}
+
+function renderRaw(text, movement) {
+  document.getElementById('scoreStrip').innerHTML = `<div class="score-tile" style="grid-column:1/-1;"><div class="score-tile-value" style="font-size:0.9rem;color:var(--muted);">${movement} · Analysis complete</div></div>`;
+  document.getElementById('reportGrid').innerHTML = `<div class="report-section full"><div class="section-head"><span class="sh-icon">📋</span><h3>Clinical Report</h3></div><div class="section-body"><div class="raw-report">${esc(text)}</div></div></div>`;
+}
+
+function narrativeHtml(text) {
+  if (!text) return '<p>Not available.</p>';
+  return text.split('\n').filter(l => l.trim()).map(l => `<p>${esc(l)}</p>`).join('');
+}
+
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showErr(msg) {
+  document.getElementById('loadingState').style.display = 'none';
+  document.getElementById('inputSection').style.display = 'block';
+  const b = document.getElementById('errorBox');
+  b.innerHTML = `<strong>⚠️ </strong>${msg}`;
+  b.style.display = 'block';
+  b.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+</script>
+</body>
+</html>
