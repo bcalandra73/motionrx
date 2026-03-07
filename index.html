@@ -4,179 +4,158 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MotionRx — Clinical Motion Analysis</title>
-<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,300;0,400;0,600;1,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
 <style>
 :root {
-  --navy: #0f2744;
-  --navy-mid: #1a3a5c;
-  --navy-light: #e8f0f8;
-  --teal: #0e7c6a;
-  --teal-light: #e6f4f1;
-  --bg: #f4f6f9;
-  --surface: #ffffff;
-  --border: #d5dce8;
-  --ink: #1a2332;
-  --muted: #6b7a8d;
-  --red: #c0392b;
-  --amber: #d97706;
-  --green: #0e7c6a;
-  --shadow: 0 1px 4px rgba(15,39,68,0.08), 0 4px 16px rgba(15,39,68,0.06);
+  --navy:#0f2744; --navy-mid:#1a3a5c; --navy-light:#e8f0f8;
+  --teal:#0e7c6a; --teal-light:#e6f4f1;
+  --bg:#f4f6f9; --surface:#fff; --border:#d5dce8;
+  --ink:#1a2332; --muted:#6b7a8d;
+  --red:#c0392b; --amber:#d97706; --green:#0e7c6a;
+  --shadow:0 1px 4px rgba(15,39,68,.08),0 4px 16px rgba(15,39,68,.06);
 }
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--ink); min-height: 100vh; font-size: 14px; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;font-size:14px}
+header{background:var(--navy);padding:0 40px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:34px;height:34px;background:var(--teal);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1rem}
+.logo-text{color:#fff;font-weight:600;font-size:1rem;letter-spacing:-.3px}
+.logo-text span{color:#7ec8c0}
+.header-right{display:flex;align-items:center;gap:16px}
+.header-badge{font-size:.68rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#7ec8c0;border:1px solid #7ec8c033;padding:3px 10px;border-radius:4px}
+.header-date{font-size:.75rem;color:#8fa5c0}
+.container{max-width:1040px;margin:0 auto;padding:32px 24px 80px}
+.page-header{margin-bottom:28px}
+.page-header h1{font-family:'Source Serif 4',serif;font-size:1.75rem;font-weight:600;color:var(--navy);margin-bottom:4px}
+.page-header p{color:var(--muted);font-size:.88rem}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:24px;margin-bottom:20px;box-shadow:var(--shadow)}
+.card.no-mb{margin-bottom:0}
+.card-header{display:flex;align-items:center;gap:10px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.card-header-icon{width:30px;height:30px;border-radius:6px;background:var(--navy-light);display:flex;align-items:center;justify-content:center;font-size:.9rem}
+.card-header h2{font-size:.88rem;font-weight:600;color:var(--navy)}
+.card-header p{font-size:.75rem;color:var(--muted);margin-top:1px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-group.full{grid-column:1/-1}
+.form-label{font-size:.76rem;font-weight:600;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.form-label .req{color:var(--red);margin-left:2px}
+input[type=text],input[type=number],input[type=password],select,textarea{font-family:'Inter',sans-serif;font-size:.88rem;padding:9px 12px;border:1px solid var(--border);border-radius:6px;background:#fff;color:var(--ink);transition:border-color .15s,box-shadow .15s;outline:none;width:100%}
+input:focus,select:focus,textarea:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(14,124,106,.1)}
+textarea{resize:vertical;min-height:72px;line-height:1.5}
+select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7a8d' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+.upload-zone{border:2px dashed var(--border);border-radius:8px;padding:36px 20px;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg);position:relative}
+.upload-zone:hover,.upload-zone.drag-over{border-color:var(--teal);background:var(--teal-light)}
+.upload-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.upload-icon{font-size:2rem;margin-bottom:10px;display:block}
+.upload-title{font-size:.9rem;font-weight:600;color:var(--navy);margin-bottom:4px}
+.upload-sub{font-size:.78rem;color:var(--muted);line-height:1.5}
+.upload-tip{margin-top:10px;display:inline-block;background:var(--navy-light);color:var(--navy-mid);font-size:.72rem;font-weight:500;padding:4px 10px;border-radius:20px}
+.file-preview{display:none}
+.preview-wrap{border-radius:8px;overflow:hidden;background:#000;position:relative}
+.preview-badge{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.65);color:#fff;font-size:.66rem;font-weight:600;letter-spacing:.08em;padding:3px 9px;border-radius:4px}
+.preview-actions{display:flex;align-items:center;gap:12px;margin-top:10px}
+.preview-filename{font-size:.8rem;color:var(--muted);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btn-link{background:none;border:none;color:var(--teal);font-size:.8rem;font-weight:500;cursor:pointer;font-family:'Inter',sans-serif;text-decoration:underline;padding:0}
+.frame-status{margin-top:10px;background:var(--navy-light);border-radius:6px;padding:10px 14px;font-size:.78rem;color:var(--navy-mid);display:none}
+.frame-status.visible{display:block}
+.frame-bar{height:4px;background:var(--border);border-radius:2px;margin-top:6px;overflow:hidden}
+.frame-bar-fill{height:100%;background:var(--teal);border-radius:2px;transition:width .3s}
+.focus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.focus-chip{display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;transition:all .15s;font-size:.8rem;color:var(--muted);user-select:none}
+.focus-chip:hover{border-color:var(--teal);color:var(--teal);background:var(--teal-light)}
+.focus-chip.on{border-color:var(--teal);background:var(--teal-light);color:var(--teal);font-weight:500}
+.focus-chip input{display:none}
+.focus-dot{width:8px;height:8px;border-radius:50%;border:1.5px solid currentColor;flex-shrink:0}
+.focus-chip.on .focus-dot{background:var(--teal);border-color:var(--teal)}
+.analyze-btn{width:100%;padding:14px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-family:'Inter',sans-serif;font-size:.95rem;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px;letter-spacing:-.2px}
+.analyze-btn:hover{background:var(--teal)}
+.analyze-btn:disabled{background:#b0bec5;cursor:not-allowed}
+.error-box{display:none;background:#fdf2f2;border:1px solid #f5c6c6;border-radius:6px;padding:12px 16px;color:var(--red);font-size:.82rem;line-height:1.5;margin-top:14px}
+#loadingState{display:none;padding:60px 24px;text-align:center}
+.spinner{width:44px;height:44px;border:3px solid var(--navy-light);border-top-color:var(--navy);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 20px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading-title{font-family:'Source Serif 4',serif;font-size:1.3rem;font-weight:600;color:var(--navy);margin-bottom:6px}
+.loading-sub{font-size:.82rem;color:var(--muted);margin-bottom:28px}
+.step-list{display:inline-flex;flex-direction:column;gap:8px;text-align:left}
+.step-item{display:flex;align-items:center;gap:10px;font-size:.8rem;color:var(--muted)}
+.step-item.active{color:var(--navy);font-weight:500}
+.step-item.done{color:var(--teal)}
+.step-icon{width:18px;height:18px;border-radius:50%;border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:.6rem;flex-shrink:0}
+.step-item.active .step-icon{border-color:var(--navy);background:var(--navy);color:#fff}
+.step-item.done .step-icon{border-color:var(--teal);background:var(--teal);color:#fff}
+#resultsSection{display:none}
+.report-header{background:var(--navy);border-radius:10px;padding:24px 28px;margin-bottom:20px;display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+.report-title{font-family:'Source Serif 4',serif;font-size:1.4rem;font-weight:600;color:#fff;margin-bottom:2px}
+.report-subtitle{font-size:.78rem;color:#8fa5c0}
+.report-header-right{display:flex;gap:10px;flex-shrink:0;flex-wrap:wrap}
+.btn-outline{padding:8px 16px;border:1px solid #ffffff33;background:transparent;color:#fff;border-radius:6px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:500;cursor:pointer;transition:all .15s}
+.btn-outline:hover{background:rgba(255,255,255,.1)}
+.btn-solid{padding:8px 16px;border:none;background:var(--teal);color:#fff;border-radius:6px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:600;cursor:pointer;transition:all .15s}
+.btn-solid:hover{background:#0a6357}
+.score-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
+.score-tile{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;box-shadow:var(--shadow)}
+.score-tile-value{font-family:'Source Serif 4',serif;font-size:1.8rem;font-weight:600;line-height:1;margin-bottom:4px}
+.score-tile-label{font-size:.7rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.score-good{color:var(--green)}.score-warn{color:var(--amber)}.score-poor{color:var(--red)}
+.report-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.report-section{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+.report-section.full{grid-column:1/-1}
+.section-head{padding:12px 18px;background:var(--navy);display:flex;align-items:center;gap:8px}
+.section-head h3{font-size:.78rem;font-weight:600;color:#fff;letter-spacing:.04em;text-transform:uppercase}
+.section-head .sh-icon{font-size:.85rem}
+.section-body{padding:16px 18px}
+.finding{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--bg)}
+.finding:last-child{border-bottom:none;padding-bottom:0}
+.finding-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.dot-high{background:var(--red)}.dot-med{background:var(--amber)}.dot-low{background:var(--green)}
+.finding-title{font-size:.82rem;font-weight:600;color:var(--ink);margin-bottom:2px}
+.finding-desc{font-size:.78rem;color:var(--muted);line-height:1.5}
+.rec-item{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--bg);align-items:flex-start}
+.rec-item:last-child{border-bottom:none}
+.rec-num{width:22px;height:22px;border-radius:4px;background:var(--navy);color:#fff;font-size:.68rem;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.rec-text{font-size:.82rem;color:var(--ink);line-height:1.55}
+.narrative{font-size:.84rem;color:var(--ink);line-height:1.7}
+.narrative p{margin-bottom:8px}
+.narrative p:last-child{margin-bottom:0}
+.edu-item{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;background:var(--teal-light);border-radius:6px;margin-bottom:8px}
+.edu-item:last-child{margin-bottom:0}
+.edu-icon{font-size:1rem;flex-shrink:0;margin-top:1px}
+.edu-text{font-size:.82rem;color:var(--teal);font-weight:500;line-height:1.5}
+.raw-report{font-size:.83rem;color:var(--ink);line-height:1.75;white-space:pre-wrap}
 
-header {
-  background: var(--navy); padding: 0 40px; height: 60px;
-  display: flex; align-items: center; justify-content: space-between;
-  position: sticky; top: 0; z-index: 100;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-}
-.logo { display: flex; align-items: center; gap: 12px; }
-.logo-mark { width: 34px; height: 34px; background: var(--teal); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1rem; }
-.logo-text { color: #fff; font-weight: 600; font-size: 1rem; letter-spacing: -0.3px; }
-.logo-text span { color: #7ec8c0; }
-.header-right { display: flex; align-items: center; gap: 16px; }
-.header-badge { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: #7ec8c0; border: 1px solid #7ec8c033; padding: 3px 10px; border-radius: 4px; }
-.header-date { font-size: 0.75rem; color: #8fa5c0; }
+/* MediaPipe frames gallery */
+.frames-gallery{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.frame-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+.frame-card-img{position:relative;background:#000}
+.frame-card-img canvas{width:100%;height:auto;display:block}
+.frame-label{padding:6px 10px;font-size:.7rem;font-weight:600;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;border-top:1px solid var(--border)}
 
-.container { max-width: 1040px; margin: 0 auto; padding: 32px 24px 80px; }
-.page-header { margin-bottom: 28px; }
-.page-header h1 { font-family: 'Source Serif 4', serif; font-size: 1.75rem; font-weight: 600; color: var(--navy); margin-bottom: 4px; }
-.page-header p { color: var(--muted); font-size: 0.88rem; }
+/* Joint angles table */
+.angles-table{width:100%;border-collapse:collapse;font-size:.78rem}
+.angles-table th{background:var(--navy-light);color:var(--navy);font-weight:600;padding:7px 10px;text-align:left;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
+.angles-table td{padding:6px 10px;border-bottom:1px solid var(--bg);color:var(--ink)}
+.angles-table tr:last-child td{border-bottom:none}
+.angles-table .val{font-weight:600;font-family:'Source Serif 4',serif;font-size:.9rem}
+.angles-table .val.flag-high{color:var(--red)}
+.angles-table .val.flag-med{color:var(--amber)}
+.angles-table .val.flag-ok{color:var(--green)}
+.angles-table .ref{color:var(--muted);font-size:.72rem}
 
-.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+/* MediaPipe status badge */
+.mp-badge{display:inline-flex;align-items:center;gap:6px;font-size:.72rem;font-weight:600;padding:3px 10px;border-radius:20px;margin-left:8px}
+.mp-badge.ready{background:#e6f4f1;color:var(--teal)}
+.mp-badge.loading{background:#fff8e0;color:#92600a}
+.mp-badge.error{background:#fdf2f2;color:var(--red)}
 
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
-.card.no-mb { margin-bottom: 0; }
-.card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
-.card-header-icon { width: 30px; height: 30px; border-radius: 6px; background: var(--navy-light); display: flex; align-items: center; justify-content: center; font-size: 0.9rem; }
-.card-header h2 { font-size: 0.88rem; font-weight: 600; color: var(--navy); }
-.card-header p { font-size: 0.75rem; color: var(--muted); margin-top: 1px; }
-
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.form-group { display: flex; flex-direction: column; gap: 5px; }
-.form-group.full { grid-column: 1 / -1; }
-.form-label { font-size: 0.76rem; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
-.form-label .req { color: var(--red); margin-left: 2px; }
-input[type=text], input[type=number], select, textarea {
-  font-family: 'Inter', sans-serif; font-size: 0.88rem; padding: 9px 12px;
-  border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--ink);
-  transition: border-color 0.15s, box-shadow 0.15s; outline: none; width: 100%;
-}
-input:focus, select:focus, textarea:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(14,124,106,0.1); }
-textarea { resize: vertical; min-height: 72px; line-height: 1.5; }
-select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7a8d' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
-
-.upload-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 36px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--bg); position: relative; }
-.upload-zone:hover, .upload-zone.drag-over { border-color: var(--teal); background: var(--teal-light); }
-.upload-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
-.upload-icon { font-size: 2rem; margin-bottom: 10px; display: block; }
-.upload-title { font-size: 0.9rem; font-weight: 600; color: var(--navy); margin-bottom: 4px; }
-.upload-sub { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
-.upload-tip { margin-top: 10px; display: inline-block; background: var(--navy-light); color: var(--navy-mid); font-size: 0.72rem; font-weight: 500; padding: 4px 10px; border-radius: 20px; }
-
-.file-preview { display: none; }
-.preview-wrap { border-radius: 8px; overflow: hidden; background: #000; position: relative; }
-.preview-badge { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.65); color: #fff; font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; padding: 3px 9px; border-radius: 4px; }
-.preview-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
-.preview-filename { font-size: 0.8rem; color: var(--muted); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.btn-link { background: none; border: none; color: var(--teal); font-size: 0.8rem; font-weight: 500; cursor: pointer; font-family: 'Inter', sans-serif; text-decoration: underline; padding: 0; }
-
-.frame-status { margin-top: 10px; background: var(--navy-light); border-radius: 6px; padding: 10px 14px; font-size: 0.78rem; color: var(--navy-mid); display: none; }
-.frame-status.visible { display: block; }
-.frame-bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 6px; overflow: hidden; }
-.frame-bar-fill { height: 100%; background: var(--teal); border-radius: 2px; transition: width 0.3s; }
-
-.focus-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.focus-chip { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: all 0.15s; font-size: 0.8rem; color: var(--muted); user-select: none; }
-.focus-chip:hover { border-color: var(--teal); color: var(--teal); background: var(--teal-light); }
-.focus-chip.on { border-color: var(--teal); background: var(--teal-light); color: var(--teal); font-weight: 500; }
-.focus-chip input { display: none; }
-.focus-dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; flex-shrink: 0; }
-.focus-chip.on .focus-dot { background: var(--teal); border-color: var(--teal); }
-
-.analyze-btn { width: 100%; padding: 14px; background: var(--navy); color: #fff; border: none; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; letter-spacing: -0.2px; }
-.analyze-btn:hover { background: var(--teal); }
-.analyze-btn:disabled { background: #b0bec5; cursor: not-allowed; }
-
-.error-box { display: none; background: #fdf2f2; border: 1px solid #f5c6c6; border-radius: 6px; padding: 12px 16px; color: var(--red); font-size: 0.82rem; line-height: 1.5; margin-top: 14px; }
-
-#loadingState { display: none; padding: 60px 24px; text-align: center; }
-.spinner { width: 44px; height: 44px; border: 3px solid var(--navy-light); border-top-color: var(--navy); border-radius: 50%; animation: spin 0.7s linear infinite; margin: 0 auto 20px; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.loading-title { font-family: 'Source Serif 4', serif; font-size: 1.3rem; font-weight: 600; color: var(--navy); margin-bottom: 6px; }
-.loading-sub { font-size: 0.82rem; color: var(--muted); margin-bottom: 28px; }
-.step-list { display: inline-flex; flex-direction: column; gap: 8px; text-align: left; }
-.step-item { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
-.step-item.active { color: var(--navy); font-weight: 500; }
-.step-item.done { color: var(--teal); }
-.step-icon { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 0.6rem; flex-shrink: 0; }
-.step-item.active .step-icon { border-color: var(--navy); background: var(--navy); color: #fff; }
-.step-item.done .step-icon { border-color: var(--teal); background: var(--teal); color: #fff; }
-
-#resultsSection { display: none; }
-.report-header { background: var(--navy); border-radius: 10px; padding: 24px 28px; margin-bottom: 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.report-title { font-family: 'Source Serif 4', serif; font-size: 1.4rem; font-weight: 600; color: #fff; margin-bottom: 2px; }
-.report-subtitle { font-size: 0.78rem; color: #8fa5c0; }
-.report-header-right { display: flex; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
-.btn-outline { padding: 8px 16px; border: 1px solid #ffffff33; background: transparent; color: #fff; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 0.78rem; font-weight: 500; cursor: pointer; transition: all 0.15s; }
-.btn-outline:hover { background: rgba(255,255,255,0.1); }
-.btn-solid { padding: 8px 16px; border: none; background: var(--teal); color: #fff; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 0.78rem; font-weight: 600; cursor: pointer; transition: all 0.15s; }
-.btn-solid:hover { background: #0a6357; }
-
-.score-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
-.score-tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; box-shadow: var(--shadow); }
-.score-tile-value { font-family: 'Source Serif 4', serif; font-size: 1.8rem; font-weight: 600; line-height: 1; margin-bottom: 4px; }
-.score-tile-label { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
-.score-good { color: var(--green); }
-.score-warn { color: var(--amber); }
-.score-poor { color: var(--red); }
-
-.report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
-.report-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; box-shadow: var(--shadow); }
-.report-section.full { grid-column: 1 / -1; }
-.section-head { padding: 12px 18px; background: var(--navy); display: flex; align-items: center; gap: 8px; }
-.section-head h3 { font-size: 0.78rem; font-weight: 600; color: #fff; letter-spacing: 0.04em; text-transform: uppercase; }
-.section-head .sh-icon { font-size: 0.85rem; }
-.section-body { padding: 16px 18px; }
-
-.finding { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--bg); }
-.finding:last-child { border-bottom: none; padding-bottom: 0; }
-.finding-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
-.dot-high { background: var(--red); }
-.dot-med { background: var(--amber); }
-.dot-low { background: var(--green); }
-.finding-title { font-size: 0.82rem; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
-.finding-desc { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
-
-.rec-item { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--bg); align-items: flex-start; }
-.rec-item:last-child { border-bottom: none; }
-.rec-num { width: 22px; height: 22px; border-radius: 4px; background: var(--navy); color: #fff; font-size: 0.68rem; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
-.rec-text { font-size: 0.82rem; color: var(--ink); line-height: 1.55; }
-
-.narrative { font-size: 0.84rem; color: var(--ink); line-height: 1.7; }
-.narrative p { margin-bottom: 8px; }
-.narrative p:last-child { margin-bottom: 0; }
-
-.edu-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; background: var(--teal-light); border-radius: 6px; margin-bottom: 8px; }
-.edu-item:last-child { margin-bottom: 0; }
-.edu-icon { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
-.edu-text { font-size: 0.82rem; color: var(--teal); font-weight: 500; line-height: 1.5; }
-
-.raw-report { font-size: 0.83rem; color: var(--ink); line-height: 1.75; white-space: pre-wrap; }
-
-@media print {
-  header, .report-header-right { display: none; }
-  #inputSection, #loadingState { display: none !important; }
-  #resultsSection { display: block !important; }
-}
-@media (max-width: 680px) {
-  header { padding: 0 16px; }
-  .container { padding: 20px 14px 60px; }
-  .two-col, .form-grid, .report-grid, .score-strip { grid-template-columns: 1fr; }
-  .focus-grid { grid-template-columns: 1fr 1fr; }
-  .report-section.full { grid-column: 1; }
-  .report-header { flex-direction: column; }
+@media print{header,.report-header-right{display:none}#inputSection,#loadingState{display:none!important}#resultsSection{display:block!important}}
+@media(max-width:680px){
+  header{padding:0 16px}.container{padding:20px 14px 60px}
+  .two-col,.form-grid,.report-grid,.score-strip,.frames-gallery{grid-template-columns:1fr}
+  .focus-grid{grid-template-columns:1fr 1fr}
+  .report-section.full{grid-column:1}
+  .report-header{flex-direction:column}
 }
 </style>
 </head>
@@ -189,20 +168,22 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
   </div>
   <div class="header-right">
     <div class="header-badge">Clinical Prototype</div>
+    <span class="mp-badge loading" id="mpBadge">⏳ Loading MediaPipe...</span>
     <div class="header-date" id="headerDate"></div>
   </div>
 </header>
 
 <div class="container">
 
+  <!-- INPUT -->
   <div id="inputSection">
     <div class="page-header">
       <h1>New Motion Assessment</h1>
-      <p>Complete patient details, upload media, and select focus areas to generate a clinical AI report.</p>
+      <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
     </div>
 
     <div class="two-col">
-      <!-- Left: Patient Info -->
+      <!-- Patient Info -->
       <div class="card no-mb">
         <div class="card-header">
           <div class="card-header-icon">👤</div>
@@ -254,19 +235,19 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
         </div>
       </div>
 
-      <!-- Right: Upload + Focus -->
+      <!-- Upload + Focus -->
       <div class="card no-mb">
         <div class="card-header">
           <div class="card-header-icon">🎬</div>
-          <div><h2>Media Upload</h2><p>Video or still image of the movement</p></div>
+          <div><h2>Media Upload</h2><p>Video (up to 8 frames analyzed) or still image</p></div>
         </div>
 
         <div id="uploadZone" class="upload-zone">
           <input type="file" id="fileInput" accept="video/*,image/*">
           <span class="upload-icon">📁</span>
           <div class="upload-title">Drop file here or click to browse</div>
-          <div class="upload-sub">Accepts MP4, MOV, AVI · JPG, PNG</div>
-          <div class="upload-tip">💡 Side-view or frontal-view recordings work best</div>
+          <div class="upload-sub">MP4, MOV, AVI · JPG, PNG</div>
+          <div class="upload-tip">💡 Side-view or frontal-view works best for joint tracking</div>
         </div>
 
         <div class="file-preview" id="filePreview">
@@ -276,23 +257,23 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
             <button class="btn-link" onclick="resetUpload()">Remove</button>
           </div>
           <div class="frame-status" id="frameStatus">
-            <span id="frameStatusText">Processing video...</span>
+            <span id="frameStatusText">Processing...</span>
             <div class="frame-bar"><div class="frame-bar-fill" id="frameBarFill" style="width:0%"></div></div>
           </div>
         </div>
 
-        <div style="margin-top: 20px;">
-          <div class="card-header" style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+        <div style="margin-top:20px;">
+          <div class="card-header" style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);">
             <div class="card-header-icon">🎯</div>
             <div><h2>Analysis Focus Areas</h2><p>Select all that apply</p></div>
           </div>
           <div class="focus-grid" id="focusGrid">
-            <label class="focus-chip"><input type="checkbox" value="posture and spinal alignment"><div class="focus-dot"></div> Posture & Spine</label>
+            <label class="focus-chip"><input type="checkbox" value="posture and spinal alignment"><div class="focus-dot"></div> Posture &amp; Spine</label>
             <label class="focus-chip"><input type="checkbox" value="knee alignment and tracking"><div class="focus-dot"></div> Knee Alignment</label>
             <label class="focus-chip"><input type="checkbox" value="hip symmetry and mobility"><div class="focus-dot"></div> Hip Symmetry</label>
-            <label class="focus-chip"><input type="checkbox" value="ankle and foot mechanics"><div class="focus-dot"></div> Ankle & Foot</label>
+            <label class="focus-chip"><input type="checkbox" value="ankle and foot mechanics"><div class="focus-dot"></div> Ankle &amp; Foot</label>
             <label class="focus-chip"><input type="checkbox" value="shoulder girdle mechanics"><div class="focus-dot"></div> Shoulder Girdle</label>
-            <label class="focus-chip"><input type="checkbox" value="balance and weight distribution"><div class="focus-dot"></div> Balance & Load</label>
+            <label class="focus-chip"><input type="checkbox" value="balance and weight distribution"><div class="focus-dot"></div> Balance &amp; Load</label>
             <label class="focus-chip"><input type="checkbox" value="compensation patterns"><div class="focus-dot"></div> Compensations</label>
             <label class="focus-chip"><input type="checkbox" value="range of motion limitations"><div class="focus-dot"></div> ROM Limitations</label>
             <label class="focus-chip"><input type="checkbox" value="pain-avoidance movement patterns"><div class="focus-dot"></div> Pain Avoidance</label>
@@ -301,21 +282,17 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
       </div>
     </div>
 
-    <div class="card" style="margin-bottom:16px; border-color: #f0c040; background:#fffdf0;">
-      <div class="card-header" style="margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid #f0e0a0;">
+    <!-- API Key -->
+    <div class="card" style="margin-bottom:16px;border-color:#f0c040;background:#fffdf0;">
+      <div class="card-header" style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #f0e0a0;">
         <div class="card-header-icon" style="background:#fff8e0;">🔑</div>
-        <div>
-          <h2 style="color:#92600a;">Anthropic API Key</h2>
-          <p>Required to run AI analysis — never stored or sent anywhere except Anthropic</p>
-        </div>
+        <div><h2 style="color:#92600a;">Anthropic API Key</h2><p>Required to run AI analysis — never stored or sent anywhere except Anthropic</p></div>
       </div>
       <div class="form-group">
         <label class="form-label">API Key</label>
-        <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" style="font-family: monospace;">
+        <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" style="font-family:monospace;">
       </div>
-      <p style="font-size:0.74rem; color:#92600a; margin-top:10px;">
-        🔒 Your key is used only for this request and is never saved or logged. Get your key at <a href="https://console.anthropic.com" target="_blank" style="color:#92600a;">console.anthropic.com</a>
-      </p>
+      <p style="font-size:.74rem;color:#92600a;margin-top:10px;">🔒 Your key is used only for this request and is never saved. Get your key at <a href="https://console.anthropic.com" target="_blank" style="color:#92600a;">console.anthropic.com</a></p>
     </div>
 
     <div class="error-box" id="errorBox"></div>
@@ -324,20 +301,21 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
     </button>
   </div>
 
-  <!-- Loading -->
+  <!-- LOADING -->
   <div id="loadingState">
     <div class="spinner"></div>
     <div class="loading-title">Generating Assessment Report</div>
-    <div class="loading-sub">Claude AI is analyzing the movement and preparing clinical findings</div>
+    <div class="loading-sub">MediaPipe is measuring joint angles, then Claude AI will generate your clinical findings</div>
     <div class="step-list">
-      <div class="step-item active" id="s1"><div class="step-icon">✓</div> Processing media input</div>
-      <div class="step-item" id="s2"><div class="step-icon">✓</div> Identifying body landmarks &amp; posture</div>
-      <div class="step-item" id="s3"><div class="step-icon">✓</div> Evaluating biomechanical patterns</div>
-      <div class="step-item" id="s4"><div class="step-icon">✓</div> Compiling clinical report</div>
+      <div class="step-item active" id="s1"><div class="step-icon">✓</div> Extracting video frames</div>
+      <div class="step-item" id="s2"><div class="step-icon">✓</div> Running MediaPipe pose detection</div>
+      <div class="step-item" id="s3"><div class="step-icon">✓</div> Calculating joint angles</div>
+      <div class="step-item" id="s4"><div class="step-icon">✓</div> Sending to Claude AI for clinical analysis</div>
+      <div class="step-item" id="s5"><div class="step-icon">✓</div> Compiling report</div>
     </div>
   </div>
 
-  <!-- Results -->
+  <!-- RESULTS -->
   <div id="resultsSection">
     <div class="report-header">
       <div>
@@ -350,34 +328,86 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
       </div>
     </div>
     <div class="score-strip" id="scoreStrip"></div>
+
+    <!-- Skeleton frames -->
+    <div class="report-section full" id="framesSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head"><span class="sh-icon">🦴</span><h3>MediaPipe Skeleton Analysis — Tracked Frames</h3></div>
+      <div class="section-body">
+        <div class="frames-gallery" id="framesGallery"></div>
+      </div>
+    </div>
+
+    <!-- Joint angles -->
+    <div class="report-section full" id="anglesSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head"><span class="sh-icon">📐</span><h3>Measured Joint Angles</h3></div>
+      <div class="section-body" id="anglesBody"></div>
+    </div>
+
     <div class="report-grid" id="reportGrid"></div>
   </div>
 
 </div>
 
+<!-- Hidden video element for frame extraction -->
+<video id="hiddenVideo" style="display:none;" muted playsinline crossorigin="anonymous"></video>
+<!-- Hidden canvas for MediaPipe processing -->
+<canvas id="hiddenCanvas" style="display:none;"></canvas>
+
 <script>
-let uploadedFile = null;
-let fileType = null;
-let extractedFrames = [];
+// ── State ──
+let uploadedFile = null, fileType = null;
+let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
+let poseResults = [];     // MediaPipe results per frame
+let poseInstance = null;
+let mpReady = false;
 
 document.getElementById('headerDate').textContent =
-  new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
 
+// ── Init MediaPipe ──
+async function initMediaPipe() {
+  try {
+    const badge = document.getElementById('mpBadge');
+    badge.className = 'mp-badge loading';
+    badge.textContent = '⏳ Loading MediaPipe...';
+
+    poseInstance = new Pose({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`
+    });
+    poseInstance.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: false,
+      enableSegmentation: false,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+    await poseInstance.initialize();
+    mpReady = true;
+    badge.className = 'mp-badge ready';
+    badge.textContent = '✓ MediaPipe Ready';
+  } catch(e) {
+    document.getElementById('mpBadge').className = 'mp-badge error';
+    document.getElementById('mpBadge').textContent = '⚠ MediaPipe unavailable';
+    console.warn('MediaPipe init failed:', e);
+  }
+}
+initMediaPipe();
+
+// ── File Upload ──
 const fileInput = document.getElementById('fileInput');
-fileInput.addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
-
+fileInput.addEventListener('change', e => { if(e.target.files[0]) handleFile(e.target.files[0]); });
 const uploadZone = document.getElementById('uploadZone');
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
 uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
 uploadZone.addEventListener('drop', e => {
   e.preventDefault(); uploadZone.classList.remove('drag-over');
-  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
 });
 
 async function handleFile(file) {
   uploadedFile = file;
   fileType = file.type.startsWith('image/') ? 'image' : 'video';
-  extractedFrames = [];
+  extractedFrames = []; poseResults = [];
 
   uploadZone.style.display = 'none';
   document.getElementById('filePreview').style.display = 'block';
@@ -389,23 +419,21 @@ async function handleFile(file) {
   const badge = document.createElement('div');
   badge.className = 'preview-badge';
 
-  if (fileType === 'image') {
+  if(fileType === 'image') {
     badge.textContent = 'IMAGE';
     const img = document.createElement('img');
     img.src = url;
     img.style.cssText = 'width:100%;max-height:280px;object-fit:contain;display:block;';
-    wrap.appendChild(img);
-    wrap.appendChild(badge);
+    wrap.appendChild(img); wrap.appendChild(badge);
     const reader = new FileReader();
-    reader.onload = () => { extractedFrames = [reader.result.split(',')[1]]; };
+    reader.onload = () => { extractedFrames = [{imageData: reader.result.split(',')[1]}]; };
     reader.readAsDataURL(file);
   } else {
     badge.textContent = 'VIDEO';
     const vid = document.createElement('video');
     vid.src = url; vid.controls = true; vid.muted = true; vid.playsInline = true;
     vid.style.cssText = 'width:100%;max-height:280px;object-fit:contain;display:block;';
-    wrap.appendChild(vid);
-    wrap.appendChild(badge);
+    wrap.appendChild(vid); wrap.appendChild(badge);
     startFrameExtraction(file, vid);
   }
 }
@@ -418,67 +446,52 @@ function startFrameExtraction(file, vid) {
   statusText.textContent = 'Loading video...';
   barFill.style.width = '5%';
 
-  let extractionStarted = false;
+  let started = false;
 
-  async function doExtraction() {
-    if (extractionStarted) return;
-    extractionStarted = true;
+  async function doExtract() {
+    if(started) return; started = true;
     const dur = vid.duration;
-    if (!dur || !isFinite(dur) || dur === 0) {
+    if(!dur || !isFinite(dur) || dur === 0) {
       statusText.textContent = 'Trying playback capture...';
-      await captureViaPlay(vid, barFill, statusText);
-      return;
+      await captureViaPlay(vid, barFill, statusText); return;
     }
-    const count = Math.min(5, Math.max(2, Math.floor(dur)));
-    const times = Array.from({ length: count }, (_, i) =>
-      i === 0 ? 0.1 : (i / (count - 1)) * (dur * 0.92)
+    // Extract up to 8 frames evenly spaced
+    const count = Math.min(8, Math.max(2, Math.ceil(dur * 2)));
+    const times = Array.from({length:count}, (_,i) =>
+      i === 0 ? 0.1 : (i/(count-1)) * (dur * 0.95)
     );
     statusText.textContent = `Extracting ${count} frames...`;
     const frames = [];
-    for (let i = 0; i < times.length; i++) {
-      const f = await seekCapture(vid, times[i]);
-      if (f) frames.push(f);
-      barFill.style.width = `${Math.round(((i + 1) / times.length) * 90)}%`;
+    for(let i = 0; i < times.length; i++) {
+      const b64 = await seekCapture(vid, times[i]);
+      if(b64) frames.push({imageData: b64});
+      barFill.style.width = `${Math.round(((i+1)/times.length)*90)}%`;
     }
-    if (frames.length > 0) {
+    if(frames.length > 0) {
       extractedFrames = frames;
       barFill.style.width = '100%';
-      statusText.textContent = `✓ ${frames.length} frame${frames.length > 1 ? 's' : ''} ready for analysis`;
+      statusText.textContent = `✓ ${frames.length} frame${frames.length>1?'s':''} extracted — ready for analysis`;
     } else {
-      statusText.textContent = 'Seek failed — trying playback capture...';
+      statusText.textContent = 'Seek failed — trying playback...';
       await captureViaPlay(vid, barFill, statusText);
     }
   }
 
-  // Fire on whichever event the browser supports first
-  vid.addEventListener('loadedmetadata', doExtraction);
-  vid.addEventListener('canplay', doExtraction);
-  vid.addEventListener('canplaythrough', doExtraction);
-
-  // Hard fallback: 8s after upload, force a playback capture attempt
-  setTimeout(async () => {
-    if (extractedFrames.length === 0 && !extractionStarted) {
-      extractionStarted = true;
-      statusText.textContent = 'Timeout — forcing playback capture...';
-      await captureViaPlay(vid, barFill, statusText);
-    }
-  }, 8000);
-
-  vid.addEventListener('error', () => {
-    statusText.textContent = '⚠️ This video format may not be supported in your browser. Upload a JPG/PNG screenshot instead.';
-    barFill.style.width = '0%';
-  });
+  vid.addEventListener('loadedmetadata', doExtract);
+  vid.addEventListener('canplay', doExtract);
+  vid.addEventListener('canplaythrough', doExtract);
+  setTimeout(async () => { if(extractedFrames.length===0 && !started) { started=true; await captureViaPlay(vid,barFill,statusText); } }, 8000);
+  vid.addEventListener('error', () => { statusText.textContent = '⚠️ Video format not supported. Upload a JPG/PNG screenshot instead.'; barFill.style.width='0%'; });
 }
 
 function seekCapture(vid, t) {
   return new Promise(resolve => {
     let done = false;
-    const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 5000);
+    const timer = setTimeout(() => { if(!done){done=true;resolve(null);} }, 5000);
     const onSeeked = () => {
-      if (done) return; done = true;
-      clearTimeout(timer);
+      if(done) return; done=true; clearTimeout(timer);
       vid.removeEventListener('seeked', onSeeked);
-      resolve(captureFromVideo(vid));
+      resolve(captureFrameFromVideo(vid));
     };
     vid.addEventListener('seeked', onSeeked);
     try { vid.currentTime = t; } catch(e) { resolve(null); }
@@ -489,221 +502,461 @@ async function captureViaPlay(vid, barFill, statusText) {
   vid.muted = true;
   try {
     await vid.play();
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise(r => setTimeout(r, 700));
     vid.pause();
-    const f = captureFromVideo(vid);
-    if (f) {
-      extractedFrames = [f];
+    const b64 = captureFrameFromVideo(vid);
+    if(b64) {
+      extractedFrames = [{imageData: b64}];
       barFill.style.width = '100%';
       statusText.textContent = '✓ Frame captured — ready for analysis';
     } else {
-      statusText.textContent = '⚠️ Could not extract frame. Upload a JPG/PNG screenshot for best results.';
+      statusText.textContent = '⚠️ Could not extract frame. Upload a JPG/PNG screenshot instead.';
     }
   } catch(e) {
-    statusText.textContent = '⚠️ Video capture unavailable in this browser. Please upload a JPG/PNG image instead.';
+    statusText.textContent = '⚠️ Video capture unavailable. Upload a JPG/PNG screenshot instead.';
   }
 }
 
-function captureFromVideo(vid) {
+function captureFrameFromVideo(vid) {
   try {
-    const w = vid.videoWidth || 640, h = vid.videoHeight || 480;
-    if (w === 0 || h === 0) return null;
-    const scale = Math.min(1, 800 / Math.max(w, h));
+    const w = vid.videoWidth||640, h = vid.videoHeight||480;
+    if(!w||!h) return null;
+    const scale = Math.min(1, 800/Math.max(w,h));
     const canvas = document.createElement('canvas');
-    canvas.width = Math.round(w * scale); canvas.height = Math.round(h * scale);
-    canvas.getContext('2d').drawImage(vid, 0, 0, canvas.width, canvas.height);
-    const b64 = canvas.toDataURL('image/jpeg', 0.82).split(',')[1];
+    canvas.width = Math.round(w*scale); canvas.height = Math.round(h*scale);
+    canvas.getContext('2d').drawImage(vid,0,0,canvas.width,canvas.height);
+    const b64 = canvas.toDataURL('image/jpeg',0.82).split(',')[1];
     return (b64 && b64.length > 300) ? b64 : null;
   } catch(e) { return null; }
 }
 
 function resetUpload() {
-  uploadedFile = null; fileType = null; extractedFrames = [];
-  fileInput.value = '';
-  document.getElementById('uploadZone').style.display = 'block';
-  document.getElementById('filePreview').style.display = 'none';
+  uploadedFile=null; fileType=null; extractedFrames=[]; poseResults=[];
+  fileInput.value='';
+  document.getElementById('uploadZone').style.display='block';
+  document.getElementById('filePreview').style.display='none';
   document.getElementById('frameStatus').classList.remove('visible');
 }
 
-function toggleFocus(label) { label.classList.toggle('on'); }
-
-// Focus chip click handling - use event delegation to avoid double-fire from label+input
+// ── Focus chips ──
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.focus-chip').forEach(chip => {
     chip.addEventListener('click', function(e) {
       e.preventDefault();
       this.classList.toggle('on');
       const cb = this.querySelector('input[type=checkbox]');
-      if (cb) cb.checked = this.classList.contains('on');
+      if(cb) cb.checked = this.classList.contains('on');
     });
   });
 });
 
 function resetAll() {
-  document.getElementById('resultsSection').style.display = 'none';
-  document.getElementById('inputSection').style.display = 'block';
+  document.getElementById('resultsSection').style.display='none';
+  document.getElementById('inputSection').style.display='block';
   resetUpload();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo({top:0,behavior:'smooth'});
 }
 
 function animateSteps() {
-  const ids = ['s1','s2','s3','s4']; let i = 0;
-  const iv = setInterval(() => {
-    if (i > 0) { document.getElementById(ids[i-1]).classList.remove('active'); document.getElementById(ids[i-1]).classList.add('done'); }
-    if (i < ids.length) { document.getElementById(ids[i]).classList.add('active'); i++; }
+  const ids=['s1','s2','s3','s4','s5']; let i=0;
+  const iv = setInterval(()=>{
+    if(i>0){document.getElementById(ids[i-1]).classList.remove('active');document.getElementById(ids[i-1]).classList.add('done');}
+    if(i<ids.length){document.getElementById(ids[i]).classList.add('active');i++;}
     else clearInterval(iv);
-  }, 1600);
+  },1400);
 }
 
+// ── MediaPipe Processing ──
+async function runMediaPipeOnFrames(frames) {
+  if(!mpReady || !poseInstance) return frames.map(()=>null);
+  const results = [];
+  for(const frame of frames) {
+    try {
+      const img = new Image();
+      await new Promise((res,rej) => {
+        img.onload = res; img.onerror = rej;
+        img.src = 'data:image/jpeg;base64,' + frame.imageData;
+      });
+      let result = null;
+      poseInstance.onResults(r => { result = r; });
+      await poseInstance.send({image: img});
+      await new Promise(r => setTimeout(r, 50)); // let callback fire
+      results.push(result);
+    } catch(e) { results.push(null); }
+  }
+  return results;
+}
+
+// Draw skeleton on canvas and return annotated base64
+function drawSkeleton(imageBase64, poseResult) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img,0,0);
+
+      if(!poseResult || !poseResult.poseLandmarks) {
+        resolve({canvas, base64: canvas.toDataURL('image/jpeg',0.85).split(',')[1]});
+        return;
+      }
+      const lm = poseResult.poseLandmarks;
+      const W = canvas.width, H = canvas.height;
+
+      // Draw connections
+      const connections = [
+        [11,12],[11,13],[13,15],[12,14],[14,16], // arms
+        [11,23],[12,24],[23,24],                  // torso
+        [23,25],[25,27],[27,29],[29,31],           // left leg
+        [24,26],[26,28],[28,30],[30,32],           // right leg
+        [15,17],[15,19],[16,18],[16,20]            // hands/feet
+      ];
+      ctx.strokeStyle = '#00e5cc';
+      ctx.lineWidth = Math.max(2, W/200);
+      connections.forEach(([a,b]) => {
+        if(!lm[a]||!lm[b]||lm[a].visibility<0.4||lm[b].visibility<0.4) return;
+        ctx.beginPath();
+        ctx.moveTo(lm[a].x*W, lm[a].y*H);
+        ctx.lineTo(lm[b].x*W, lm[b].y*H);
+        ctx.stroke();
+      });
+
+      // Draw joints
+      const jointRadius = Math.max(4, W/100);
+      lm.forEach((p,i) => {
+        if(p.visibility < 0.4) return;
+        ctx.beginPath();
+        ctx.arc(p.x*W, p.y*H, jointRadius, 0, 2*Math.PI);
+        ctx.fillStyle = i<11 ? '#ffeb3b' : '#00e5cc';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      });
+
+      resolve({canvas, base64: canvas.toDataURL('image/jpeg',0.85).split(',')[1]});
+    };
+    img.src = 'data:image/jpeg;base64,' + imageBase64;
+  });
+}
+
+// ── Joint Angle Calculations ──
+function calcAngle(a, b, c) {
+  // Angle at point b
+  const ab = {x:a.x-b.x, y:a.y-b.y};
+  const cb = {x:c.x-b.x, y:c.y-b.y};
+  const dot = ab.x*cb.x + ab.y*cb.y;
+  const magAB = Math.sqrt(ab.x**2+ab.y**2);
+  const magCB = Math.sqrt(cb.x**2+cb.y**2);
+  if(!magAB||!magCB) return null;
+  const cosA = Math.max(-1, Math.min(1, dot/(magAB*magCB)));
+  return Math.round(Math.acos(cosA) * 180/Math.PI);
+}
+
+function extractAngles(lm) {
+  if(!lm) return {};
+  const v = (i) => lm[i] && lm[i].visibility > 0.4 ? lm[i] : null;
+  const angles = {};
+
+  // Knee angles
+  const lHip=v(23),lKnee=v(25),lAnkle=v(27);
+  const rHip=v(24),rKnee=v(26),rAnkle=v(28);
+  if(lHip&&lKnee&&lAnkle) angles['Left Knee Flexion'] = calcAngle(lHip,lKnee,lAnkle);
+  if(rHip&&rKnee&&rAnkle) angles['Right Knee Flexion'] = calcAngle(rHip,rKnee,rAnkle);
+
+  // Hip angles (flexion relative to vertical)
+  const lShoulder=v(11),rShoulder=v(12);
+  if(lShoulder&&lHip&&lKnee) angles['Left Hip Flexion'] = calcAngle(lShoulder,lHip,lKnee);
+  if(rShoulder&&rHip&&rKnee) angles['Right Hip Flexion'] = calcAngle(rShoulder,rHip,rKnee);
+
+  // Trunk lean (shoulder midpoint to hip midpoint angle from vertical)
+  if(lShoulder&&rShoulder&&lHip&&rHip) {
+    const sMid = {x:(lShoulder.x+rShoulder.x)/2, y:(lShoulder.y+rShoulder.y)/2};
+    const hMid = {x:(lHip.x+rHip.x)/2, y:(lHip.y+rHip.y)/2};
+    const dx = sMid.x-hMid.x, dy = sMid.y-hMid.y;
+    angles['Trunk Lean'] = Math.round(Math.abs(Math.atan2(dx,Math.abs(dy)) * 180/Math.PI));
+  }
+
+  // Ankle dorsiflexion
+  const lKneeP=v(25),lAnkleP=v(27),lToe=v(31);
+  const rKneeP=v(26),rAnkleP=v(28),rToe=v(32);
+  if(lKneeP&&lAnkleP&&lToe) angles['Left Ankle Dorsiflexion'] = calcAngle(lKneeP,lAnkleP,lToe);
+  if(rKneeP&&rAnkleP&&rToe) angles['Right Ankle Dorsiflexion'] = calcAngle(rKneeP,rAnkleP,rToe);
+
+  // Shoulder angles
+  const lElbow=v(13),rElbow=v(14);
+  if(lShoulder&&lElbow&&lHip) angles['Left Shoulder Flexion'] = calcAngle(lHip,lShoulder,lElbow);
+  if(rShoulder&&rElbow&&rHip) angles['Right Shoulder Flexion'] = calcAngle(rHip,rShoulder,rElbow);
+
+  return angles;
+}
+
+// Reference ranges for flagging
+const REF_RANGES = {
+  'Left Knee Flexion':   {min:0,  warn:30,  ok:60,  label:'Normal: 0-140°'},
+  'Right Knee Flexion':  {min:0,  warn:30,  ok:60,  label:'Normal: 0-140°'},
+  'Left Hip Flexion':    {min:60, warn:45,  ok:60,  label:'Normal hip hinge: 60-90°'},
+  'Right Hip Flexion':   {min:60, warn:45,  ok:60,  label:'Normal hip hinge: 60-90°'},
+  'Trunk Lean':          {max:20, warn:30,  label:'Normal: <20° from vertical'},
+  'Left Ankle Dorsiflexion':  {min:100, warn:95, label:'Normal: >100° (10°+ DF)'},
+  'Right Ankle Dorsiflexion': {min:100, warn:95, label:'Normal: >100° (10°+ DF)'},
+  'Left Shoulder Flexion':    {label:'Normal: 0-180°'},
+  'Right Shoulder Flexion':   {label:'Normal: 0-180°'},
+};
+
+function flagAngle(name, val) {
+  const ref = REF_RANGES[name];
+  if(!ref || val === null) return 'flag-ok';
+  if(ref.max !== undefined) {
+    if(val > ref.warn) return 'flag-high';
+    if(val > ref.max) return 'flag-med';
+    return 'flag-ok';
+  }
+  if(ref.min !== undefined) {
+    if(val < ref.warn) return 'flag-high';
+    if(val < ref.min) return 'flag-med';
+    return 'flag-ok';
+  }
+  return 'flag-ok';
+}
+
+// Aggregate angles across frames (take the most extreme / representative value)
+function aggregateAngles(allFrameAngles) {
+  const combined = {};
+  allFrameAngles.forEach(frameAngles => {
+    Object.entries(frameAngles).forEach(([k,v]) => {
+      if(v === null || v === undefined) return;
+      if(!combined[k]) combined[k] = [];
+      combined[k].push(v);
+    });
+  });
+  const result = {};
+  Object.entries(combined).forEach(([k,vals]) => {
+    // Use min for flexion (most restricted point), and report range
+    result[k] = {
+      min: Math.min(...vals),
+      max: Math.max(...vals),
+      avg: Math.round(vals.reduce((a,b)=>a+b,0)/vals.length)
+    };
+  });
+  return result;
+}
+
+// ── Main Analysis ──
 async function runAnalysis() {
   const movement = document.getElementById('movementType').value;
-  document.getElementById('errorBox').style.display = 'none';
+  const apiKey = document.getElementById('apiKey').value.trim();
+  document.getElementById('errorBox').style.display='none';
 
-  if (!uploadedFile) { showErr('Please upload a video or image before running analysis.'); return; }
-  if (!movement) { showErr('Please select the movement type being assessed.'); return; }
-  if (fileType === 'video' && extractedFrames.length === 0) {
-    showErr('Video frames are still processing. Please wait a moment, then try again — or upload a JPG/PNG screenshot of the movement for immediate analysis.');
-    return;
+  if(!uploadedFile)  { showErr('Please upload a video or image before running analysis.'); return; }
+  if(!movement)      { showErr('Please select the movement type being assessed.'); return; }
+  if(!apiKey)        { showErr('Please enter your Anthropic API key.'); return; }
+  if(fileType==='video' && extractedFrames.length===0) {
+    showErr('Frames are still processing. Please wait a moment or upload a JPG/PNG screenshot instead.'); return;
   }
 
   const patientName = document.getElementById('patientName').value.trim() || 'Patient';
   const age = document.getElementById('patientAge').value;
   const diagnosis = document.getElementById('diagnosis').value.trim();
   const notes = document.getElementById('clinicalNotes').value.trim();
-  const focusAreas = [...document.querySelectorAll('#focusGrid .focus-chip.on input')].map(i => i.value);
+  const focusAreas = [...document.querySelectorAll('#focusGrid .focus-chip.on input')].map(i=>i.value);
   const focusText = focusAreas.length ? focusAreas.join(', ') : 'general movement quality';
-  const frameCount = extractedFrames.length;
 
-  document.getElementById('inputSection').style.display = 'none';
-  document.getElementById('loadingState').style.display = 'block';
+  document.getElementById('inputSection').style.display='none';
+  document.getElementById('loadingState').style.display='block';
   animateSteps();
 
-  const prompt = `You are an expert physical therapist and clinical movement analyst reviewing ${fileType === 'image' ? 'a clinical image' : `${frameCount} frame(s) extracted from a patient movement video`} for a formal PT assessment.
+  // Step 1-2: MediaPipe on all frames
+  let annotatedFrames = [];
+  let allAngles = [];
+
+  if(mpReady && poseInstance) {
+    const mpResults = await runMediaPipeOnFrames(extractedFrames);
+    for(let i=0; i<extractedFrames.length; i++) {
+      const {canvas, base64} = await drawSkeleton(extractedFrames[i].imageData, mpResults[i]);
+      annotatedFrames.push({base64, canvas});
+      if(mpResults[i] && mpResults[i].poseLandmarks) {
+        allAngles.push(extractAngles(mpResults[i].poseLandmarks));
+      }
+    }
+  } else {
+    // No MediaPipe — use raw frames
+    annotatedFrames = extractedFrames.map(f => ({base64: f.imageData, canvas: null}));
+  }
+
+  // Step 3: Aggregate angles
+  const aggregated = allAngles.length > 0 ? aggregateAngles(allAngles) : {};
+  const angleLines = Object.entries(aggregated).map(([k,v]) =>
+    `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
+  ).join('\n');
+
+  // Step 4: Send up to 8 annotated frames to Claude
+  const framesToSend = annotatedFrames.slice(0, 8);
+  const frameCount = framesToSend.length;
+
+  const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay showing tracked joints.
 
 PATIENT: ${patientName}${age ? `, Age ${age}` : ''}
 DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
 MOVEMENT ASSESSED: ${movement}
 CLINICAL FOCUS: ${focusText}
 ${notes ? `CLINICAL NOTES: ${notes}` : ''}
-${frameCount > 1 ? `NOTE: You are viewing ${frameCount} frames sampled from across the full movement clip — beginning, middle, and end of the movement cycle.` : ''}
+${frameCount > 1 ? `FRAMES: ${frameCount} frames sampled across the full movement cycle (beginning through end).` : ''}
+
+${angleLines ? `MEASURED JOINT ANGLES (from MediaPipe across all frames):\n${angleLines}` : ''}
+
+Use the skeleton overlays and measured angles to provide a precise, data-driven clinical analysis. Reference specific angle measurements where available.
 
 Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
 {
   "score": <integer 1-10>,
   "score_summary": "<one-sentence overall assessment>",
   "findings": [
-    { "priority": "high|medium|positive", "title": "<short title>", "detail": "<specific clinical observation>" }
+    { "priority": "high|medium|positive", "title": "<short title>", "detail": "<specific clinical observation referencing measured angles where possible>" }
   ],
-  "biomechanical_analysis": "<2-3 paragraph clinical narrative about mechanics, joint angles, weight distribution, symmetry>",
+  "biomechanical_analysis": "<2-3 paragraph clinical narrative referencing specific angle measurements, symmetry, and movement patterns across the frames>",
   "clinical_impressions": "<1-2 paragraph narrative about clinical significance, risk factors, functional implications>",
   "recommendations": ["<specific actionable PT recommendation>"],
   "patient_education": ["<simple patient-facing explanation>"]
 }
-Include 3-5 findings, 4-5 recommendations, and 2-3 patient education points. Be specific and clinically grounded.`;
+Include 3-5 findings, 4-6 recommendations, and 2-3 patient education points.`;
 
   try {
-    const framesToSend = extractedFrames.slice(0, 3);
     const content = [
-      ...framesToSend.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } })),
-      { type: 'text', text: prompt }
+      ...framesToSend.map(f => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:f.base64}})),
+      {type:'text', text:prompt}
     ];
 
-    const apiKey = document.getElementById('apiKey').value.trim();
-    if (!apiKey) { showErr('Please enter your Anthropic API key to run analysis.'); return; }
-
     const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
         'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
       },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 2000, messages: [{ role: 'user', content }] })
+      body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:8192, messages:[{role:'user', content}]})
     });
 
     const data = await res.json();
-    if (!res.ok || data.error) throw new Error(data.error?.message || `API error ${res.status}`);
-    const raw = data.content.map(b => b.text || '').join('');
+    if(!res.ok || data.error) throw new Error(data.error?.message || `API error ${res.status}`);
+    const raw = data.content.map(b=>b.text||'').join('');
 
     let report = null;
     try {
-      const clean = raw.replace(/```json|```/g, '').trim();
-      report = JSON.parse(clean);
+      report = JSON.parse(raw.replace(/```json|```/g,'').trim());
     } catch(e) {
-      // Salvage partial/malformed JSON by extracting fields with regex
       try {
         const r = {};
-        const sm = raw.match(/"score"\s*:\s*(\d+)/); if (sm) r.score = parseInt(sm[1]);
-        const sum = raw.match(/"score_summary"\s*:\s*"([^"]+)"/); if (sum) r.score_summary = sum[1];
+        const sm = raw.match(/"score"\s*:\s*(\d+)/); if(sm) r.score=parseInt(sm[1]);
+        const sum = raw.match(/"score_summary"\s*:\s*"([^"]+)"/); if(sum) r.score_summary=sum[1];
         const bioM = raw.match(/"biomechanical_analysis"\s*:\s*"((?:[^"\\]|\\[\s\S])*?)"/);
-        if (bioM) r.biomechanical_analysis = bioM[1].replace(/\\n/g,'\n');
+        if(bioM) r.biomechanical_analysis = bioM[1].replace(/\\n/g,'\n');
         const clinM = raw.match(/"clinical_impressions"\s*:\s*"((?:[^"\\]|\\[\s\S])*?)"/);
-        if (clinM) r.clinical_impressions = clinM[1].replace(/\\n/g,'\n');
-        // Extract individual finding objects
-        const findObjs = [];
-        const fiter = raw.matchAll(/\{[^{}]*?"priority"\s*:\s*"([^"]+)"[^{}]*?"title"\s*:\s*"([^"]+)"[^{}]*?"detail"\s*:\s*"([^"]+)"[^{}]*?\}/g);
-        for (const m of fiter) findObjs.push({ priority: m[1], title: m[2], detail: m[3] });
-        if (findObjs.length) r.findings = findObjs;
-        // Extract string arrays
-        const recsBlock = raw.match(/"recommendations"\s*:\s*\[([\s\S]*?)\]/)?.[1] || '';
-        r.recommendations = [...recsBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
-        const eduBlock = raw.match(/"patient_education"\s*:\s*\[([\s\S]*?)\]/)?.[1] || '';
-        r.patient_education = [...eduBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
-        if (r.score || (r.findings && r.findings.length) || r.recommendations?.length) report = r;
-      } catch(e2) { report = null; }
+        if(clinM) r.clinical_impressions = clinM[1].replace(/\\n/g,'\n');
+        const findObjs=[];
+        const fiter=raw.matchAll(/\{[^{}]*?"priority"\s*:\s*"([^"]+)"[^{}]*?"title"\s*:\s*"([^"]+)"[^{}]*?"detail"\s*:\s*"([^"]+)"[^{}]*?\}/g);
+        for(const m of fiter) findObjs.push({priority:m[1],title:m[2],detail:m[3]});
+        if(findObjs.length) r.findings=findObjs;
+        const recsBlock=raw.match(/"recommendations"\s*:\s*\[([\s\S]*?)\]/)?.[1]||'';
+        r.recommendations=[...recsBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
+        const eduBlock=raw.match(/"patient_education"\s*:\s*\[([\s\S]*?)\]/)?.[1]||'';
+        r.patient_education=[...eduBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
+        if(r.score||(r.findings&&r.findings.length)||r.recommendations?.length) report=r;
+      } catch(e2) { report=null; }
     }
 
-    document.getElementById('loadingState').style.display = 'none';
-    document.getElementById('resultsSection').style.display = 'block';
+    document.getElementById('loadingState').style.display='none';
+    document.getElementById('resultsSection').style.display='block';
 
-    const now = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    const now = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
     document.getElementById('reportSubtitle').textContent =
-      `${patientName}${age ? ` · Age ${age}` : ''} · ${movement} · ${now}${frameCount > 1 ? ` · ${frameCount} frames analyzed` : ''}`;
+      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0?'MediaPipe tracked':'Visual analysis'}`;
 
-    report ? renderReport(report, movement) : renderRaw(raw, movement);
-    document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
+    // Render skeleton frames gallery
+    if(annotatedFrames.length > 0) {
+      const gallery = document.getElementById('framesGallery');
+      gallery.innerHTML = '';
+      annotatedFrames.forEach((f,i) => {
+        const card = document.createElement('div');
+        card.className = 'frame-card';
+        const imgWrap = document.createElement('div');
+        imgWrap.className = 'frame-card-img';
+        const img = document.createElement('img');
+        img.src = 'data:image/jpeg;base64,' + f.base64;
+        img.style.cssText = 'width:100%;height:auto;display:block;';
+        imgWrap.appendChild(img);
+        const lbl = document.createElement('div');
+        lbl.className = 'frame-label';
+        lbl.textContent = `Frame ${i+1}${allAngles.length>0?' · Tracked':''}`;
+        card.appendChild(imgWrap); card.appendChild(lbl);
+        gallery.appendChild(card);
+      });
+      document.getElementById('framesSection').style.display='block';
+    }
+
+    // Render angle table
+    if(Object.keys(aggregated).length > 0) {
+      let tableHtml = '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range</th><th>Reference</th></tr></thead><tbody>';
+      Object.entries(aggregated).forEach(([k,v]) => {
+        const flag = flagAngle(k, v.avg);
+        const ref = REF_RANGES[k]?.label || '';
+        tableHtml += `<tr>
+          <td>${k}</td>
+          <td><span class="val ${flag}">${v.avg}°</span></td>
+          <td class="ref">${v.min}° – ${v.max}°</td>
+          <td class="ref">${ref}</td>
+        </tr>`;
+      });
+      tableHtml += '</tbody></table>';
+      document.getElementById('anglesBody').innerHTML = tableHtml;
+      document.getElementById('anglesSection').style.display='block';
+    }
+
+    report ? renderReport(report, movement, allAngles.length) : renderRaw(raw, movement);
+    document.getElementById('resultsSection').scrollIntoView({behavior:'smooth'});
 
   } catch(err) { showErr('Analysis failed: ' + err.message); }
 }
 
-function renderReport(r, movement) {
-  const score = r.score || null;
-  const sc = !score ? '' : score >= 7 ? 'score-good' : score >= 5 ? 'score-warn' : 'score-poor';
-  const highCount = (r.findings || []).filter(f => f.priority === 'high').length;
+function renderReport(r, movement, trackedFrames) {
+  const score = r.score||null;
+  const sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
+  const highCount = (r.findings||[]).filter(f=>f.priority==='high').length;
 
   document.getElementById('scoreStrip').innerHTML = `
     <div class="score-tile">
-      <div class="score-tile-value ${sc}">${score !== null ? score + '/10' : '—'}</div>
+      <div class="score-tile-value ${sc}">${score!==null?score+'/10':'—'}</div>
       <div class="score-tile-label">Movement Quality</div>
     </div>
     <div class="score-tile">
-      <div class="score-tile-value" style="font-size:0.88rem;color:var(--navy);padding-top:6px;line-height:1.3;">${movement}</div>
+      <div class="score-tile-value" style="font-size:.88rem;color:var(--navy);padding-top:6px;line-height:1.3;">${movement}</div>
       <div class="score-tile-label">Movement Assessed</div>
     </div>
     <div class="score-tile">
-      <div class="score-tile-value ${highCount > 0 ? 'score-poor' : 'score-good'}">${highCount}</div>
+      <div class="score-tile-value ${highCount>0?'score-poor':'score-good'}">${highCount}</div>
       <div class="score-tile-label">High Priority Findings</div>
     </div>
     <div class="score-tile">
-      <div class="score-tile-value" style="font-size:0.75rem;color:var(--muted);padding-top:4px;line-height:1.4;">${r.score_summary || '—'}</div>
+      <div class="score-tile-value" style="font-size:.72rem;color:var(--muted);padding-top:4px;line-height:1.4;">${r.score_summary||'—'}</div>
       <div class="score-tile-label">Summary</div>
     </div>`;
 
-  const findings = (r.findings || []).map(f => {
-    const dc = f.priority === 'high' ? 'dot-high' : f.priority === 'positive' ? 'dot-low' : 'dot-med';
+  const findings=(r.findings||[]).map(f=>{
+    const dc=f.priority==='high'?'dot-high':f.priority==='positive'?'dot-low':'dot-med';
     return `<div class="finding"><div class="finding-dot ${dc}"></div><div><div class="finding-title">${esc(f.title)}</div><div class="finding-desc">${esc(f.detail)}</div></div></div>`;
-  }).join('') || '<p class="finding-desc">No findings returned.</p>';
+  }).join('')||'<p class="finding-desc">No findings returned.</p>';
 
-  const recs = (r.recommendations || []).map((rec, i) =>
+  const recs=(r.recommendations||[]).map((rec,i)=>
     `<div class="rec-item"><div class="rec-num">${i+1}</div><div class="rec-text">${esc(rec)}</div></div>`
-  ).join('') || '<p class="finding-desc">No recommendations returned.</p>';
+  ).join('')||'<p class="finding-desc">No recommendations returned.</p>';
 
-  const edu = (r.patient_education || []).map(pt =>
+  const edu=(r.patient_education||[]).map(pt=>
     `<div class="edu-item"><div class="edu-icon">💬</div><div class="edu-text">${esc(pt)}</div></div>`
-  ).join('') || '<p class="finding-desc">No education points returned.</p>';
+  ).join('')||'<p class="finding-desc">No education points returned.</p>';
 
-  document.getElementById('reportGrid').innerHTML = `
+  document.getElementById('reportGrid').innerHTML=`
     <div class="report-section">
       <div class="section-head"><span class="sh-icon">🔍</span><h3>Key Findings</h3></div>
       <div class="section-body">${findings}</div>
@@ -727,27 +980,25 @@ function renderReport(r, movement) {
 }
 
 function renderRaw(text, movement) {
-  document.getElementById('scoreStrip').innerHTML = `<div class="score-tile" style="grid-column:1/-1;"><div class="score-tile-value" style="font-size:0.9rem;color:var(--muted);">${movement} · Analysis complete</div></div>`;
-  document.getElementById('reportGrid').innerHTML = `<div class="report-section full"><div class="section-head"><span class="sh-icon">📋</span><h3>Clinical Report</h3></div><div class="section-body"><div class="raw-report">${esc(text)}</div></div></div>`;
+  document.getElementById('scoreStrip').innerHTML=`<div class="score-tile" style="grid-column:1/-1;"><div class="score-tile-value" style="font-size:.9rem;color:var(--muted);">${movement} · Analysis complete</div></div>`;
+  document.getElementById('reportGrid').innerHTML=`<div class="report-section full"><div class="section-head"><span class="sh-icon">📋</span><h3>Clinical Report</h3></div><div class="section-body"><div class="raw-report">${esc(text)}</div></div></div>`;
 }
 
 function narrativeHtml(text) {
-  if (!text) return '<p>Not available.</p>';
-  return text.split('\n').filter(l => l.trim()).map(l => `<p>${esc(l)}</p>`).join('');
+  if(!text) return '<p>Not available.</p>';
+  return text.split('\n').filter(l=>l.trim()).map(l=>`<p>${esc(l)}</p>`).join('');
 }
-
 function esc(s) {
-  if (!s) return '';
+  if(!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
-
 function showErr(msg) {
-  document.getElementById('loadingState').style.display = 'none';
-  document.getElementById('inputSection').style.display = 'block';
-  const b = document.getElementById('errorBox');
-  b.innerHTML = `<strong>⚠️ </strong>${msg}`;
-  b.style.display = 'block';
-  b.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  document.getElementById('loadingState').style.display='none';
+  document.getElementById('inputSection').style.display='block';
+  const b=document.getElementById('errorBox');
+  b.innerHTML=`<strong>⚠️ </strong>${msg}`;
+  b.style.display='block';
+  b.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 </script>
 </body>
