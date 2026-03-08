@@ -186,6 +186,60 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .phase-swing{background:#fff3e0;color:#c27000}
 .phase-frame{background:#f0f0f0;color:var(--muted)}
 
+
+/* ── PROMs panel ── */
+.proms-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 20px;cursor:pointer;font-family:'Inter',sans-serif;font-size:.88rem;font-weight:600;color:var(--navy);margin-bottom:16px;transition:all .15s;box-shadow:var(--shadow)}
+.proms-toggle:hover{border-color:var(--teal);color:var(--teal)}
+.proms-toggle .pt-left{display:flex;align-items:center;gap:10px}
+.proms-toggle .pt-icon{width:30px;height:30px;border-radius:6px;background:var(--navy-light);display:flex;align-items:center;justify-content:center;font-size:.9rem}
+.proms-toggle .pt-arrow{font-size:.75rem;color:var(--muted);transition:transform .2s}
+.proms-toggle.open .pt-arrow{transform:rotate(180deg)}
+.proms-panel{display:none;margin-bottom:16px}
+.proms-panel.open{display:block}
+.prom-block{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:12px;box-shadow:var(--shadow)}
+.prom-block-title{font-size:.82rem;font-weight:700;color:var(--navy);margin-bottom:4px}
+.prom-block-sub{font-size:.74rem;color:var(--muted);margin-bottom:14px;line-height:1.5}
+.prom-scale{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px}
+.prom-scale label{display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer}
+.prom-scale input[type=radio]{display:none}
+.prom-scale .ps-num{width:32px;height:32px;border-radius:6px;border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:600;color:var(--muted);transition:all .15s}
+.prom-scale input[type=radio]:checked + .ps-num{background:var(--navy);border-color:var(--navy);color:#fff}
+.prom-scale-labels{display:flex;justify-content:space-between;font-size:.68rem;color:var(--muted);margin-top:2px}
+.psfs-item{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin-bottom:10px}
+.psfs-item input[type=text]{flex:1}
+.psfs-score{display:flex;gap:3px}
+.psfs-score label .ps-num{width:26px;height:26px;font-size:.72rem}
+.lefs-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.lefs-item{display:flex;flex-direction:column;gap:4px}
+.lefs-item .lefs-label{font-size:.74rem;color:var(--ink);font-weight:500}
+.lefs-item select{font-size:.78rem;padding:6px 10px}
+.prom-region-tabs{display:flex;gap:8px;margin-bottom:16px}
+.prom-tab{padding:6px 14px;border-radius:20px;border:1.5px solid var(--border);font-size:.76rem;font-weight:600;cursor:pointer;color:var(--muted);transition:all .15s;background:var(--surface)}
+.prom-tab.active{background:var(--navy);border-color:var(--navy);color:#fff}
+
+/* ── Asymmetry Index ── */
+.asi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:4px}
+.asi-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;box-shadow:var(--shadow)}
+.asi-joint{font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px}
+.asi-bar-wrap{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-bottom:6px;position:relative}
+.asi-bar-fill{height:100%;border-radius:4px;transition:width .4s}
+.asi-bar-center{position:absolute;left:50%;top:0;height:100%;width:2px;background:var(--border)}
+.asi-values{display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted)}
+.asi-lsi{text-align:center;margin-top:6px}
+.asi-lsi-val{font-family:'Source Serif 4',serif;font-size:1.4rem;font-weight:600;line-height:1}
+.asi-lsi-label{font-size:.65rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.asi-ok{color:var(--green)}.asi-warn{color:var(--amber)}.asi-poor{color:var(--red)}
+.asi-bar-ok{background:var(--green)}.asi-bar-warn{background:var(--amber)}.asi-bar-poor{background:var(--red)}
+
+/* ── PROMs results card ── */
+.prom-result-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.prom-result-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;box-shadow:var(--shadow);text-align:center}
+.prom-result-score{font-family:'Source Serif 4',serif;font-size:1.6rem;font-weight:600;line-height:1;margin-bottom:4px}
+.prom-result-name{font-size:.72rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+.prom-result-interp{font-size:.74rem;color:var(--muted)}
+.add-proms-btn{display:flex;align-items:center;gap:8px;padding:9px 18px;background:var(--navy-light);border:1px solid var(--border);border-radius:6px;font-family:'Inter',sans-serif;font-size:.8rem;font-weight:600;color:var(--navy-mid);cursor:pointer;transition:all .15s}
+.add-proms-btn:hover{background:var(--teal-light);border-color:var(--teal);color:var(--teal)}
+
 @media print{header,.report-header-right{display:none}#inputSection,#loadingState{display:none!important}#resultsSection{display:block!important}}
 @media(max-width:680px){
   header{padding:0 16px}.container{padding:20px 14px 60px}
@@ -356,6 +410,105 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       </div>
     </div>
 
+
+    <!-- PROMs — optional, collapsible -->
+    <button class="proms-toggle" id="promsToggle" onclick="toggleProms()">
+      <div class="pt-left">
+        <div class="pt-icon">📋</div>
+        <div style="text-align:left">
+          <div>Patient Reported Outcomes (PROMs) <span style="font-size:.72rem;font-weight:400;color:var(--muted);margin-left:6px;">Optional</span></div>
+          <div style="font-size:.72rem;font-weight:400;color:var(--muted);margin-top:1px;">Expand to add pain, function, and quality-of-life scores — can also be added after analysis</div>
+        </div>
+      </div>
+      <span class="pt-arrow">▼</span>
+    </button>
+
+    <div class="proms-panel" id="promsPanel">
+      <!-- Region selector -->
+      <div class="prom-block">
+        <div class="prom-block-title">Assessment Region</div>
+        <div class="prom-block-sub">Select the relevant body region to show appropriate outcome measures</div>
+        <div class="prom-region-tabs">
+          <button class="prom-tab active" onclick="setPROMRegion('lower',this)">Lower Extremity</button>
+          <button class="prom-tab" onclick="setPROMRegion('upper',this)">Upper Extremity</button>
+          <button class="prom-tab" onclick="setPROMRegion('spine',this)">Spine / General</button>
+        </div>
+      </div>
+
+      <!-- NPRS — always shown -->
+      <div class="prom-block">
+        <div class="prom-block-title">NPRS — Numeric Pain Rating Scale</div>
+        <div class="prom-block-sub">Current pain level (0 = no pain, 10 = worst imaginable pain)</div>
+        <div class="prom-scale" id="nprsScale">
+          <!-- generated by JS -->
+        </div>
+        <div class="prom-scale-labels"><span>No pain</span><span>Worst pain</span></div>
+        <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div>
+            <div class="form-label" style="margin-bottom:4px;">Best pain (last 24h)</div>
+            <div class="prom-scale" id="nprsBestScale"></div>
+          </div>
+          <div>
+            <div class="form-label" style="margin-bottom:4px;">Worst pain (last 24h)</div>
+            <div class="prom-scale" id="nprsWorstScale"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PSFS — always shown -->
+      <div class="prom-block">
+        <div class="prom-block-title">PSFS — Patient Specific Functional Scale</div>
+        <div class="prom-block-sub">List up to 3 activities the patient finds difficult. Rate current ability (0 = unable, 10 = fully able).</div>
+        <div id="psfsItems">
+          <div class="psfs-item">
+            <input type="text" placeholder="Activity 1 (e.g. climbing stairs)" id="psfsA1">
+            <div class="psfs-score" id="psfsS1"></div>
+          </div>
+          <div class="psfs-item">
+            <input type="text" placeholder="Activity 2 (e.g. running)" id="psfsA2">
+            <div class="psfs-score" id="psfsS2"></div>
+          </div>
+          <div class="psfs-item">
+            <input type="text" placeholder="Activity 3 (e.g. squatting)" id="psfsA3">
+            <div class="psfs-score" id="psfsS3"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LEFS (lower extremity) -->
+      <div class="prom-block" id="promLower">
+        <div class="prom-block-title">LEFS — Lower Extremity Functional Scale</div>
+        <div class="prom-block-sub">Rate difficulty with each activity today (4 = no difficulty, 0 = unable). Max score: 80.</div>
+        <div class="lefs-grid" id="lefsGrid"></div>
+        <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+          <div style="font-size:.82rem;font-weight:600;color:var(--navy);">Total: <span id="lefsTotal" style="font-family:'Source Serif 4',serif;font-size:1.1rem;">—</span> / 80</div>
+          <div style="font-size:.76rem;color:var(--muted)" id="lefsInterp"></div>
+        </div>
+      </div>
+
+      <!-- DASH (upper extremity) -->
+      <div class="prom-block" id="promUpper" style="display:none;">
+        <div class="prom-block-title">QuickDASH — Disabilities of Arm, Shoulder and Hand</div>
+        <div class="prom-block-sub">Rate difficulty/symptoms (1 = no difficulty, 5 = unable). 11 items. Score 0–100 (lower = better).</div>
+        <div class="lefs-grid" id="dashGrid"></div>
+        <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+          <div style="font-size:.82rem;font-weight:600;color:var(--navy);">Score: <span id="dashScore" style="font-family:'Source Serif 4',serif;font-size:1.1rem;">—</span> / 100</div>
+          <div style="font-size:.76rem;color:var(--muted)" id="dashInterp"></div>
+        </div>
+      </div>
+
+      <!-- Oswestry (spine) -->
+      <div class="prom-block" id="promSpine" style="display:none;">
+        <div class="prom-block-title">Oswestry Disability Index (ODI) — Abbreviated</div>
+        <div class="prom-block-sub">6-item version. Rate how back/neck pain affects each activity (0–5 per item). Score 0–100%.</div>
+        <div id="odiGrid"></div>
+        <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+          <div style="font-size:.82rem;font-weight:600;color:var(--navy);">Disability: <span id="odiScore" style="font-family:'Source Serif 4',serif;font-size:1.1rem;">—</span>%</div>
+          <div style="font-size:.76rem;color:var(--muted)" id="odiInterp"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- API Key -->
     <div class="card" style="margin-bottom:16px;border-color:#f0c040;background:#fffdf0;">
       <div class="card-header" style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #f0e0a0;">
@@ -398,6 +551,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       </div>
       <div class="report-header-right">
         <button class="btn-outline" onclick="resetAll()">+ New Assessment</button>
+        <button class="add-proms-btn" id="addPromsBtn" onclick="showAddPromsModal()" style="display:none;">📋 Add PROMs</button>
         <button class="btn-solid" onclick="exportPDF()">⬇ Download PDF Report</button>
       </div>
     </div>
@@ -417,6 +571,26 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="section-body" id="anglesBody"></div>
     </div>
 
+
+    <!-- Asymmetry Index -->
+    <div class="report-section full" id="asiSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head"><span class="sh-icon">⚖️</span><h3>Limb Symmetry Index (LSI) — Asymmetry Analysis</h3></div>
+      <div class="section-body">
+        <div class="asi-grid" id="asiGrid"></div>
+        <div style="font-size:.74rem;color:var(--muted);margin-top:8px;">
+          🟢 &lt;10% = Symmetric &nbsp;|&nbsp; 🟡 10–15% = Monitor &nbsp;|&nbsp; 🔴 &gt;15% = Significant asymmetry — clinical attention recommended
+        </div>
+      </div>
+    </div>
+
+    <!-- PROMs results (shown when PROMs were entered, or added post-analysis) -->
+    <div class="report-section full" id="promsResultSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head" style="justify-content:space-between;">
+        <div style="display:flex;align-items:center;gap:8px;"><span class="sh-icon">📋</span><h3>Patient Reported Outcomes</h3></div>
+      </div>
+      <div class="section-body" id="promsResultBody"></div>
+    </div>
+
     <!-- Bar path -->
     <div class="report-section full" id="barPathSection" style="margin-bottom:16px;display:none;">
       <div class="section-head"><span class="sh-icon">🎯</span><h3>Barbell Path Analysis</h3></div>
@@ -434,6 +608,19 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="report-grid" id="reportGrid"></div>
   </div>
 
+</div>
+
+<!-- Add PROMs post-analysis modal -->
+<div class="guide-modal" id="addPromsModal">
+  <div class="guide-box" style="max-width:560px;max-height:80vh;overflow-y:auto;">
+    <h3>Add Patient Reported Outcomes</h3>
+    <div class="guide-sub">These scores will be appended to the current report without re-running analysis.</div>
+    <div id="addPromsModalBody"></div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="guide-close" style="background:var(--teal)" onclick="applyPromsToReport()">✓ Add to Report</button>
+      <button class="guide-close" style="background:var(--muted)" onclick="document.getElementById('addPromsModal').classList.remove('open')">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <!-- Camera guide modal -->
@@ -1053,6 +1240,414 @@ const REF_RANGES = {
   'Right Shoulder Flexion':   {label:'Normal: 0-180°'},
 };
 
+// ── PROMs Data & Logic ──
+const LEFS_ITEMS = [
+  'Any of your usual work, housework, or school activities',
+  'Your usual hobbies, recreational or sporting activities',
+  'Getting into or out of the bath',
+  'Walking between rooms','Putting on your shoes or socks',
+  'Squatting','Lifting an object from the floor',
+  'Performing light activities around your home',
+  'Performing heavy activities around your home',
+  'Getting into or out of a car','Walking 2 blocks',
+  'Walking a mile','Going up or down 10 stairs',
+  'Standing for 1 hour','Sitting for 1 hour',
+  'Running on even ground','Running on uneven ground',
+  'Making sharp turns while running fast',
+  'Hopping','Rolling over in bed',
+];
+const LEFS_OPTIONS = ['Unable','Extreme','Quite a bit','Moderate','A little','No difficulty'];
+
+const DASH_ITEMS = [
+  'Open a tight jar','Write','Turn a key',
+  'Prepare a meal','Push open a heavy door',
+  'Place an object on a shelf above your head',
+  'Do heavy household chores','Garden or do yard work',
+  'Make a bed','Carry a shopping bag',
+  'Carry a heavy object (over 10 lbs)',
+];
+const DASH_OPTIONS = ['No difficulty','Mild difficulty','Moderate difficulty','Severe difficulty','Unable'];
+
+const ODI_ITEMS = [
+  {label:'Pain Intensity', opts:['No pain','Very mild','Moderate','Fairly severe','Very severe','Worst imaginable']},
+  {label:'Personal Care', opts:['Normal, no extra pain','Normal, some extra pain','Slow, careful','Mostly independent','Need some help','Need full help']},
+  {label:'Lifting', opts:['Heavy weights, no pain','Heavy with extra pain','Can lift but stays on floor','Too heavy to lift from floor','Only light objects','Cannot lift at all']},
+  {label:'Walking', opts:['No pain any distance','Pain but > 1 mile','Pain limits to 0.5 mile','Pain limits to 100m','Only with walking aid','Mostly in bed']},
+  {label:'Sitting', opts:['As long as I like, no pain','As long as I like, some pain','1 hour max','30 minutes max','10 minutes max','Sitting makes pain worse']},
+  {label:'Standing', opts:['As long as I like, no pain','As long as I like, some pain','1 hour max','30 minutes max','10 minutes max','Standing makes pain worse']},
+];
+
+function buildNPRSScale(containerId, name) {
+  const el = document.getElementById(containerId);
+  if(!el) return;
+  el.innerHTML = Array.from({length:11},(_,i) =>
+    `<label><input type="radio" name="${name}" value="${i}"><div class="ps-num">${i}</div></label>`
+  ).join('');
+}
+
+function buildPSFSScores() {
+  [1,2,3].forEach(n => {
+    const el = document.getElementById(`psfsS${n}`);
+    if(!el) return;
+    el.innerHTML = Array.from({length:11},(_,i) =>
+      `<label class="psfs-score"><input type="radio" name="psfsScore${n}" value="${i}"><div class="ps-num">${i}</div></label>`
+    ).join('');
+  });
+}
+
+function buildLEFS() {
+  const grid = document.getElementById('lefsGrid');
+  if(!grid) return;
+  grid.innerHTML = LEFS_ITEMS.map((item,i) => `
+    <div class="lefs-item">
+      <div class="lefs-label">${item}</div>
+      <select id="lefs_${i}" onchange="updateLEFSTotal()">
+        <option value="">—</option>
+        ${LEFS_OPTIONS.map((o,v)=>`<option value="${4-v}">${o}</option>`).join('')}
+      </select>
+    </div>`).join('');
+}
+
+function updateLEFSTotal() {
+  let total = 0, answered = 0;
+  LEFS_ITEMS.forEach((_,i) => {
+    const v = document.getElementById(`lefs_${i}`)?.value;
+    if(v !== '' && v !== undefined && v !== null) { total += parseInt(v)||0; answered++; }
+  });
+  const el = document.getElementById('lefsTotal');
+  const interp = document.getElementById('lefsInterp');
+  if(el) el.textContent = answered > 0 ? total : '—';
+  if(interp && answered > 0) {
+    if(total >= 65)      interp.textContent = 'Minimal limitation';
+    else if(total >= 50) interp.textContent = 'Moderate limitation';
+    else if(total >= 30) interp.textContent = 'Severe limitation';
+    else                 interp.textContent = 'Very severe limitation';
+  }
+}
+
+function buildDASH() {
+  const grid = document.getElementById('dashGrid');
+  if(!grid) return;
+  grid.innerHTML = DASH_ITEMS.map((item,i) => `
+    <div class="lefs-item">
+      <div class="lefs-label">${item}</div>
+      <select id="dash_${i}" onchange="updateDASHScore()">
+        <option value="">—</option>
+        ${DASH_OPTIONS.map((o,v)=>`<option value="${v+1}">${o}</option>`).join('')}
+      </select>
+    </div>`).join('');
+}
+
+function updateDASHScore() {
+  let total = 0, answered = 0;
+  DASH_ITEMS.forEach((_,i) => {
+    const v = document.getElementById(`dash_${i}`)?.value;
+    if(v) { total += parseInt(v); answered++; }
+  });
+  const el = document.getElementById('dashScore');
+  const interp = document.getElementById('dashInterp');
+  if(el && answered > 0) {
+    const score = Math.round(((total/answered - 1) / 4) * 100);
+    el.textContent = score;
+    if(interp) interp.textContent = score < 25 ? 'Mild disability' : score < 50 ? 'Moderate disability' : 'Severe disability';
+  }
+}
+
+function buildODI() {
+  const grid = document.getElementById('odiGrid');
+  if(!grid) return;
+  grid.innerHTML = ODI_ITEMS.map((item,i) => `
+    <div class="lefs-item" style="margin-bottom:10px;">
+      <div class="lefs-label" style="font-size:.8rem;font-weight:600;color:var(--navy);margin-bottom:4px;">${item.label}</div>
+      <select id="odi_${i}" onchange="updateODIScore()" style="font-size:.78rem;">
+        <option value="">—</option>
+        ${item.opts.map((o,v)=>`<option value="${v}">${v}. ${o}</option>`).join('')}
+      </select>
+    </div>`).join('');
+}
+
+function updateODIScore() {
+  let total = 0, answered = 0;
+  ODI_ITEMS.forEach((_,i) => {
+    const v = document.getElementById(`odi_${i}`)?.value;
+    if(v !== '' && v !== undefined) { total += parseInt(v)||0; answered++; }
+  });
+  const el = document.getElementById('odiScore');
+  const interp = document.getElementById('odiInterp');
+  if(el && answered > 0) {
+    const pct = Math.round((total / (answered * 5)) * 100);
+    el.textContent = pct;
+    if(interp) interp.textContent = pct < 20 ? 'Minimal disability' : pct < 40 ? 'Moderate disability' : pct < 60 ? 'Severe disability' : 'Crippling / bed-bound';
+  }
+}
+
+function initPROMs() {
+  buildNPRSScale('nprsScale', 'nprsCurrent');
+  buildNPRSScale('nprsBestScale', 'nprsBest');
+  buildNPRSScale('nprsWorstScale', 'nprsWorst');
+  buildPSFSScores();
+  buildLEFS();
+  buildDASH();
+  buildODI();
+}
+document.addEventListener('DOMContentLoaded', initPROMs);
+
+function toggleProms() {
+  const panel = document.getElementById('promsPanel');
+  const btn = document.getElementById('promsToggle');
+  const isOpen = panel.classList.contains('open');
+  panel.classList.toggle('open', !isOpen);
+  btn.classList.toggle('open', !isOpen);
+}
+
+function setPROMRegion(region, tabEl) {
+  document.querySelectorAll('.prom-tab').forEach(t => t.classList.remove('active'));
+  tabEl.classList.add('active');
+  document.getElementById('promLower').style.display = region === 'lower' ? 'block' : 'none';
+  document.getElementById('promUpper').style.display = region === 'upper' ? 'block' : 'none';
+  document.getElementById('promSpine').style.display = region === 'spine' ? 'block' : 'none';
+}
+
+// Collect all entered PROMs into a structured object
+function collectPROMs() {
+  const data = {};
+  // NPRS
+  const current = document.querySelector('input[name="nprsCurrent"]:checked')?.value;
+  const best    = document.querySelector('input[name="nprsBest"]:checked')?.value;
+  const worst   = document.querySelector('input[name="nprsWorst"]:checked')?.value;
+  if(current !== undefined) data.nprs = {current: parseInt(current), best: best ? parseInt(best) : null, worst: worst ? parseInt(worst) : null};
+
+  // PSFS
+  const psfs = [];
+  [1,2,3].forEach(n => {
+    const activity = document.getElementById(`psfsA${n}`)?.value?.trim();
+    const score    = document.querySelector(`input[name="psfsScore${n}"]:checked`)?.value;
+    if(activity && score !== undefined) psfs.push({activity, score: parseInt(score)});
+  });
+  if(psfs.length) data.psfs = psfs;
+
+  // LEFS
+  let lefsTotal = 0, lefsAnswered = 0;
+  LEFS_ITEMS.forEach((_,i) => {
+    const v = document.getElementById(`lefs_${i}`)?.value;
+    if(v !== '' && v !== undefined) { lefsTotal += parseInt(v)||0; lefsAnswered++; }
+  });
+  if(lefsAnswered >= 10) data.lefs = {score: lefsTotal, max: 80, answered: lefsAnswered};
+
+  // DASH
+  let dashTotal = 0, dashAnswered = 0;
+  DASH_ITEMS.forEach((_,i) => {
+    const v = document.getElementById(`dash_${i}`)?.value;
+    if(v) { dashTotal += parseInt(v); dashAnswered++; }
+  });
+  if(dashAnswered >= 8) {
+    const dashScore = Math.round(((dashTotal/dashAnswered - 1) / 4) * 100);
+    data.dash = {score: dashScore, answered: dashAnswered};
+  }
+
+  // ODI
+  let odiTotal = 0, odiAnswered = 0;
+  ODI_ITEMS.forEach((_,i) => {
+    const v = document.getElementById(`odi_${i}`)?.value;
+    if(v !== '' && v !== undefined) { odiTotal += parseInt(v)||0; odiAnswered++; }
+  });
+  if(odiAnswered >= 4) {
+    const odiPct = Math.round((odiTotal / (odiAnswered * 5)) * 100);
+    data.odi = {score: odiPct, answered: odiAnswered};
+  }
+
+  return Object.keys(data).length ? data : null;
+}
+
+function promsToPromptText(proms) {
+  if(!proms) return '';
+  const lines = ['PATIENT REPORTED OUTCOMES:'];
+  if(proms.nprs) {
+    lines.push(`  NPRS Current Pain: ${proms.nprs.current}/10${proms.nprs.best != null ? `, Best 24h: ${proms.nprs.best}/10` : ''}${proms.nprs.worst != null ? `, Worst 24h: ${proms.nprs.worst}/10` : ''}`);
+  }
+  if(proms.psfs?.length) {
+    lines.push('  PSFS (Patient-Specific Function):');
+    proms.psfs.forEach(p => lines.push(`    "${p.activity}": ${p.score}/10`));
+    const avg = Math.round(proms.psfs.reduce((s,p)=>s+p.score,0)/proms.psfs.length * 10)/10;
+    lines.push(`    Average PSFS: ${avg}/10`);
+  }
+  if(proms.lefs) lines.push(`  LEFS: ${proms.lefs.score}/80 (${proms.lefs.score >= 65 ? 'Minimal' : proms.lefs.score >= 50 ? 'Moderate' : 'Severe'} limitation)`);
+  if(proms.dash) lines.push(`  QuickDASH: ${proms.dash.score}/100 (${proms.dash.score < 25 ? 'Mild' : proms.dash.score < 50 ? 'Moderate' : 'Severe'} disability)`);
+  if(proms.odi)  lines.push(`  ODI: ${proms.odi.score}% disability (${proms.odi.score < 20 ? 'Minimal' : proms.odi.score < 40 ? 'Moderate' : proms.odi.score < 60 ? 'Severe' : 'Crippling'})`);
+  return lines.join('\n');
+}
+
+function renderPromsResults(proms) {
+  if(!proms) return;
+  const body = document.getElementById('promsResultBody');
+  const section = document.getElementById('promsResultSection');
+  if(!body || !section) return;
+
+  const cards = [];
+  if(proms.nprs) {
+    const c = proms.nprs.current;
+    const col = c <= 3 ? 'score-good' : c <= 6 ? 'score-warn' : 'score-poor';
+    cards.push(`<div class="prom-result-card"><div class="prom-result-score ${col}">${c}/10</div><div class="prom-result-name">NPRS Current</div><div class="prom-result-interp">${c===0?'No pain':c<=3?'Mild pain':c<=6?'Moderate pain':'Severe pain'}</div></div>`);
+    if(proms.nprs.best != null) cards.push(`<div class="prom-result-card"><div class="prom-result-score">${proms.nprs.best}/10</div><div class="prom-result-name">NPRS Best</div><div class="prom-result-interp">Best pain 24h</div></div>`);
+    if(proms.nprs.worst != null) {
+      const wc = proms.nprs.worst <= 3 ? 'score-good' : proms.nprs.worst <= 6 ? 'score-warn' : 'score-poor';
+      cards.push(`<div class="prom-result-card"><div class="prom-result-score ${wc}">${proms.nprs.worst}/10</div><div class="prom-result-name">NPRS Worst</div><div class="prom-result-interp">Worst pain 24h</div></div>`);
+    }
+  }
+  if(proms.psfs?.length) {
+    const avg = Math.round(proms.psfs.reduce((s,p)=>s+p.score,0)/proms.psfs.length * 10)/10;
+    const col = avg >= 7 ? 'score-good' : avg >= 4 ? 'score-warn' : 'score-poor';
+    cards.push(`<div class="prom-result-card"><div class="prom-result-score ${col}">${avg}/10</div><div class="prom-result-name">PSFS Average</div><div class="prom-result-interp">${proms.psfs.map(p=>`${p.activity}: ${p.score}`).join(', ')}</div></div>`);
+  }
+  if(proms.lefs) {
+    const col = proms.lefs.score >= 65 ? 'score-good' : proms.lefs.score >= 50 ? 'score-warn' : 'score-poor';
+    cards.push(`<div class="prom-result-card"><div class="prom-result-score ${col}">${proms.lefs.score}/80</div><div class="prom-result-name">LEFS</div><div class="prom-result-interp">${proms.lefs.score >= 65 ? 'Minimal' : proms.lefs.score >= 50 ? 'Moderate' : 'Severe'} limitation</div></div>`);
+  }
+  if(proms.dash) {
+    const col = proms.dash.score < 25 ? 'score-good' : proms.dash.score < 50 ? 'score-warn' : 'score-poor';
+    cards.push(`<div class="prom-result-card"><div class="prom-result-score ${col}">${proms.dash.score}</div><div class="prom-result-name">QuickDASH</div><div class="prom-result-interp">${proms.dash.score < 25 ? 'Mild' : proms.dash.score < 50 ? 'Moderate' : 'Severe'} disability</div></div>`);
+  }
+  if(proms.odi) {
+    const col = proms.odi.score < 20 ? 'score-good' : proms.odi.score < 40 ? 'score-warn' : 'score-poor';
+    cards.push(`<div class="prom-result-card"><div class="prom-result-score ${col}">${proms.odi.score}%</div><div class="prom-result-name">ODI</div><div class="prom-result-interp">${proms.odi.score < 20 ? 'Minimal' : proms.odi.score < 40 ? 'Moderate' : proms.odi.score < 60 ? 'Severe' : 'Crippling'} disability</div></div>`);
+  }
+
+  body.innerHTML = `<div class="prom-result-grid">${cards.join('')}</div>`;
+  section.style.display = 'block';
+  document.getElementById('addPromsBtn').style.display = 'none'; // already have PROMs
+}
+
+// Post-analysis "Add PROMs" modal — clones the intake form content
+function showAddPromsModal() {
+  const modal = document.getElementById('addPromsModal');
+  const body  = document.getElementById('addPromsModalBody');
+  // Build a minimal inline version
+  body.innerHTML = `
+    <div style="margin-bottom:16px;">
+      <div style="font-size:.82rem;font-weight:700;color:var(--navy);margin-bottom:8px;">NPRS — Current Pain (0–10)</div>
+      <div class="prom-scale" id="modalNprs"></div>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:.82rem;font-weight:700;color:var(--navy);margin-bottom:4px;">PSFS — Patient-Specific Activities</div>
+      <div style="font-size:.74rem;color:var(--muted);margin-bottom:8px;">List activities and rate ability (0–10)</div>
+      ${[1,2,3].map(n=>`
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px;align-items:center;">
+          <input type="text" id="modalPsfsA${n}" placeholder="Activity ${n}" style="font-size:.82rem;padding:7px 10px;border:1px solid var(--border);border-radius:6px;">
+          <div class="prom-scale" id="modalPsfsS${n}" style="flex-wrap:nowrap;"></div>
+        </div>`).join('')}
+    </div>`;
+  buildNPRSScale('modalNprs', 'modalNprsCurrent');
+  [1,2,3].forEach(n => {
+    const el = document.getElementById(`modalPsfsS${n}`);
+    if(el) el.innerHTML = Array.from({length:11},(_,i) =>
+      `<label><input type="radio" name="modalPsfsScore${n}" value="${i}"><div class="ps-num" style="width:24px;height:24px;font-size:.7rem;">${i}</div></label>`
+    ).join('');
+  });
+  modal.classList.add('open');
+}
+
+function applyPromsToReport() {
+  const proms = {};
+  const c = document.querySelector('input[name="modalNprsCurrent"]:checked')?.value;
+  if(c !== undefined) proms.nprs = {current: parseInt(c)};
+  const psfs = [];
+  [1,2,3].forEach(n => {
+    const a = document.getElementById(`modalPsfsA${n}`)?.value?.trim();
+    const s = document.querySelector(`input[name="modalPsfsScore${n}"]:checked`)?.value;
+    if(a && s !== undefined) psfs.push({activity:a, score:parseInt(s)});
+  });
+  if(psfs.length) proms.psfs = psfs;
+  document.getElementById('addPromsModal').classList.remove('open');
+  if(Object.keys(proms).length) renderPromsResults(proms);
+}
+
+// ── Asymmetry / LSI Calculation ──
+function calcLSI(leftVal, rightVal) {
+  if(!leftVal || !rightVal || leftVal === 0) return null;
+  return Math.round((Math.min(leftVal,rightVal) / Math.max(leftVal,rightVal)) * 100);
+}
+
+function calcAsymmetryPct(leftVal, rightVal) {
+  if(!leftVal || !rightVal) return null;
+  return Math.round(Math.abs(leftVal - rightVal) / ((leftVal + rightVal) / 2) * 100);
+}
+
+function renderASI(aggregated) {
+  const pairs = [
+    {label:'Knee Flexion',     left:'Left Knee Flexion',    right:'Right Knee Flexion'},
+    {label:'Hip Flexion',      left:'Left Hip Flexion',     right:'Right Hip Flexion'},
+    {label:'Ankle Dorsiflexion', left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion'},
+    {label:'Shoulder Flexion', left:'Left Shoulder Flexion', right:'Right Shoulder Flexion'},
+  ];
+
+  const cards = [];
+  pairs.forEach(pair => {
+    const L = aggregated[pair.left];
+    const R = aggregated[pair.right];
+    if(!L || !R) return;
+    const lAvg = L.avg, rAvg = R.avg;
+    const lsi = calcLSI(lAvg, rAvg);
+    const asymPct = calcAsymmetryPct(lAvg, rAvg);
+    if(lsi === null || asymPct === null) return;
+
+    const flag = asymPct < 10 ? 'ok' : asymPct < 15 ? 'warn' : 'poor';
+    const flagClass = `asi-${flag}`;
+    const barClass  = `asi-bar-${flag}`;
+
+    // Bar fill: represent deviation from center
+    const maxBar = 30; // 30% deviation = full bar
+    const fillPct = Math.min(100, (asymPct / maxBar) * 50); // half-bar each side
+    const lSide = lAvg >= rAvg; // which side is dominant
+
+    cards.push(`
+      <div class="asi-card">
+        <div class="asi-joint">${pair.label}</div>
+        <div class="asi-bar-wrap">
+          <div class="asi-bar-center"></div>
+          <div class="asi-bar-fill ${barClass}" style="width:${fillPct}%;margin-left:${lSide ? (50-fillPct)+'%' : '50%'};"></div>
+        </div>
+        <div class="asi-values">
+          <span>L: <strong>${lAvg}°</strong></span>
+          <span class="asi-lsi-val ${flagClass}">${lsi}% LSI</span>
+          <span>R: <strong>${rAvg}°</strong></span>
+        </div>
+        <div class="asi-lsi">
+          <div class="asi-lsi-val ${flagClass}">${asymPct}%</div>
+          <div class="asi-lsi-label">Asymmetry · ${flag === 'ok' ? 'Symmetric' : flag === 'warn' ? 'Monitor' : 'Significant'}</div>
+        </div>
+      </div>`);
+  });
+
+  if(cards.length > 0) {
+    document.getElementById('asiGrid').innerHTML = cards.join('');
+    document.getElementById('asiSection').style.display = 'block';
+    return true;
+  }
+  return false;
+}
+
+// Build ASI summary text for Claude prompt
+function asiToPromptText(aggregated) {
+  const pairs = [
+    {label:'Knee Flexion',       left:'Left Knee Flexion',      right:'Right Knee Flexion'},
+    {label:'Hip Flexion',        left:'Left Hip Flexion',       right:'Right Hip Flexion'},
+    {label:'Ankle DF',           left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion'},
+    {label:'Shoulder Flexion',   left:'Left Shoulder Flexion',   right:'Right Shoulder Flexion'},
+  ];
+  const lines = [];
+  pairs.forEach(p => {
+    const L = aggregated[p.left];
+    const R = aggregated[p.right];
+    if(!L || !R) return;
+    const lsi = calcLSI(L.avg, R.avg);
+    const asym = calcAsymmetryPct(L.avg, R.avg);
+    if(lsi === null) return;
+    const flag = asym < 10 ? 'symmetric' : asym < 15 ? 'monitor' : 'SIGNIFICANT ASYMMETRY';
+    lines.push(`  ${p.label}: L=${L.avg}° R=${R.avg}° → LSI ${lsi}% (${asym}% asymmetry — ${flag})`);
+  });
+  return lines.length ? 'LIMB SYMMETRY INDEX:\n' + lines.join('\n') : '';
+}
+
 // ── Movement-Specific Angle Norms ──
 const MOVEMENT_NORMS = {
   'Hip Hinge / Deadlift Pattern': {
@@ -1493,6 +2088,8 @@ ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases
 
 ${angleLines ? `MEASURED JOINT ANGLES (MediaPipe across all frames):\n${angleLines}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
+${asiToPromptText(aggregated) ? `\n${asiToPromptText(aggregated)}` : ''}
+${promsToPromptText(collectPROMs()) ? `\n${promsToPromptText(collectPROMs())}` : ''}
 
 MOVEMENT-SPECIFIC NORMS: Use the following reference ranges for ${movement} when interpreting angles:
 ${(() => {
@@ -1596,6 +2193,11 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       document.getElementById('framesSection').style.display='block';
     }
 
+    // Render ASI
+    if(Object.keys(aggregated).length > 0) {
+      renderASI(aggregated);
+    }
+
     // Render angle table
     if(Object.keys(aggregated).length > 0) {
       const movNorm = movement;
@@ -1614,6 +2216,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       tableHtml += '</tbody></table>';
       document.getElementById('anglesBody').innerHTML = tableHtml;
       document.getElementById('anglesSection').style.display='block';
+    }
+
+    // Render PROMs if entered
+    const collectedPROMs = collectPROMs();
+    if(collectedPROMs) {
+      renderPromsResults(collectedPROMs);
+    } else {
+      document.getElementById('addPromsBtn').style.display = 'flex';
     }
 
     // Render bar path
@@ -1977,6 +2587,71 @@ async function exportPDF() {
         y += 6.5;
       });
       y += 6;
+    }
+
+    // ── ASYMMETRY INDEX ──
+    const asiSection = document.getElementById('asiSection');
+    if(asiSection && asiSection.style.display !== 'none') {
+      pageGuard(40);
+      sectionHead('Limb Symmetry Index — Asymmetry Analysis', '⚖️');
+      const asiCards = asiSection.querySelectorAll('.asi-card');
+      const asiColW = (CW - (Math.min(asiCards.length,3)-1)*4) / Math.min(asiCards.length,3);
+      let aCol = 0, aRowY = y;
+      asiCards.forEach((card, ci) => {
+        const joint = card.querySelector('.asi-joint')?.textContent?.trim() || '';
+        const vals  = card.querySelector('.asi-values')?.textContent?.trim() || '';
+        const lsi   = card.querySelector('.asi-lsi-val')?.textContent?.trim() || '';
+        const flag  = card.querySelector('.asi-lsi-val')?.className || '';
+        const ax = ML + aCol * (asiColW + 4);
+        doc.setFillColor(255,255,255);
+        doc.setDrawColor(213,220,232);
+        doc.roundedRect(ax, aRowY, asiColW, 28, 2, 2, 'FD');
+        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(107,122,141);
+        doc.text(joint.toUpperCase(), ax+4, aRowY+6);
+        // LSI value coloured
+        if(flag.includes('asi-poor'))      doc.setTextColor(192,57,43);
+        else if(flag.includes('asi-warn')) doc.setTextColor(217,119,6);
+        else                               doc.setTextColor(14,124,106);
+        doc.setFont('helvetica','bold'); doc.setFontSize(14);
+        doc.text(lsi, ax + asiColW/2, aRowY+18, {align:'center'});
+        doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(107,122,141);
+        doc.text(vals.replace(/\s+/g,' '), ax+4, aRowY+25, {maxWidth: asiColW-8});
+        aCol++;
+        if(aCol >= 3) { aCol=0; aRowY += 32; }
+      });
+      y = aRowY + (aCol > 0 ? 32 : 0) + 4;
+    }
+
+    // ── PROMS ──
+    const promsSection = document.getElementById('promsResultSection');
+    if(promsSection && promsSection.style.display !== 'none') {
+      pageGuard(35);
+      sectionHead('Patient Reported Outcomes', '📋');
+      const promCards = promsSection.querySelectorAll('.prom-result-card');
+      const pcW = (CW - (Math.min(promCards.length,4)-1)*4) / Math.min(promCards.length,4);
+      let pcCol = 0, pcRowY = y;
+      promCards.forEach(card => {
+        const score = card.querySelector('.prom-result-score')?.textContent?.trim() || '';
+        const name  = card.querySelector('.prom-result-name')?.textContent?.trim()  || '';
+        const interp= card.querySelector('.prom-result-interp')?.textContent?.trim()|| '';
+        const cls   = card.querySelector('.prom-result-score')?.className || '';
+        const px = ML + pcCol * (pcW + 4);
+        doc.setFillColor(255,255,255); doc.setDrawColor(213,220,232);
+        doc.roundedRect(px, pcRowY, pcW, 24, 2, 2, 'FD');
+        if(cls.includes('score-poor'))     doc.setTextColor(192,57,43);
+        else if(cls.includes('score-warn'))doc.setTextColor(217,119,6);
+        else if(cls.includes('score-good'))doc.setTextColor(14,124,106);
+        else                               doc.setTextColor(26,35,50);
+        doc.setFont('helvetica','bold'); doc.setFontSize(12);
+        doc.text(score, px+pcW/2, pcRowY+11, {align:'center'});
+        doc.setFont('helvetica','bold'); doc.setFontSize(6.5); doc.setTextColor(107,122,141);
+        doc.text(name, px+pcW/2, pcRowY+17, {align:'center'});
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.5);
+        doc.text(interp.substring(0,28), px+pcW/2, pcRowY+22, {align:'center'});
+        pcCol++;
+        if(pcCol >= 4) { pcCol=0; pcRowY += 28; }
+      });
+      y = pcRowY + (pcCol > 0 ? 28 : 0) + 4;
     }
 
     // ── BAR PATH ──
