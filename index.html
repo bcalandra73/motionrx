@@ -2337,13 +2337,13 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       }
     }
 
-    report ? renderReport(report, movement, allAngles.length, barStats) : renderRaw(raw, movement);
+    report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
     document.getElementById('resultsSection').scrollIntoView({behavior:'smooth'});
 
   } catch(err) { showErr('Analysis failed: ' + err.message); }
 }
 
-function renderReport(r, movement, trackedFrames, barStats=null) {
+function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) {
   const score = r.score||null;
   const sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
   const highCount = (r.findings||[]).filter(f=>f.priority==='high').length;
