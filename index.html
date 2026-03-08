@@ -557,6 +557,18 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     </div>
     <div class="score-strip" id="scoreStrip"></div>
 
+    <!-- Asymmetry Index -->
+    <div class="report-section full" id="asiSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head"><span class="sh-icon">⚖️</span><h3>Limb Symmetry Index (LSI) — Asymmetry Analysis</h3></div>
+      <div class="section-body">
+        <div class="asi-grid" id="asiGrid"></div>
+        <div style="font-size:.74rem;color:var(--muted);margin-top:8px;">
+          🟢 &lt;10% = Symmetric &nbsp;|&nbsp; 🟡 10–15% = Monitor &nbsp;|&nbsp; 🔴 &gt;15% = Significant asymmetry — clinical attention recommended
+        </div>
+      </div>
+    </div>
+
+
     <!-- Skeleton frames -->
     <div class="report-section full" id="framesSection" style="margin-bottom:16px;display:none;">
       <div class="section-head"><span class="sh-icon">🦴</span><h3>MediaPipe Skeleton Analysis — Tracked Frames</h3></div>
@@ -571,17 +583,6 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="section-body" id="anglesBody"></div>
     </div>
 
-
-    <!-- Asymmetry Index -->
-    <div class="report-section full" id="asiSection" style="margin-bottom:16px;display:none;">
-      <div class="section-head"><span class="sh-icon">⚖️</span><h3>Limb Symmetry Index (LSI) — Asymmetry Analysis</h3></div>
-      <div class="section-body">
-        <div class="asi-grid" id="asiGrid"></div>
-        <div style="font-size:.74rem;color:var(--muted);margin-top:8px;">
-          🟢 &lt;10% = Symmetric &nbsp;|&nbsp; 🟡 10–15% = Monitor &nbsp;|&nbsp; 🔴 &gt;15% = Significant asymmetry — clinical attention recommended
-        </div>
-      </div>
-    </div>
 
     <!-- PROMs results (shown when PROMs were entered, or added post-analysis) -->
     <div class="report-section full" id="promsResultSection" style="margin-bottom:16px;display:none;">
@@ -994,94 +995,123 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null) {
 
 // ── Bar Path Detection ──
 // Detects barbell position using hand landmark midpoint + color scanning
+// Persistent bar tracking state — last known y helps constrain next frame search
+let lastBarY = null;
+
 function detectBarPosition(imageBase64, poseLandmarks) {
   return new Promise(resolve => {
-    if(!poseLandmarks) { resolve(null); return; }
+
+    // Helper: get wrist/hand midpoint from landmarks
+    const getFromLandmarks = (lm) => {
+      if(!lm) return null;
+      const pairs = [[15,16],[17,18],[19,20]];
+      for(const [li,ri] of pairs) {
+        const L = lm[li], R = lm[ri];
+        const lok = L && L.visibility > 0.2;
+        const rok = R && R.visibility > 0.2;
+        if(lok && rok) return {x:(L.x+R.x)/2, y:(L.y+R.y)/2, conf:Math.min(L.visibility,R.visibility)};
+        if(lok) return {x:L.x, y:L.y, conf:L.visibility*0.7};
+        if(rok) return {x:R.x, y:R.y, conf:R.visibility*0.7};
+      }
+      return null;
+    };
+
+    const lmPt = poseLandmarks ? getFromLandmarks(poseLandmarks) : null;
+
+    // Determine x: seed takes priority, else landmark, else center
+    const seedX = barSeedPoint ? barSeedPoint.x : (lmPt ? lmPt.x : 0.5);
+
+    // Determine y search center: prefer last known y for continuity, fall back to landmark
+    const yCenterNorm = lastBarY !== null ? lastBarY : (lmPt ? lmPt.y : (barSeedPoint ? barSeedPoint.y : 0.5));
+
     const img = new Image();
     img.onload = () => {
       const W = img.width, H = img.height;
-      const canvas = document.createElement('canvas');
-      canvas.width = W; canvas.height = H;
-      const ctx = canvas.getContext('2d');
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d');
       ctx.drawImage(img, 0, 0);
 
-      const lm = poseLandmarks;
-      // Use wrist landmarks (15=left wrist, 16=right wrist) as starting search region
-      const lw = lm[15], rw = lm[16];
-      const lwOk = lw && lw.visibility > 0.3;
-      const rwOk = rw && rw.visibility > 0.3;
+      // Search window: ±18% of frame height around last known y
+      const searchHalf = Math.round(H * 0.18);
+      const sy = Math.max(0, Math.round(yCenterNorm * H) - searchHalf);
+      const ey = Math.min(H, Math.round(yCenterNorm * H) + searchHalf);
+      const sh = ey - sy;
 
-      if(!lwOk && !rwOk) { resolve(null); return; }
-
-      // Use user-clicked seed if available (highest priority), else wrists
-      let bx, by;
-      if(barSeedPoint) {
-        bx = barSeedPoint.x; by = barSeedPoint.y;
-      } else if(lwOk && rwOk) {
-        bx = (lw.x + rw.x) / 2;
-        by = (lw.y + rw.y) / 2;
-      } else if(lwOk) {
-        bx = lw.x; by = lw.y;
-      } else {
-        bx = rw.x; by = rw.y;
+      if(sh <= 2) {
+        const fallbackY = lmPt ? lmPt.y : yCenterNorm;
+        lastBarY = fallbackY;
+        resolve({x: seedX, y: fallbackY, confidence:'landmark'});
+        return;
       }
 
-      // Scan a region around the wrist midpoint for metallic/dark bar colors
-      // Search in a horizontal band (bar is horizontal)
-      const searchW = Math.round(W * 0.5);
-      const searchH = Math.round(H * 0.08);
-      const sx = Math.max(0, Math.round(bx * W) - searchW/2);
-      const sy = Math.max(0, Math.round(by * H) - searchH/2);
-      const sw = Math.min(searchW, W - sx);
-      const sh = Math.min(searchH, H - sy);
+      const pix = ctx.getImageData(0, sy, W, sh).data;
+      const rowScores = new Float32Array(sh);
 
-      if(sw <= 0 || sh <= 0) { resolve({x: bx, y: by, confidence: 'wrist-estimated'}); return; }
-
-      const imageData = ctx.getImageData(sx, sy, sw, sh);
-      const pixels = imageData.data;
-
-      // Find horizontal band with most metallic (silver/grey) or dark (black plate) pixels
-      let bestY = null, bestScore = 0;
       for(let row = 0; row < sh; row++) {
-        let score = 0;
-        for(let col = 0; col < sw; col++) {
-          const idx = (row * sw + col) * 4;
-          const r = pixels[idx], g = pixels[idx+1], b = pixels[idx+2];
-          const brightness = (r + g + b) / 3;
-          const saturation = Math.max(r,g,b) - Math.min(r,g,b);
-          // Silver/chrome bar: high brightness, low saturation
-          if(brightness > 140 && saturation < 40) score += 2;
-          // Dark/black plates: very low brightness
-          if(brightness < 50) score += 1.5;
-          // Colored plates (red/blue/green bumper plates)
-          if(r > 150 && g < 80 && b < 80) score += 1; // red
-          if(b > 150 && r < 80 && g < 80) score += 1; // blue
+        let score = 0, barPix = 0;
+        for(let col = 0; col < W; col++) {
+          const i = (row * W + col) * 4;
+          const r = pix[i], g = pix[i+1], b = pix[i+2];
+          const bright = (r + g + b) / 3;
+          const sat = Math.max(r,g,b) - Math.min(r,g,b);
+          // Bar materials
+          const isChrome = bright > 145 && sat < 40;           // shiny chrome
+          const isDark   = bright < 60;                         // dark iron / knurling
+          const isRubber = bright > 40 && bright < 90 && sat < 30; // black rubber bumpers
+          const isBumper = (r>130&&g<90&&b<90)||(b>130&&r<90&&g<90)||(g>130&&r<90&&b<90)||(r>150&&g>100&&b<60); // colored bumpers
+          if(isChrome)  { score += 3.0; barPix++; }
+          else if(isDark||isRubber){ score += 2.0; barPix++; }
+          else if(isBumper){ score += 2.5; barPix++; }
         }
-        if(score > bestScore) { bestScore = score; bestY = row; }
+        // Require at least 8% of row width to be bar-like pixels
+        rowScores[row] = barPix > W * 0.08 ? score : 0;
       }
 
-      if(bestY !== null && bestScore > sw * 0.3) {
-        // Refine x position: find horizontal center of bar pixels in that row
-        let xSum = 0, xCount = 0;
-        for(let col = 0; col < sw; col++) {
-          const idx = (bestY * sw + col) * 4;
-          const r = pixels[idx], g = pixels[idx+1], b = pixels[idx+2];
-          const brightness = (r+g+b)/3;
-          const sat = Math.max(r,g,b)-Math.min(r,g,b);
-          if((brightness > 140 && sat < 40) || brightness < 50) {
-            xSum += col; xCount++;
-          }
+      // Find best-scoring row; apply continuity bias toward last known y
+      let bestRow = -1, bestScore = 0;
+      for(let row = 0; row < sh; row++) {
+        if(rowScores[row] <= 0) continue;
+        // Continuity bonus: rows close to last known y get a boost
+        const distFromCenter = Math.abs(row - searchHalf);
+        const continuityBonus = 1 - (distFromCenter / searchHalf) * 0.3;
+        const adjScore = rowScores[row] * continuityBonus;
+        if(adjScore > bestScore) { bestScore = adjScore; bestRow = row; }
+      }
+
+      const minScore = W * 0.10;
+      if(bestRow >= 0 && bestScore > minScore) {
+        // Refine: average the top few rows within 3px of bestRow
+        let ySum = 0, wSum = 0;
+        for(let row = Math.max(0, bestRow-3); row <= Math.min(sh-1, bestRow+3); row++) {
+          if(rowScores[row] > 0) { ySum += (sy + row) * rowScores[row]; wSum += rowScores[row]; }
         }
-        const refX = xCount > 0 ? sx + xSum/xCount : sx + sw/2;
-        const refY = sy + bestY;
-        resolve({x: refX/W, y: refY/H, confidence: 'color-detected', score: bestScore});
+        const refinedY = wSum > 0 ? (ySum / wSum) / H : (sy + bestRow) / H;
+        lastBarY = refinedY;
+        resolve({x: seedX, y: refinedY, confidence: 'color-tracked'});
       } else {
-        // Fallback to wrist midpoint
-        resolve({x: bx, y: by, confidence: 'wrist-estimated'});
+        // No bar pixels found — use landmark y if available, else last known
+        const fallbackY = lmPt ? lmPt.y : yCenterNorm;
+        // Only update lastBarY from landmark if we haven't tracked yet
+        if(lastBarY === null) lastBarY = fallbackY;
+        resolve({x: seedX, y: fallbackY, confidence: 'landmark'});
       }
     };
-    img.onerror = () => resolve(null);
+    img.onerror = () => {
+      const fallbackY = lmPt ? lmPt.y : yCenterNorm;
+      resolve({x: seedX, y: fallbackY, confidence: 'error'});
+    };
     img.src = 'data:image/jpeg;base64,' + imageBase64;
+  });
+}
+
+// Smooth bar path points to remove frame-to-frame jitter
+function smoothBarPoints(points) {
+  if(points.length < 3) return points;
+  return points.map((p, i) => {
+    if(i === 0 || i === points.length-1) return p;
+    const prev = points[i-1], next = points[i+1];
+    return {x: prev.x*0.25+p.x*0.5+next.x*0.25, y: prev.y*0.25+p.y*0.5+next.y*0.25, confidence: p.confidence};
   });
 }
 
@@ -1815,20 +1845,65 @@ function getPhaseTimes(movement, videoDuration) {
       labels: Array.from({length:8}, (_,i) => ({id:'frame', label:`Frame ${i+1}`, desc:''}))
     };
   }
-  // Add 4 extra frames in between phase keyframes for more coverage
+  // Build expanded frame list targeting exactly 8 frames
+  // Strategy: key phases + interpolated frames, prioritising largest gaps
   const expanded = [];
   const expandedLabels = [];
   phases.forEach((phase, i) => {
     expanded.push(phase.time);
     expandedLabels.push(phase);
-    // Add an interpolated frame between each phase
     if(i < phases.length - 1) {
-      const mid = (phase.time + phases[i+1].time) / 2;
-      expanded.push(mid);
-      expandedLabels.push({id:'frame', label:`Inter ${i+1}`, desc:'Between phases'});
+      const gap = phases[i+1].time - phase.time;
+      // Always add one mid-point interpolation
+      expanded.push(phase.time + gap * 0.5);
+      expandedLabels.push({id:'frame', label:`Inter ${i+1}a`, desc:'Between phases'});
+      // Add a second interpolation in larger gaps (>0.25) to fill up to 8
+      if(gap > 0.25) {
+        expanded.push(phase.time + gap * 0.75);
+        expandedLabels.push({id:'frame', label:`Inter ${i+1}b`, desc:'Between phases'});
+      }
     }
   });
-  return {times: expanded.map(t => Math.max(0.02, Math.min(0.97, t))), labels: expandedLabels};
+  // Trim or pad to exactly 8
+  while(expanded.length > 8) {
+    // Remove the last non-phase interpolated frame
+    const lastInter = [...expandedLabels].reverse().findIndex(l => l.id === 'frame');
+    if(lastInter === -1) break;
+    const idx = expandedLabels.length - 1 - lastInter;
+    expanded.splice(idx, 1);
+    expandedLabels.splice(idx, 1);
+  }
+  while(expanded.length < 8) {
+    // Fill by bisecting the largest gap
+    let maxGap = 0, maxIdx = 0;
+    for(let i = 0; i < expanded.length - 1; i++) {
+      const g = expanded[i+1] - expanded[i];
+      if(g > maxGap) { maxGap = g; maxIdx = i; }
+    }
+    const newT = (expanded[maxIdx] + expanded[maxIdx+1]) / 2;
+    expanded.splice(maxIdx+1, 0, newT);
+    expandedLabels.splice(maxIdx+1, 0, {id:'frame', label:`Extra ${expanded.length}`, desc:'Added for coverage'});
+  }
+  // Clamp, then deduplicate times that are too close (within 3% of video duration)
+  const clamped = expanded.map(t => Math.max(0.02, Math.min(0.97, t)));
+  const deduped = []; const dedupedLabels = [];
+  clamped.forEach((t, i) => {
+    if(!deduped.some(existing => Math.abs(existing - t) < 0.03)) {
+      deduped.push(t); dedupedLabels.push(expandedLabels[i]);
+    }
+  });
+  // Pad back to 8 if deduplication removed frames
+  while(deduped.length < 8) {
+    let maxGap = 0, maxIdx = 0;
+    for(let i = 0; i < deduped.length - 1; i++) {
+      const g = deduped[i+1] - deduped[i];
+      if(g > maxGap) { maxGap = g; maxIdx = i; }
+    }
+    const newT = Math.max(0.02, Math.min(0.97, (deduped[maxIdx] + deduped[maxIdx+1]) / 2));
+    deduped.splice(maxIdx+1, 0, newT);
+    dedupedLabels.splice(maxIdx+1, 0, {id:'frame', label:`Frame ${deduped.length}`, desc:'Coverage frame'});
+  }
+  return {times: deduped.slice(0, 8), labels: dedupedLabels.slice(0, 8)};
 }
 
 // ── Camera Guide Data ──
@@ -2023,7 +2098,8 @@ async function runAnalysis() {
   // Step 1-2: MediaPipe on all frames + bar detection
   let annotatedFrames = [];
   let allAngles = [];
-  let barPoints = [];      // normalized {x,y} per frame
+  let barPoints = [];
+  lastBarY = null; // reset bar tracking state for new analysis      // normalized {x,y} per frame
   let frameHeight = 480;   // fallback
 
   const isLift = /deadlift|squat|press|hinge|push|pull/i.test(movement);
@@ -2068,7 +2144,8 @@ async function runAnalysis() {
   ).join('\n');
 
   // Bar path stats
-  const barStats = barPoints.length >= 2 ? analyzeBarPath(barPoints, frameHeight) : null;
+  const smoothedBarPoints = barPoints.length >= 3 ? smoothBarPoints(barPoints) : barPoints;
+  const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, frameHeight) : null;
   const barPathLine = barStats
     ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}`
     : '';
@@ -2231,7 +2308,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       const refFrameIdx = Math.floor(annotatedFrames.length / 2); // use middle frame as background
       const refBase64 = extractedFrames[refFrameIdx]?.imageData || extractedFrames[0]?.imageData;
       if(refBase64) {
-        const barPathB64 = await drawBarPath(refBase64, barPoints);
+        const barPathB64 = await drawBarPath(refBase64, smoothedBarPoints);
         if(barPathB64) {
           document.getElementById('barPathImg').src = 'data:image/jpeg;base64,' + barPathB64;
           const flagClass = barStats.flag;
@@ -2270,6 +2347,27 @@ function renderReport(r, movement, trackedFrames, barStats=null) {
   const score = r.score||null;
   const sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
   const highCount = (r.findings||[]).filter(f=>f.priority==='high').length;
+  // Build ASI summary tile — find worst asymmetry pair
+  let worstAsymPct = 0, worstAsymLabel = '';
+  const asiPairsForTile = [
+    {label:'Knee',    left:'Left Knee Flexion',       right:'Right Knee Flexion'},
+    {label:'Hip',     left:'Left Hip Flexion',        right:'Right Hip Flexion'},
+    {label:'Ankle',   left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion'},
+    {label:'Shoulder',left:'Left Shoulder Flexion',   right:'Right Shoulder Flexion'},
+  ];
+  asiPairsForTile.forEach(p => {
+    const L = aggregated[p.left], R = aggregated[p.right];
+    if(!L || !R) return;
+    const a = calcAsymmetryPct(L.avg, R.avg);
+    if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; }
+  });
+  const asiTileFlag = worstAsymPct < 10 ? 'score-good' : worstAsymPct < 15 ? 'score-warn' : 'score-poor';
+  const asiTile = worstAsymLabel ? `
+    <div class="score-tile">
+      <div class="score-tile-value ${asiTileFlag}">${worstAsymPct}%</div>
+      <div class="score-tile-label">Worst Asymmetry (${worstAsymLabel})</div>
+    </div>` : '';
+
   const barTile = barStats ? `
     <div class="score-tile">
       <div class="score-tile-value ${barStats.flag}" style="font-size:1.3rem;">${barStats.maxDriftCm}cm</div>
@@ -2290,6 +2388,7 @@ function renderReport(r, movement, trackedFrames, barStats=null) {
       <div class="score-tile-label">High Priority Findings</div>
     </div>
     ${barTile}
+    ${asiTile}
     <div class="score-tile">
       <div class="score-tile-value" style="font-size:.72rem;color:var(--muted);padding-top:4px;line-height:1.4;">${r.score_summary||'—'}</div>
       <div class="score-tile-label">Summary</div>
