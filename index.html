@@ -641,6 +641,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
 <script>
 // ── State ──
+let aggregated = {};  // module-level so always in scope
 let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
 let poseResults = [];     // MediaPipe results per frame
@@ -2138,7 +2139,7 @@ async function runAnalysis() {
   }
 
   // Step 3: Aggregate angles
-  const aggregated = allAngles.length > 0 ? aggregateAngles(allAngles) : {};
+  aggregated = allAngles.length > 0 ? aggregateAngles(allAngles) : {};
   const angleLines = Object.entries(aggregated).map(([k,v]) =>
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
