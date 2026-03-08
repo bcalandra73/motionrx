@@ -283,8 +283,10 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <span class="upload-icon">📁</span>
           <div class="upload-title">Drop file here or click to browse</div>
           <div class="upload-sub">MP4, MOV, AVI · JPG, PNG</div>
-          <div class="upload-tip" style="cursor:pointer" onclick="showGuide()">💡 Side-view or frontal-view works best — <u>view camera tips</u></div>
         </div>
+        <button type="button" onclick="showGuide()" style="margin-top:10px;display:flex;align-items:center;gap:6px;background:var(--navy-light);border:1px solid var(--border);border-radius:6px;padding:7px 14px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:500;color:var(--navy-mid);cursor:pointer;width:100%;justify-content:center;transition:all .15s;" onmouseover="this.style.background='var(--teal-light)';this.style.borderColor='var(--teal)';this.style.color='var(--teal)'" onmouseout="this.style.background='var(--navy-light)';this.style.borderColor='var(--border)';this.style.color='var(--navy-mid)'">
+          💡 View camera setup tips for best tracking accuracy
+        </button>
 
         <div class="file-preview" id="filePreview">
           <div class="preview-wrap" id="previewWrap"></div>
