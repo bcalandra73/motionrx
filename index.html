@@ -706,6 +706,9 @@ let aggregated = {};  // module-level so always in scope
 let cameraView = 'side'; // 'side' | 'front' | 'posterior'
 let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
+let barTrackingFrames = []; // higher-density frames for bar path only
+let rawBarPoints = [];      // full-density bar path points {x,y,confidence,t}
+let barReferenceFrame = null;  // base64 of first bar-tracking frame for visualization
 let poseResults = [];     // MediaPipe results per frame
 let poseInstance = null;
 let mpReady = false;
@@ -981,6 +984,26 @@ function startFrameExtraction(file, vid) {
               : {id:'lockout', label:'Lockout', desc:`Full extension — detected via hip angle`};
             console.log(`[SmartPhase] Relabeled frame ${extremeIdx+1} as ${targetId} via ${method}`);
           }
+
+          // ── Store phase-frame hand positions as landmark anchors for dense bar tracking ──
+          window._phaseLandmarkAnchors = [];
+          const phaseFrameTimes = frames.map((f, fi) => {
+            // Reconstruct the time fraction for each phase frame
+            return phaseTimeProportions[fi] !== undefined ? phaseTimeProportions[fi] : fi / Math.max(1, frames.length - 1);
+          });
+          quickFused.forEach((lms, fi) => {
+            if(!lms) return;
+            const v = (n) => lms[n] && lms[n].visibility > 0.2 ? lms[n] : null;
+            const handLMs = [15,16,17,18,19,20].map(i => v(i)).filter(Boolean);
+            if(handLMs.length > 0) {
+              window._phaseLandmarkAnchors.push({
+                t: phaseFrameTimes[fi] || (fi / Math.max(1, frames.length - 1)),
+                handX: handLMs.reduce((s,p)=>s+p.x,0) / handLMs.length,
+                handY: handLMs.reduce((s,p)=>s+p.y,0) / handLMs.length,
+              });
+            }
+          });
+          console.log(`[SmartPhase] Stored ${window._phaseLandmarkAnchors.length} landmark anchors for dense bar tracking`);
         } catch(e) {
           console.warn('Smart phase detection failed, using time-based labels:', e);
         }
@@ -990,6 +1013,130 @@ function startFrameExtraction(file, vid) {
       // Show bar-click UI for lifts using first captured frame
       const isLift = /deadlift|squat|press|hinge|push|pull|lunge|sit/i.test(movement);
       if(isLift && frames[0]) setupBarClickFrame(frames[0].imageData);
+
+      // ── Dense bar tracking extraction ──
+      // Strategy:
+      //   1. Extract 50 evenly-spaced frames for color-based bar detection
+      //   2. Use MoveNet on 6 sparse anchor frames to get hand Y positions
+      //   3. Interpolate those anchor hand positions across all 50 frames
+      //   4. Each dense frame gets a landmark-anchored search window
+      //   5. Outlier rejection + cubic interpolation fills gaps
+      if(isLift && dur > 0.5) {
+        const BAR_FRAME_COUNT = 50;
+        const barTimes = Array.from({length: BAR_FRAME_COUNT}, (_, i) =>
+          0.03 + (i / (BAR_FRAME_COUNT - 1)) * 0.94
+        ).map(t => t * dur);
+
+        statusText.textContent = `Extracting ${BAR_FRAME_COUNT} bar tracking frames...`;
+        barTrackingFrames = [];
+        rawBarPoints = [];
+        barReferenceFrame = null;
+        lastBarY = null;
+
+        // Extract all frames
+        for(let i = 0; i < barTimes.length; i++) {
+          const b64 = await seekCapture(vid, barTimes[i], true);
+          if(b64) barTrackingFrames.push({imageData: b64, t: barTimes[i] / dur});
+          barFill.style.width = `${Math.round(((i+1)/barTimes.length) * 80)}%`;
+        }
+
+        // Reference frame for visualization: ~35% through lift
+        const refIdx = Math.floor(barTrackingFrames.length * 0.35);
+        barReferenceFrame = barTrackingFrames[refIdx]?.imageData
+                          || barTrackingFrames[0]?.imageData || null;
+
+        // ── Step 2: MoveNet on 6 anchor frames to get hand landmark positions ──
+        const anchorIndices = [0, 0.2, 0.4, 0.6, 0.8, 1.0].map(f =>
+          Math.min(barTrackingFrames.length - 1, Math.round(f * (barTrackingFrames.length - 1)))
+        );
+        const anchorLandmarks = []; // [{t, handX, handY}]
+
+        if(moveNetReady && moveNetDetector && barTrackingFrames.length > 0) {
+          statusText.textContent = 'Running pose anchors for bar detection...';
+          for(const ai of anchorIndices) {
+            const frame = barTrackingFrames[ai];
+            if(!frame) continue;
+            try {
+              const img = new Image();
+              await new Promise((res, rej) => {
+                img.onload = res; img.onerror = rej;
+                img.src = 'data:image/jpeg;base64,' + frame.imageData;
+              });
+              const tf_img = tf.browser.fromPixels(img);
+              const poses = await moveNetDetector.estimatePoses(tf_img);
+              tf_img.dispose();
+              if(poses && poses[0] && poses[0].keypoints) {
+                const kps = poses[0].keypoints;
+                // MoveNet: 9=left wrist, 10=right wrist
+                const handKps = [9, 10].map(i => kps[i]).filter(k => k && k.score > 0.15);
+                if(handKps.length > 0) {
+                  const hx = handKps.reduce((s,k)=>s+k.x/img.width,0) / handKps.length;
+                  const hy = handKps.reduce((s,k)=>s+k.y/img.height,0) / handKps.length;
+                  anchorLandmarks.push({t: frame.t, handX: hx, handY: hy});
+                }
+              }
+            } catch(e) { /* skip this anchor on error */ }
+          }
+        }
+
+        // Use phase-frame MediaPipe results as additional anchors if stored
+        if(window._phaseLandmarkAnchors && window._phaseLandmarkAnchors.length > 0) {
+          anchorLandmarks.push(...window._phaseLandmarkAnchors);
+          anchorLandmarks.sort((a,b) => a.t - b.t);
+        }
+
+        // ── Step 3: Interpolated hand position for any time t ──
+        function interpolateHandPos(t) {
+          if(anchorLandmarks.length === 0) return null;
+          if(anchorLandmarks.length === 1) return anchorLandmarks[0];
+          if(t <= anchorLandmarks[0].t) return anchorLandmarks[0];
+          if(t >= anchorLandmarks[anchorLandmarks.length-1].t)
+            return anchorLandmarks[anchorLandmarks.length-1];
+          for(let i = 1; i < anchorLandmarks.length; i++) {
+            if(anchorLandmarks[i].t >= t) {
+              const a = anchorLandmarks[i-1], b = anchorLandmarks[i];
+              const frac = (t - a.t) / Math.max(0.001, b.t - a.t);
+              return {
+                handX: a.handX + frac * (b.handX - a.handX),
+                handY: a.handY + frac * (b.handY - a.handY),
+              };
+            }
+          }
+          return anchorLandmarks[anchorLandmarks.length-1];
+        }
+
+        // ── Step 4: Bar detection with per-frame interpolated landmark anchor ──
+        statusText.textContent = `Tracking bar across ${barTrackingFrames.length} frames...`;
+        lastBarY = null;
+
+        for(let i = 0; i < barTrackingFrames.length; i++) {
+          const bf = barTrackingFrames[i];
+          const handPos = interpolateHandPos(bf.t);
+          let syntheticLandmarks = null;
+          if(handPos) {
+            // Inject hand position at wrist/finger landmark indices
+            syntheticLandmarks = new Array(33).fill(null);
+            [15,16,17,18,19,20].forEach(li => {
+              syntheticLandmarks[li] = {x: handPos.handX, y: handPos.handY, z: 0, visibility: 0.6};
+            });
+          }
+          const pt = await detectBarPosition(bf.imageData, syntheticLandmarks, cameraView);
+          if(pt) rawBarPoints.push({...pt, t: bf.t});
+
+          if(i % 5 === 0)
+            barFill.style.width = `${80 + Math.round((i / barTrackingFrames.length) * 18)}%`;
+        }
+
+        barFill.style.width = '100%';
+
+        // ── Step 5: Outlier rejection + gap filling ──
+        rawBarPoints = rejectBarOutliers(rawBarPoints);
+        rawBarPoints = interpolateMissingBarPoints(rawBarPoints, barTimes.map(t => t/dur));
+
+        lastBarY = null;
+        statusText.textContent = `✓ Bar path: ${rawBarPoints.length} points tracked`;
+        console.log(`[BarTracking] ${rawBarPoints.length} pts from ${barTrackingFrames.length} frames, ${anchorLandmarks.length} anchors`);
+      }
     } else {
       statusText.textContent = 'Seek failed — trying playback...';
       await captureViaPlay(vid, barFill, statusText);
@@ -1003,14 +1150,14 @@ function startFrameExtraction(file, vid) {
   vid.addEventListener('error', () => { statusText.textContent = '⚠️ Video format not supported. Upload a JPG/PNG screenshot instead.'; barFill.style.width='0%'; });
 }
 
-function seekCapture(vid, t) {
+function seekCapture(vid, t, barMode=false) {
   return new Promise(resolve => {
     let done = false;
     const timer = setTimeout(() => { if(!done){done=true;resolve(null);} }, 5000);
     const onSeeked = () => {
       if(done) return; done=true; clearTimeout(timer);
       vid.removeEventListener('seeked', onSeeked);
-      resolve(captureFrameFromVideo(vid));
+      resolve(barMode ? captureBarFrame(vid) : captureFrameFromVideo(vid));
     };
     vid.addEventListener('seeked', onSeeked);
     try { vid.currentTime = t; } catch(e) { resolve(null); }
@@ -1046,6 +1193,20 @@ function captureFrameFromVideo(vid) {
     canvas.getContext('2d').drawImage(vid,0,0,canvas.width,canvas.height);
     const b64 = canvas.toDataURL('image/jpeg',0.82).split(',')[1];
     return (b64 && b64.length > 300) ? b64 : null;
+  } catch(e) { return null; }
+}
+
+// Smaller capture for bar tracking — faster to process, color detection doesn't need full res
+function captureBarFrame(vid) {
+  try {
+    const w = vid.videoWidth||640, h = vid.videoHeight||480;
+    if(!w||!h) return null;
+    const scale = Math.min(1, 480/Math.max(w,h)); // max 480px — sufficient for color detection
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(w*scale); canvas.height = Math.round(h*scale);
+    canvas.getContext('2d').drawImage(vid,0,0,canvas.width,canvas.height);
+    const b64 = canvas.toDataURL('image/jpeg',0.75).split(',')[1];
+    return (b64 && b64.length > 200) ? b64 : null;
   } catch(e) { return null; }
 }
 
@@ -1740,6 +1901,87 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
 }
 
 
+// ── Bar path outlier rejection ──
+// Removes points where position jumps implausibly fast (detection artifact)
+function rejectBarOutliers(points) {
+  if(points.length < 4) return points;
+  const MAX_JUMP_X = 0.06;  // max 6% frame width per step (bar can't teleport)
+  const MAX_JUMP_Y = 0.08;  // max 8% frame height per step
+  const result = [points[0]];
+  for(let i = 1; i < points.length; i++) {
+    const prev = result[result.length - 1];
+    const curr = points[i];
+    const dx = Math.abs(curr.x - prev.x);
+    const dy = Math.abs(curr.y - prev.y);
+    if(dx <= MAX_JUMP_X && dy <= MAX_JUMP_Y) {
+      result.push(curr);
+    }
+    // else: skip this point (outlier) — gap will be filled by interpolation
+  }
+  return result;
+}
+
+// ── Bar path gap interpolation ──
+// After outlier removal, t values may have gaps — fill with linear interpolation
+// so the path remains temporally consistent for display
+function interpolateMissingBarPoints(points, allTimes) {
+  if(points.length < 2) return points;
+  if(!allTimes || allTimes.length === 0) return points;
+
+  // Build a map of which times have valid detections
+  const validMap = new Map(points.map(p => [Math.round(p.t * 1000), p]));
+
+  // For each expected time slot, if no detection, interpolate from neighbors
+  const result = [];
+  for(let i = 0; i < allTimes.length; i++) {
+    const t = allTimes[i];
+    const key = Math.round(t * 1000);
+    if(validMap.has(key)) {
+      result.push(validMap.get(key));
+      continue;
+    }
+    // Find nearest valid points before and after
+    let prev = null, next = null;
+    for(const p of points) { if(p.t <= t) prev = p; else { next = p; break; } }
+    if(prev && next) {
+      const frac = (t - prev.t) / Math.max(0.001, next.t - prev.t);
+      // Cubic ease for smoother interpolation
+      const smooth = frac * frac * (3 - 2 * frac);
+      result.push({
+        x: prev.x + smooth * (next.x - prev.x),
+        y: prev.y + smooth * (next.y - prev.y),
+        confidence: 'interpolated',
+        t
+      });
+    } else if(prev) {
+      result.push({...prev, t, confidence: 'extrapolated'});
+    } else if(next) {
+      result.push({...next, t, confidence: 'extrapolated'});
+    }
+  }
+  return result;
+}
+
+// ── Catmull-Rom spline through bar points for smooth visualization ──
+function catmullRomSpline(points, numSegments = 8) {
+  if(points.length < 2) return points;
+  if(points.length === 2) return points;
+  const result = [];
+  // Pad with phantom endpoints
+  const pts = [points[0], ...points, points[points.length-1]];
+  for(let i = 1; i < pts.length - 2; i++) {
+    const p0 = pts[i-1], p1 = pts[i], p2 = pts[i+1], p3 = pts[i+2];
+    for(let j = 0; j <= numSegments; j++) {
+      const t = j / numSegments;
+      const t2 = t*t, t3 = t2*t;
+      const x = 0.5*((2*p1.x) + (-p0.x+p2.x)*t + (2*p0.x-5*p1.x+4*p2.x-p3.x)*t2 + (-p0.x+3*p1.x-3*p2.x+p3.x)*t3);
+      const y = 0.5*((2*p1.y) + (-p0.y+p2.y)*t + (2*p0.y-5*p1.y+4*p2.y-p3.y)*t2 + (-p0.y+3*p1.y-3*p2.y+p3.y)*t3);
+      result.push({x, y, t: p1.t + (p2.t - p1.t) * (j/numSegments)});
+    }
+  }
+  return result;
+}
+
 function smoothBarPoints(points) {
   if(points.length < 3) return points;
   return points.map((p, i) => {
@@ -1792,162 +2034,381 @@ function drawBarPath(imageBase64, barPoints) {
   });
 }
 
-// Draw multi-frame bar motion trace — view-aware 2D plot
-function drawBarMotionTrace(annotatedFrames, barPoints, view) {
+// ── Metric-style bar path overlay on actual video frame ──
+// Renders the dense bar path as a glowing line overlaid on the real setup frame
+function drawBarPathOverlay(bgImageB64, barPoints, view) {
   return new Promise(resolve => {
-    if(!barPoints || barPoints.length < 2 || !annotatedFrames || annotatedFrames.length < 2) {
-      resolve(null); return;
+    if(!barPoints || barPoints.length < 3) { resolve(null); return; }
+    const bg = new Image();
+    bg.onload = () => {
+      const W = bg.width, H = bg.height;
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d');
+
+      ctx.drawImage(bg, 0, 0);
+      ctx.fillStyle = 'rgba(0,0,0,0.42)';
+      ctx.fillRect(0, 0, W, H);
+
+      const pts = barPoints.map(p => ({cx: p.x*W, cy: p.y*H, conf: p.confidence, t: p.t||0}));
+      const smoothPts = catmullRomSpline(pts, 8);
+      const idealX = pts[0].cx;
+
+      // Glow
+      ctx.beginPath();
+      ctx.moveTo(smoothPts[0].cx, smoothPts[0].cy);
+      smoothPts.forEach(p => ctx.lineTo(p.cx, p.cy));
+      ctx.strokeStyle = 'rgba(0,229,204,0.18)';
+      ctx.lineWidth = 14;
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // Deviation-heatmapped path: teal=on-track, amber=warning, red=significant
+      for(let i = 1; i < smoothPts.length; i++) {
+        const dev = Math.abs(smoothPts[i].cx - idealX) / W;
+        let r, g, b;
+        if(dev < 0.025) {
+          r = Math.round(dev/0.025 * 255); g = Math.round(229 - dev/0.025*70); b = Math.round(204 - dev/0.025*100);
+        } else {
+          const t2 = Math.min(1, (dev-0.025)/0.05);
+          r = 255; g = Math.round(159 - t2*88); b = Math.round(67 - t2*60);
+        }
+        ctx.beginPath();
+        ctx.moveTo(smoothPts[i-1].cx, smoothPts[i-1].cy);
+        ctx.lineTo(smoothPts[i].cx, smoothPts[i].cy);
+        ctx.strokeStyle = `rgb(${r},${g},${b})`;
+        ctx.lineWidth = 3.5;
+        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+
+      // Ideal vertical reference
+      const minCy = Math.min(...pts.map(p=>p.cy));
+      const maxCy = Math.max(...pts.map(p=>p.cy));
+      ctx.beginPath();
+      ctx.setLineDash([5,5]);
+      ctx.moveTo(idealX, minCy-24); ctx.lineTo(idealX, maxCy+24);
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+      ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Key dots
+      const maxDevPt = pts.reduce((b,p) => Math.abs(p.cx-idealX) > Math.abs(b.cx-idealX) ? p : b, pts[0]);
+      const minYPt   = pts.reduce((b,p) => p.cy < b.cy ? p : b, pts[0]);
+      [{pt:pts[0], col:'#00e5cc', label:'Start', sz:8},
+       {pt:pts[pts.length-1], col:'#a29bfe', label:'End', sz:8},
+       {pt:minYPt, col:'#ffffff', label:'Top', sz:6},
+       {pt:maxDevPt, col:'#ff4757', label:'Max drift', sz:7}
+      ].forEach(({pt,col,label,sz}) => {
+        ctx.beginPath(); ctx.arc(pt.cx, pt.cy, sz+3, 0, 2*Math.PI);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fill();
+        ctx.beginPath(); ctx.arc(pt.cx, pt.cy, sz, 0, 2*Math.PI);
+        ctx.fillStyle = col; ctx.fill();
+        const fs = Math.max(10, W/90);
+        ctx.font = `bold ${fs}px Inter,system-ui,sans-serif`;
+        ctx.strokeStyle='rgba(0,0,0,0.85)'; ctx.lineWidth=3.5;
+        ctx.strokeText(label, pt.cx+sz+6, pt.cy+4);
+        ctx.fillStyle=col; ctx.fillText(label, pt.cx+sz+6, pt.cy+4);
+      });
+
+      // Info panel
+      const drifts = pts.map(p => Math.abs(p.cx-idealX)/W);
+      const maxD = Math.max(...drifts), avgD = drifts.reduce((s,v)=>s+v,0)/drifts.length;
+      const SCALE = 180 / W; // ~1.8m subject height in pixels
+      const maxCm = (maxD * W * SCALE).toFixed(1);
+      const avgCm = (avgD * W * SCALE).toFixed(1);
+      const qual  = +maxCm < 3 ? 'Optimal' : +maxCm < 6 ? 'Acceptable' : 'Elevated drift';
+      const qualC = +maxCm < 3 ? '#00e5cc' : +maxCm < 6 ? '#ffd32a' : '#ff4757';
+      const pW = Math.min(230, W*0.42), pH = 74, px = 12, py = H-pH-12;
+      ctx.fillStyle = 'rgba(0,0,0,0.68)';
+      ctx.beginPath();
+      const r = 7;
+      ctx.moveTo(px+r,py); ctx.lineTo(px+pW-r,py); ctx.arcTo(px+pW,py,px+pW,py+r,r);
+      ctx.lineTo(px+pW,py+pH-r); ctx.arcTo(px+pW,py+pH,px+pW-r,py+pH,r);
+      ctx.lineTo(px+r,py+pH); ctx.arcTo(px,py+pH,px,py+pH-r,r);
+      ctx.lineTo(px,py+r); ctx.arcTo(px,py,px+r,py,r); ctx.closePath(); ctx.fill();
+      const fs2 = Math.max(9, W/100);
+      ctx.font = `bold ${fs2}px Inter,system-ui,sans-serif`;
+      ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.fillText('BAR PATH', px+10, py+15);
+      ctx.fillStyle='#fff'; ctx.fillText(`Max drift: ${maxCm} cm`, px+10, py+30);
+      ctx.fillStyle='#fff'; ctx.fillText(`Avg drift: ${avgCm} cm`, px+10, py+45);
+      ctx.fillStyle=qualC; ctx.fillText(qual, px+10, py+62);
+
+      // Top label
+      const vLabel = view==='front'?'Front · L/R drift':view==='posterior'?'Posterior · L/R drift':'Side · A/P deviation';
+      ctx.font = `${Math.max(9,W/105)}px Inter,system-ui,sans-serif`;
+      ctx.fillStyle='rgba(0,229,204,0.85)';
+      ctx.fillText(`Bar Path — ${vLabel} · ${pts.length} pts`, 12, 20);
+
+      resolve(cv.toDataURL('image/jpeg', 0.93).split(',')[1]);
+    };
+    bg.onerror = () => resolve(null);
+    bg.src = 'data:image/jpeg;base64,' + bgImageB64;
+  });
+}
+
+
+// ── Catmull-Rom spline interpolation for smooth bar path curve ──
+function catmullRomSpline(pts, steps) {
+  if(pts.length < 2) return pts;
+  const result = [];
+  for(let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i-1)];
+    const p1 = pts[i];
+    const p2 = pts[i+1];
+    const p3 = pts[Math.min(pts.length-1, i+2)];
+    for(let s = 0; s < steps; s++) {
+      const t = s / steps;
+      const t2 = t*t, t3 = t2*t;
+      result.push({
+        cx: 0.5*((2*p1.cx)+(-p0.cx+p2.cx)*t+(2*p0.cx-5*p1.cx+4*p2.cx-p3.cx)*t2+(-p0.cx+3*p1.cx-3*p2.cx+p3.cx)*t3),
+        cy: 0.5*((2*p1.cy)+(-p0.cy+p2.cy)*t+(2*p0.cy-5*p1.cy+4*p2.cy-p3.cy)*t2+(-p0.cy+3*p1.cy-3*p2.cy+p3.cy)*t3),
+      });
     }
+  }
+  result.push(pts[pts.length-1]);
+  return result;
+}
 
+// Draw multi-frame bar motion trace — view-aware 2D plot
+function drawBarMotionTrace(annotatedFrames, barPoints, view, referenceFrame) {
+  return new Promise(resolve => {
+    if(!barPoints || barPoints.length < 2) { resolve(null); return; }
+
+    // ── Canvas setup: match reference frame aspect ratio if available ──
     const W = 860, H = 480;
-    const PAD = { top:50, right:40, bottom:60, left:70 };
-    const plotW = W - PAD.left - PAD.right;
-    const plotH = H - PAD.top  - PAD.bottom;
-
     const cv = document.createElement('canvas');
     cv.width = W; cv.height = H;
     const ctx = cv.getContext('2d');
 
-    // Background
-    ctx.fillStyle = '#0a1628'; ctx.fillRect(0, 0, W, H);
+    // Smooth the raw points with Catmull-Rom spline
+    const smoothed = smoothBarPoints(barPoints);
+    const splinePoints = catmullRomSpline(smoothed, 6); // ~6 interpolated pts per raw pt
+    const rawPts = barPoints; // keep raw for thumbnails + metrics
 
-    // View-specific axis labels
-    const isSide = !view || view === 'side';
-    const xLabel = isSide ? 'Horizontal Drift  ← Posterior · Anterior →'
-                          : 'Lateral Position  ← Left · Right →';
-    const yLabel = isSide ? '↑ Higher    Bar Height    Lower ↓'
-                          : '↑ Higher    Bar Height    Lower ↓';
-
-    const n = Math.min(barPoints.length, annotatedFrames.length);
-    const pts = barPoints.slice(0, n);
-
-    // Compute data range — raw normalized coords
-    const xs = pts.map(p => p.x);
-    const ys = pts.map(p => p.y);
+    // Compute data extent from raw points (more stable than spline endpoints)
+    const xs = rawPts.map(p => p.x);
+    const ys = rawPts.map(p => p.y);
     let minX = Math.min(...xs), maxX = Math.max(...xs);
     let minY = Math.min(...ys), maxY = Math.max(...ys);
 
-    // Expand range so points don't sit on the axes — minimum visible span
-    const spanX = Math.max(maxX - minX, 0.015);  // at least 1.5% frame width
-    const spanY = Math.max(maxY - minY, 0.015);
-    const padFrac = 0.25; // 25% padding around data
-    minX -= spanX * padFrac; maxX += spanX * padFrac;
-    minY -= spanY * padFrac; maxY += spanY * padFrac;
-    // Clamp to [0,1]
+    const spanX = Math.max(maxX - minX, 0.012);
+    const spanY = Math.max(maxY - minY, 0.020);
+    // Generous padding so path breathes
+    minX -= spanX * 0.35; maxX += spanX * 0.35;
+    minY -= spanY * 0.30; maxY += spanY * 0.30;
     minX = Math.max(0, minX); maxX = Math.min(1, maxX);
     minY = Math.max(0, minY); maxY = Math.min(1, maxY);
 
-    const toCanvas = (px, py) => ({
-      cx: PAD.left  + ((px - minX) / (maxX - minX)) * plotW,
-      cy: PAD.top   + ((py - minY) / (maxY - minY)) * plotH,
+    const isSide = !view || view === 'side';
+
+    // Map normalized coords → canvas coords
+    // Leave full bleed — no separate plot area, path fills the canvas
+    const PAD = {top: 56, right: 24, bottom: 52, left: 24};
+    const PW = W - PAD.left - PAD.right;
+    const PH = H - PAD.top  - PAD.bottom;
+
+    const toC = (px, py) => ({
+      cx: PAD.left + ((px - minX) / (maxX - minX)) * PW,
+      cy: PAD.top  + ((py - minY) / (maxY - minY)) * PH,
     });
 
-    // ── Grid lines ──
-    ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1;
-    const GRID = 5;
-    for(let i = 0; i <= GRID; i++) {
-      const gx = PAD.left  + (i/GRID) * plotW;
-      const gy = PAD.top   + (i/GRID) * plotH;
-      ctx.beginPath(); ctx.moveTo(gx, PAD.top);    ctx.lineTo(gx, PAD.top+plotH); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(PAD.left, gy);   ctx.lineTo(PAD.left+plotW, gy); ctx.stroke();
-    }
+    // ── Step 1: Load reference frame as background ──
+    const drawOnBackground = (bgLoaded) => {
+      // Background: reference video frame (darkened) or dark fallback
+      if(bgLoaded) {
+        ctx.drawImage(bgLoaded, 0, 0, W, H);
+        // Dark overlay — more transparent in center where path lives
+        const vign = ctx.createRadialGradient(W/2, H/2, H*0.1, W/2, H/2, H*0.75);
+        vign.addColorStop(0, 'rgba(4,12,28,0.70)');
+        vign.addColorStop(1, 'rgba(4,12,28,0.88)');
+        ctx.fillStyle = vign;
+        ctx.fillRect(0, 0, W, H);
+      } else {
+        // Fallback: rich dark gradient
+        const bg = ctx.createLinearGradient(0, 0, W, H);
+        bg.addColorStop(0, '#040c1c'); bg.addColorStop(1, '#0a1a2e');
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+        // Subtle grid texture
+        ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 1;
+        for(let gx = 0; gx <= W; gx += 40) { ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke(); }
+        for(let gy = 0; gy <= H; gy += 40) { ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke(); }
+      }
 
-    // ── Axes ──
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(PAD.left, PAD.top+plotH); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top+plotH); ctx.lineTo(PAD.left+plotW, PAD.top+plotH); ctx.stroke();
+      // ── Step 2: Ideal vertical reference ──
+      const startC = toC(rawPts[0].x, rawPts[0].y);
+      ctx.save();
+      ctx.setLineDash([4, 6]);
+      ctx.beginPath();
+      ctx.moveTo(startC.cx, PAD.top - 8);
+      ctx.lineTo(startC.cx, PAD.top + PH + 8);
+      ctx.strokeStyle = 'rgba(0,229,204,0.30)'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
 
-    // Axis labels
-    ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '11px Inter,sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(xLabel, PAD.left + plotW/2, H - 10);
-    ctx.save(); ctx.translate(14, PAD.top + plotH/2); ctx.rotate(-Math.PI/2);
-    ctx.fillText(yLabel, 0, 0); ctx.restore();
+      // ── Step 3: Spline path — wide glow, then crisp line ──
+      const mappedSpline = splinePoints.map(p => toC(p.x, p.y));
 
-    // ── Ideal vertical reference (start x, full height) ──
-    const startC = toCanvas(pts[0].x, pts[0].y);
-    ctx.beginPath(); ctx.setLineDash([5,5]);
-    ctx.moveTo(startC.cx, PAD.top); ctx.lineTo(startC.cx, PAD.top + plotH);
-    ctx.strokeStyle = 'rgba(0,229,204,0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = 'rgba(0,229,204,0.5)'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
-    ctx.fillText('Ideal vertical', startC.cx + 4, PAD.top + 14);
+      // Outer glow pass
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(mappedSpline[0].cx, mappedSpline[0].cy);
+      mappedSpline.forEach(p => ctx.lineTo(p.cx, p.cy));
+      ctx.strokeStyle = 'rgba(0,229,204,0.12)';
+      ctx.lineWidth = 18; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.filter = 'blur(4px)'; ctx.stroke();
+      ctx.restore();
 
-    // ── Path shadow ──
-    const mapped = pts.map(p => toCanvas(p.x, p.y));
-    ctx.beginPath();
-    ctx.moveTo(mapped[0].cx+2, mapped[0].cy+2);
-    mapped.forEach(p => ctx.lineTo(p.cx+2, p.cy+2));
-    ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 6;
-    ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+      // Velocity-colored path: color by local speed (x+y displacement between points)
+      // Segment by segment for gradient effect
+      const totalRaw = rawPts.length;
+      for(let i = 1; i < mappedSpline.length; i++) {
+        const frac = i / mappedSpline.length;
+        // Color: teal (start) → white (mid) → coral (end)
+        const r = Math.round(frac < 0.5 ? frac*2*255 : 255);
+        const g = Math.round(frac < 0.5 ? 180 + frac*2*75 : 255 - (frac-0.5)*2*160);
+        const b = Math.round(frac < 0.5 ? 200 - frac*2*130 : 70 + (frac-0.5)*2*60);
+        ctx.beginPath();
+        ctx.moveTo(mappedSpline[i-1].cx, mappedSpline[i-1].cy);
+        ctx.lineTo(mappedSpline[i].cx,   mappedSpline[i].cy);
+        ctx.strokeStyle = `rgb(${r},${g},${b})`;
+        ctx.lineWidth = 3.5; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.stroke();
+      }
 
-    // ── Path with gradient ──
-    const grad = ctx.createLinearGradient(mapped[0].cx, mapped[0].cy, mapped[n-1].cx, mapped[n-1].cy);
-    grad.addColorStop(0,   '#00e5cc');
-    grad.addColorStop(0.5, '#ff9f43');
-    grad.addColorStop(1,   '#ff4757');
-    ctx.beginPath();
-    ctx.moveTo(mapped[0].cx, mapped[0].cy);
-    mapped.forEach(p => ctx.lineTo(p.cx, p.cy));
-    ctx.strokeStyle = grad; ctx.lineWidth = 3;
-    ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
+      // ── Step 4: Key frame dot markers ──
+      // Only show every Nth raw point if there are many
+      const maxDots = 10;
+      const step = Math.max(1, Math.round(rawPts.length / maxDots));
+      const keyIndices = [];
+      for(let i = 0; i < rawPts.length; i += step) keyIndices.push(i);
+      if(!keyIndices.includes(rawPts.length - 1)) keyIndices.push(rawPts.length - 1);
 
-    // ── Frame thumbnail dots ──
-    const DOT_R = 20;
-    const loadThumb = i => new Promise(res => {
-      const src = annotatedFrames[i]?.base64;
-      if(!src) { res(null); return; }
-      const img = new Image();
-      img.onload = () => res(img); img.onerror = () => res(null);
-      img.src = 'data:image/jpeg;base64,' + src;
-    });
+      const loadThumb = i => new Promise(res => {
+        // Match bar point index to annotated frame
+        const frameIdx = Math.round((rawPts[i]?.t || 0) * Math.max(1, annotatedFrames.length - 1));
+        const src = annotatedFrames[Math.min(frameIdx, annotatedFrames.length-1)]?.base64;
+        if(!src) { res(null); return; }
+        const img = new Image();
+        img.onload = () => res(img); img.onerror = () => res(null);
+        img.src = 'data:image/jpeg;base64,' + src;
+      });
 
-    Promise.all(pts.map((_,i) => loadThumb(i))).then(thumbs => {
-      mapped.forEach((p, i) => {
-        const thumb = thumbs[i];
-        const ringCol = i===0 ? '#00e5cc' : i===n-1 ? '#ff4757' : '#ff9f43';
+      Promise.all(keyIndices.map(i => loadThumb(i))).then(thumbs => {
+        keyIndices.forEach((rawIdx, ti) => {
+          const p = toC(rawPts[rawIdx].x, rawPts[rawIdx].y);
+          const isFirst = rawIdx === 0;
+          const isLast  = rawIdx === rawPts.length - 1;
+          const ringCol = isFirst ? '#00e5cc' : isLast ? '#ff6b6b' : 'rgba(255,255,255,0.7)';
+          const DOT_R = isFirst || isLast ? 22 : 16;
 
-        ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 6;
-        if(thumb) {
+          const thumb = thumbs[ti];
           ctx.save();
-          ctx.beginPath(); ctx.arc(p.cx, p.cy, DOT_R, 0, 2*Math.PI); ctx.clip();
-          const ts = Math.min(thumb.width, thumb.height);
-          ctx.drawImage(thumb, (thumb.width-ts)/2, (thumb.height-ts)/2, ts, ts,
-                        p.cx-DOT_R, p.cy-DOT_R, DOT_R*2, DOT_R*2);
+          // Drop shadow
+          ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 8;
+          if(thumb) {
+            ctx.beginPath(); ctx.arc(p.cx, p.cy, DOT_R, 0, 2*Math.PI); ctx.clip();
+            const ts = Math.min(thumb.width, thumb.height);
+            ctx.drawImage(thumb, (thumb.width-ts)/2,(thumb.height-ts)/2,ts,ts, p.cx-DOT_R,p.cy-DOT_R,DOT_R*2,DOT_R*2);
+          } else {
+            ctx.beginPath(); ctx.arc(p.cx, p.cy, DOT_R, 0, 2*Math.PI);
+            ctx.fillStyle = ringCol + '55'; ctx.fill();
+          }
           ctx.restore();
+          ctx.shadowBlur = 0;
+          // Ring
+          ctx.beginPath(); ctx.arc(p.cx, p.cy, DOT_R, 0, 2*Math.PI);
+          ctx.strokeStyle = ringCol; ctx.lineWidth = isFirst||isLast ? 2.5 : 1.5; ctx.stroke();
+
+          // Start/end labels
+          if(isFirst || isLast) {
+            const lbl = isFirst ? 'START' : 'END';
+            ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+            ctx.fillStyle = 'rgba(0,0,0,0.75)';
+            ctx.fillRect(p.cx - 18, p.cy + DOT_R + 2, 36, 13);
+            ctx.fillStyle = ringCol;
+            ctx.fillText(lbl, p.cx, p.cy + DOT_R + 12);
+          }
+        });
+
+        // ── Step 5: HUD overlay — metrics panel (top-right corner) ──
+        const stats = analyzeBarPath(rawPts, H);
+        if(stats) {
+          const HX = W - 180, HY = PAD.top - 4;
+          ctx.fillStyle = 'rgba(4,12,28,0.82)';
+          ctx.beginPath();
+          ctx.roundRect ? ctx.roundRect(HX - 10, HY, 168, 82, 8)
+                        : ctx.rect(HX - 10, HY, 168, 82);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(0,229,204,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+
+          const qualCol = stats.quality === 'Optimal' ? '#00e5cc'
+                        : stats.quality === 'Acceptable' ? '#ff9f43' : '#ff6b6b';
+          const lines = [
+            ['Max Drift', `${stats.maxDriftCm} cm`],
+            ['Avg Drift', `${stats.avgDriftCm} cm`],
+            ['Direction', stats.driftDir],
+            ['Quality',   stats.quality],
+          ];
+          lines.forEach(([label, val], li) => {
+            const ly = HY + 18 + li * 17;
+            ctx.font = '10px monospace'; ctx.textAlign = 'left';
+            ctx.fillStyle = 'rgba(255,255,255,0.45)';
+            ctx.fillText(label, HX, ly);
+            ctx.font = 'bold 10px monospace';
+            ctx.fillStyle = label === 'Quality' ? qualCol : '#fff';
+            ctx.textAlign = 'right';
+            ctx.fillText(val, HX + 155, ly);
+          });
         }
-        ctx.shadowBlur = 0;
-        ctx.beginPath(); ctx.arc(p.cx, p.cy, DOT_R, 0, 2*Math.PI);
-        ctx.strokeStyle = ringCol; ctx.lineWidth = thumb ? 2.5 : 0;
-        if(!thumb) { ctx.fillStyle = ringCol; ctx.fill(); }
-        else ctx.stroke();
 
-        // Frame number badge
-        ctx.fillStyle = 'rgba(10,22,40,0.85)';
-        ctx.beginPath(); ctx.arc(p.cx+DOT_R*0.65, p.cy-DOT_R*0.65, 8, 0, 2*Math.PI); ctx.fill();
-        ctx.fillStyle = '#fff'; ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(i+1, p.cx+DOT_R*0.65, p.cy-DOT_R*0.65+3);
+        // ── Step 6: Title + view label ──
+        ctx.font = 'bold 13px -apple-system, sans-serif';
+        ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillText('BAR PATH', PAD.left, PAD.top - 14);
+        ctx.font = '11px monospace'; ctx.fillStyle = 'rgba(0,229,204,0.7)';
+        ctx.fillText(
+          isSide ? 'SIDE VIEW' : view === 'front' ? 'FRONT VIEW' : 'POSTERIOR VIEW',
+          PAD.left + 72, PAD.top - 14
+        );
+        ctx.font = '10px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.30)';
+        ctx.fillText(`${rawPts.length} tracked points`, PAD.left, H - 10);
+
+        // ── Step 7: Axis labels ──
+        const xAxisLabel = isSide ? '← Posterior · Anterior →' : '← Left · Right →';
+        ctx.font = '10px monospace'; ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.fillText(xAxisLabel, W/2, H - 10);
+
+        resolve(cv.toDataURL('image/jpeg', 0.93).split(',')[1]);
       });
+    };
 
-      // ── Title ──
-      ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = 'bold 13px Inter,sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(`Barbell Motion Trace — ${view === 'front' ? 'Front' : view === 'posterior' ? 'Posterior' : 'Side'} View`, PAD.left, 30);
-
-      // ── Legend ──
-      const legItems = [['#00e5cc','Frame 1 (start)'],['#ff9f43','Mid frames'],['#ff4757',`Frame ${n} (end)`],['rgba(0,229,204,0.35)','Ideal vertical']];
-      let lx = PAD.left;
-      legItems.forEach(([col,lbl]) => {
-        ctx.fillStyle = col;
-        ctx.fillRect(lx, H-32, 12, 9);
-        ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
-        ctx.fillText(lbl, lx+16, H-23);
-        lx += ctx.measureText(lbl).width + 36;
-      });
-
-      resolve(cv.toDataURL('image/jpeg', 0.92).split(',')[1]);
-    });
+    // Load reference frame as background
+    if(referenceFrame) {
+      const bgImg = new Image();
+      bgImg.onload = () => {
+        // Crop to fit canvas aspect ratio
+        const bgCtx = document.createElement('canvas').getContext('2d');
+        // Determine crop to fill W×H
+        const scale = Math.max(W/bgImg.width, H/bgImg.height);
+        const sw = W/scale, sh = H/scale;
+        const sx = (bgImg.width - sw)/2, sy = (bgImg.height - sh)/2;
+        const tmp = document.createElement('canvas');
+        tmp.width = W; tmp.height = H;
+        tmp.getContext('2d').drawImage(bgImg, sx, sy, sw, sh, 0, 0, W, H);
+        const cropped = new Image();
+        cropped.onload = () => drawOnBackground(cropped);
+        cropped.src = tmp.toDataURL();
+      };
+      bgImg.onerror = () => drawOnBackground(null);
+      bgImg.src = 'data:image/jpeg;base64,' + referenceFrame;
+    } else {
+      drawOnBackground(null);
+    }
   });
 }
+
 
 function analyzeBarPath(barPoints, frameH) {
   if(!barPoints || barPoints.length < 2) return null;
@@ -2868,8 +3329,14 @@ async function runAnalysis() {
   // Step 1-2: MediaPipe on all frames + bar detection
   let annotatedFrames = [];
   let allAngles = [];
+  // Bar path — use dense pre-extracted points if available, else detect from 8 frames
   let barPoints = [];
-  lastBarY = null; // reset bar tracking state for new analysis      // normalized {x,y} per frame
+  if(isLift && rawBarPoints.length >= 4) {
+    barPoints = rawBarPoints; // 28-point path from dense extraction
+    console.log(`[Analysis] Using ${rawBarPoints.length} dense bar points`);
+  }
+  lastBarY = null; // reset bar tracking state for new analysis
+  barReferenceFrame = null;
   let frameHeight = 480;   // fallback
 
   const isLift = /deadlift|squat|press|hinge|push|pull/i.test(movement);
@@ -2901,11 +3368,17 @@ async function runAnalysis() {
       const frame = extractedFrames[i];
       const mpResult = fusedResults[i];  // now uses fused landmarks
 
-      // Bar detection (runs on all frames for lifts)
+      // Bar detection — only run per-frame if dense extraction didn't produce points
       let barPt = null;
-      if(isLift) {
+      if(isLift && rawBarPoints.length < 4) {
         barPt = await detectBarPosition(frame.imageData, mpResult?.poseLandmarks || null, cameraView);
         if(barPt) barPoints.push(barPt);
+      } else if(isLift && rawBarPoints.length >= 4) {
+        // Use the dense bar point closest in time to this frame's position
+        const frameFrac = extractedFrames.indexOf(frame) / Math.max(1, extractedFrames.length - 1);
+        barPt = rawBarPoints.reduce((best, p) =>
+          Math.abs(p.t - frameFrac) < Math.abs(best.t - frameFrac) ? p : best
+        , rawBarPoints[0]);
       }
 
       // Draw skeleton + bar dot on this frame
@@ -3100,11 +3573,22 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     // Render bar path motion trace
     if(barStats && smoothedBarPoints.length >= 2) {
-      const traceB64 = await drawBarMotionTrace(annotatedFrames, smoothedBarPoints, cameraView);
-      if(traceB64) {
-        document.getElementById('barTraceImg').src = 'data:image/jpeg;base64,' + traceB64;
-        {
-          const flagClass = barStats.flag;
+      // Primary: Metric-style overlay on clean video frame (not annotated)
+      // Prefer mid-lift barReferenceFrame, fall back to first raw frame
+      const bgFrame = barReferenceFrame || extractedFrames[Math.floor(extractedFrames.length*0.35)]?.imageData || extractedFrames[0]?.imageData;
+      if(bgFrame && rawBarPoints.length >= 4) {
+        const overlayB64 = await drawBarPathOverlay(bgFrame, smoothedBarPoints, cameraView);
+        if(overlayB64) {
+          document.getElementById('barTraceImg').src = 'data:image/jpeg;base64,' + overlayB64;
+        }
+      } else {
+        // Fall back to motion trace diagram for sparse paths
+        const traceB64 = await drawBarMotionTrace(annotatedFrames, smoothedBarPoints, cameraView, barReferenceFrame);
+        if(traceB64) {
+          document.getElementById('barTraceImg').src = 'data:image/jpeg;base64,' + traceB64;
+        }
+      }
+      const flagClass = barStats.flag;
           document.getElementById('barPathStats').innerHTML = `
             <div style="margin-bottom:14px;">
               <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">Bar Path Metrics</div>
@@ -3126,8 +3610,6 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
               <em>Note: Estimates based on assumed ~1.8m subject height. Confidence improves with side-view camera angle.</em>
             </div>`;
           document.getElementById('barPathSection').style.display='block';
-        }
-      }
     }
 
     console.log('[Analysis] Stage 5: Calling renderReport, report:', !!report);
