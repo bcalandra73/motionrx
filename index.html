@@ -2765,6 +2765,7 @@ function aggregateAngles(allFrameAngles) {
 async function runAnalysis() {
   const movement = document.getElementById('movementType').value;
   const apiKey = document.getElementById('apiKey').value.trim();
+  const statusEl = document.getElementById('loadingStatus') || document.createElement('span');
   document.getElementById('errorBox').style.display='none';
 
   if(!uploadedFile)  { showErr('Please upload a video or image before running analysis.'); return; }
@@ -2801,7 +2802,6 @@ async function runAnalysis() {
 
     // ── Landmark Fusion Pipeline ──
     // Fuses MediaPipe + MoveNet, applies segment constraints, bilateral fallback, temporal smoothing
-    const statusEl = document.getElementById('loadingStatus') || document.createElement('span');
     statusEl.textContent = moveNetReady
       ? 'Fusing MediaPipe + MoveNet landmarks...'
       : 'Applying landmark refinement...';
