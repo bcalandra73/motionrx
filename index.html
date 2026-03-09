@@ -2794,20 +2794,25 @@ async function runAnalysis() {
 
   const isLift = /deadlift|squat|press|hinge|push|pull/i.test(movement);
 
+  console.log('[Analysis] Stage 1: Starting MediaPipe');
   if(mpReady && poseInstance) {
     const mpResults = await runMediaPipeOnFrames(extractedFrames);
+    console.log('[Analysis] Stage 1 complete: MP done, results:', mpResults?.length);
 
     // ── Landmark Fusion Pipeline ──
     // Fuses MediaPipe + MoveNet, applies segment constraints, bilateral fallback, temporal smoothing
+    const statusEl = document.getElementById('loadingStatus') || document.createElement('span');
     statusEl.textContent = moveNetReady
       ? 'Fusing MediaPipe + MoveNet landmarks...'
       : 'Applying landmark refinement...';
+    console.log('[Analysis] Stage 2: Starting fusion pipeline');
     const fusedLandmarks = await fusedLandmarkPipeline(
       mpResults,
       extractedFrames.map(f => f.imageData),
       movement
     );
     // Wrap fused landmarks back into result-like objects for downstream compatibility
+    console.log('[Analysis] Stage 2 complete: fusion done, landmarks:', fusedLandmarks?.length);
     const fusedResults = fusedLandmarks.map((lms, i) => ({
       poseLandmarks: lms,
       _raw: mpResults[i]  // preserve original for debug
@@ -2845,7 +2850,8 @@ async function runAnalysis() {
   }
 
   // Step 3: Aggregate angles
-  aggregated = allAngles.length > 0 ? aggregateAngles(allAngles) : {};
+  console.log('[Analysis] Stage 3: Aggregating angles, allAngles:', allAngles.length);
+    aggregated = allAngles.length > 0 ? aggregateAngles(allAngles) : {};
   const angleLines = Object.entries(aggregated).map(([k,v]) =>
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
@@ -2946,6 +2952,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       } catch(e2) { report=null; }
     }
 
+    console.log('[Analysis] Stage 4: Hiding spinner, showing results');
     document.getElementById('loadingState').style.display='none';
     document.getElementById('resultsSection').style.display='block';
 
@@ -3044,6 +3051,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       }
     }
 
+    console.log('[Analysis] Stage 5: Calling renderReport, report:', !!report);
     report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
     document.getElementById('resultsSection').scrollIntoView({behavior:'smooth'});
 
