@@ -260,6 +260,12 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .bar-trace-panel{background:#0a1628;border-radius:8px;overflow:hidden;position:relative}
 .bar-trace-caption{font-size:.72rem;color:var(--muted);margin-top:6px;text-align:center}
 
+/* ── Camera view selector ── */
+.view-btn{display:flex;align-items:center;gap:6px;padding:7px 14px;border:1.5px solid var(--border);border-radius:8px;background:var(--surface);font-family:'Inter',sans-serif;font-size:.78rem;font-weight:600;color:var(--muted);cursor:pointer;transition:all .15s;flex:1;justify-content:center}
+.view-btn:hover{border-color:var(--teal);color:var(--teal);background:var(--teal-light)}
+.view-btn.active{border-color:var(--navy);background:var(--navy);color:#fff}
+.view-btn-icon{font-size:.85rem}
+
 @media print{header,.report-header-right{display:none}#inputSection,#loadingState{display:none!important}#resultsSection{display:block!important}}
 @media(max-width:680px){
   header{padding:0 16px}.container{padding:20px 14px 60px}
@@ -359,6 +365,25 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <div class="upload-title">Drop file here or click to browse</div>
           <div class="upload-sub">MP4, MOV, AVI · JPG, PNG</div>
         </div>
+        <!-- Camera view selector -->
+        <div style="margin-top:12px;">
+          <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">Camera View Angle</div>
+          <div style="display:flex;gap:8px;">
+            <button type="button" class="view-btn active" id="viewSide" onclick="setCameraView('side',this)" title="Camera positioned to the side — best for hip hinge, squat depth, bar path vertical drift">
+              <span class="view-btn-icon">◀▶</span><span>Side View</span>
+            </button>
+            <button type="button" class="view-btn" id="viewFront" onclick="setCameraView('front',this)" title="Camera facing the patient — best for frontal plane, knee valgus, lateral symmetry">
+              <span class="view-btn-icon">👁</span><span>Front View</span>
+            </button>
+            <button type="button" class="view-btn" id="viewPost" onclick="setCameraView('posterior',this)" title="Camera behind the patient — best for posterior chain, spinal alignment, hip drop">
+              <span class="view-btn-icon">↩</span><span>Posterior View</span>
+            </button>
+          </div>
+          <div id="viewHint" style="font-size:.72rem;color:var(--teal);margin-top:5px;line-height:1.4;">
+            📐 Side view: optimal for sagittal plane analysis — hip hinge depth, bar path vertical drift, trunk lean
+          </div>
+        </div>
+
         <button type="button" onclick="showGuide()" style="margin-top:10px;display:flex;align-items:center;gap:6px;background:var(--navy-light);border:1px solid var(--border);border-radius:6px;padding:7px 14px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:500;color:var(--navy-mid);cursor:pointer;width:100%;justify-content:center;transition:all .15s;" onmouseover="this.style.background='var(--teal-light)';this.style.borderColor='var(--teal)';this.style.color='var(--teal)'" onmouseout="this.style.background='var(--navy-light)';this.style.borderColor='var(--border)';this.style.color='var(--navy-mid)'">
           💡 View camera setup tips for best tracking accuracy
         </button>
@@ -676,6 +701,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 <script>
 // ── State ──
 let aggregated = {};  // module-level so always in scope
+let cameraView = 'side'; // 'side' | 'front' | 'posterior'
 let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
 let poseResults = [];     // MediaPipe results per frame
@@ -1193,155 +1219,159 @@ function drawBarPath(imageBase64, barPoints) {
   });
 }
 
-// Draw multi-frame bar motion trace — all frames composited on a dark background
-function drawBarMotionTrace(annotatedFrames, barPoints) {
+// Draw multi-frame bar motion trace — view-aware 2D plot
+function drawBarMotionTrace(annotatedFrames, barPoints, view) {
   return new Promise(resolve => {
     if(!barPoints || barPoints.length < 2 || !annotatedFrames || annotatedFrames.length < 2) {
       resolve(null); return;
     }
 
-    // Canvas dimensions: wide panel, 16:9 ish
-    const W = 900, H = 500;
-    const THUMB_W = 100, THUMB_H = 75; // thumbnail strip at bottom
-    const TRACE_H = H - THUMB_H - 24; // area for the trace diagram
+    const W = 860, H = 480;
+    const PAD = { top:50, right:40, bottom:60, left:70 };
+    const plotW = W - PAD.left - PAD.right;
+    const plotH = H - PAD.top  - PAD.bottom;
 
     const cv = document.createElement('canvas');
     cv.width = W; cv.height = H;
     const ctx = cv.getContext('2d');
 
     // Background
-    ctx.fillStyle = '#0a1628';
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#0a1628'; ctx.fillRect(0, 0, W, H);
 
-    // Grid lines
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-    ctx.lineWidth = 1;
-    for(let x = 0; x <= W; x += W/10) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,TRACE_H); ctx.stroke(); }
-    for(let y = 0; y <= TRACE_H; y += TRACE_H/6) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
-
-    // Axis labels
-    ctx.fillStyle = 'rgba(255,255,255,0.25)';
-    ctx.font = '11px Inter, sans-serif';
-    ctx.fillText('← Posterior', 10, TRACE_H - 8);
-    ctx.fillText('Anterior →', W - 80, TRACE_H - 8);
-    ctx.save(); ctx.translate(14, TRACE_H/2); ctx.rotate(-Math.PI/2);
-    ctx.fillText('↑ Higher', -30, 0);
-    ctx.restore();
+    // View-specific axis labels
+    const isSide = !view || view === 'side';
+    const xLabel = isSide ? 'Horizontal Drift  ← Posterior · Anterior →'
+                          : 'Lateral Position  ← Left · Right →';
+    const yLabel = isSide ? '↑ Higher    Bar Height    Lower ↓'
+                          : '↑ Higher    Bar Height    Lower ↓';
 
     const n = Math.min(barPoints.length, annotatedFrames.length);
+    const pts = barPoints.slice(0, n);
 
-    // Map normalized bar coords to trace canvas space
-    // x: use full width with padding
-    const padX = 80, padY = 40;
-    const allX = barPoints.slice(0,n).map(p=>p.x);
-    const allY = barPoints.slice(0,n).map(p=>p.y);
-    const minX = Math.min(...allX), maxX = Math.max(...allX);
-    const minY = Math.min(...allY), maxY = Math.max(...allY);
-    // Add margin around range — minimum span to avoid degenerate cases
-    const rangeX = Math.max(maxX - minX, 0.05);
-    const rangeY = Math.max(maxY - minY, 0.05);
-    const scaleX = (W - padX*2) / rangeX;
-    const scaleY = (TRACE_H - padY*2) / rangeY;
+    // Compute data range — raw normalized coords
+    const xs = pts.map(p => p.x);
+    const ys = pts.map(p => p.y);
+    let minX = Math.min(...xs), maxX = Math.max(...xs);
+    let minY = Math.min(...ys), maxY = Math.max(...ys);
 
-    const toCanvas = (p) => ({
-      cx: padX + (p.x - minX) * scaleX,
-      cy: padY + (p.y - minY) * scaleY
+    // Expand range so points don't sit on the axes — minimum visible span
+    const spanX = Math.max(maxX - minX, 0.015);  // at least 1.5% frame width
+    const spanY = Math.max(maxY - minY, 0.015);
+    const padFrac = 0.25; // 25% padding around data
+    minX -= spanX * padFrac; maxX += spanX * padFrac;
+    minY -= spanY * padFrac; maxY += spanY * padFrac;
+    // Clamp to [0,1]
+    minX = Math.max(0, minX); maxX = Math.min(1, maxX);
+    minY = Math.max(0, minY); maxY = Math.min(1, maxY);
+
+    const toCanvas = (px, py) => ({
+      cx: PAD.left  + ((px - minX) / (maxX - minX)) * plotW,
+      cy: PAD.top   + ((py - minY) / (maxY - minY)) * plotH,
     });
 
-    // Draw ideal vertical reference (centered on start x)
-    const startC = toCanvas(barPoints[0]);
-    ctx.beginPath(); ctx.setLineDash([6,5]);
-    ctx.moveTo(startC.cx, padY);
-    ctx.lineTo(startC.cx, TRACE_H - padY);
-    ctx.strokeStyle = 'rgba(0,229,204,0.4)'; ctx.lineWidth = 1.5; ctx.stroke();
+    // ── Grid lines ──
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1;
+    const GRID = 5;
+    for(let i = 0; i <= GRID; i++) {
+      const gx = PAD.left  + (i/GRID) * plotW;
+      const gy = PAD.top   + (i/GRID) * plotH;
+      ctx.beginPath(); ctx.moveTo(gx, PAD.top);    ctx.lineTo(gx, PAD.top+plotH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PAD.left, gy);   ctx.lineTo(PAD.left+plotW, gy); ctx.stroke();
+    }
+
+    // ── Axes ──
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(PAD.left, PAD.top+plotH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top+plotH); ctx.lineTo(PAD.left+plotW, PAD.top+plotH); ctx.stroke();
+
+    // Axis labels
+    ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.font = '11px Inter,sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(xLabel, PAD.left + plotW/2, H - 10);
+    ctx.save(); ctx.translate(14, PAD.top + plotH/2); ctx.rotate(-Math.PI/2);
+    ctx.fillText(yLabel, 0, 0); ctx.restore();
+
+    // ── Ideal vertical reference (start x, full height) ──
+    const startC = toCanvas(pts[0].x, pts[0].y);
+    ctx.beginPath(); ctx.setLineDash([5,5]);
+    ctx.moveTo(startC.cx, PAD.top); ctx.lineTo(startC.cx, PAD.top + plotH);
+    ctx.strokeStyle = 'rgba(0,229,204,0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = 'rgba(0,229,204,0.4)'; ctx.font = '10px sans-serif';
-    ctx.fillText('Ideal', startC.cx + 4, padY + 12);
+    ctx.fillStyle = 'rgba(0,229,204,0.5)'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText('Ideal vertical', startC.cx + 4, PAD.top + 14);
 
-    // Draw path shadow for depth
-    const pts = barPoints.slice(0,n).map(toCanvas);
+    // ── Path shadow ──
+    const mapped = pts.map(p => toCanvas(p.x, p.y));
     ctx.beginPath();
-    ctx.moveTo(pts[0].cx + 2, pts[0].cy + 2);
-    pts.forEach(p => ctx.lineTo(p.cx+2, p.cy+2));
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 5;
+    ctx.moveTo(mapped[0].cx+2, mapped[0].cy+2);
+    mapped.forEach(p => ctx.lineTo(p.cx+2, p.cy+2));
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 6;
     ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
 
-    // Draw path with gradient color start→end
-    const grad = ctx.createLinearGradient(pts[0].cx, pts[0].cy, pts[n-1].cx, pts[n-1].cy);
-    grad.addColorStop(0, '#00e5cc');
+    // ── Path with gradient ──
+    const grad = ctx.createLinearGradient(mapped[0].cx, mapped[0].cy, mapped[n-1].cx, mapped[n-1].cy);
+    grad.addColorStop(0,   '#00e5cc');
     grad.addColorStop(0.5, '#ff9f43');
-    grad.addColorStop(1, '#ff3c3c');
+    grad.addColorStop(1,   '#ff4757');
     ctx.beginPath();
-    ctx.moveTo(pts[0].cx, pts[0].cy);
-    pts.forEach(p => ctx.lineTo(p.cx, p.cy));
-    ctx.strokeStyle = grad; ctx.lineWidth = 3.5;
+    ctx.moveTo(mapped[0].cx, mapped[0].cy);
+    mapped.forEach(p => ctx.lineTo(p.cx, p.cy));
+    ctx.strokeStyle = grad; ctx.lineWidth = 3;
     ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
 
-    // Draw frame dots with thumbnails embedded
-    const dotR = 22;
-    const loadThumb = (i) => new Promise(res => {
-      if(!annotatedFrames[i]?.base64) { res(null); return; }
-      const ti = new Image();
-      ti.onload = () => res(ti);
-      ti.onerror = () => res(null);
-      ti.src = 'data:image/jpeg;base64,' + annotatedFrames[i].base64;
+    // ── Frame thumbnail dots ──
+    const DOT_R = 20;
+    const loadThumb = i => new Promise(res => {
+      const src = annotatedFrames[i]?.base64;
+      if(!src) { res(null); return; }
+      const img = new Image();
+      img.onload = () => res(img); img.onerror = () => res(null);
+      img.src = 'data:image/jpeg;base64,' + src;
     });
 
-    Promise.all(barPoints.slice(0,n).map((_,i) => loadThumb(i))).then(thumbs => {
-      pts.forEach((p, i) => {
+    Promise.all(pts.map((_,i) => loadThumb(i))).then(thumbs => {
+      mapped.forEach((p, i) => {
         const thumb = thumbs[i];
-        // Drop shadow
-        ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 6;
+        const ringCol = i===0 ? '#00e5cc' : i===n-1 ? '#ff4757' : '#ff9f43';
 
+        ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 6;
         if(thumb) {
-          // Clip circle for thumbnail
           ctx.save();
-          ctx.beginPath(); ctx.arc(p.cx, p.cy, dotR, 0, 2*Math.PI);
-          ctx.clip();
-          // Crop thumb to center square then draw in circle
+          ctx.beginPath(); ctx.arc(p.cx, p.cy, DOT_R, 0, 2*Math.PI); ctx.clip();
           const ts = Math.min(thumb.width, thumb.height);
-          const tx = (thumb.width - ts)/2, ty = (thumb.height - ts)/2;
-          ctx.drawImage(thumb, tx, ty, ts, ts, p.cx-dotR, p.cy-dotR, dotR*2, dotR*2);
+          ctx.drawImage(thumb, (thumb.width-ts)/2, (thumb.height-ts)/2, ts, ts,
+                        p.cx-DOT_R, p.cy-DOT_R, DOT_R*2, DOT_R*2);
           ctx.restore();
-          // Ring around thumbnail
-          ctx.shadowBlur = 0;
-          ctx.beginPath(); ctx.arc(p.cx, p.cy, dotR, 0, 2*Math.PI);
-          const ringColor = i===0 ? '#00e5cc' : i===n-1 ? '#ffeb3b' : '#ff9f43';
-          ctx.strokeStyle = ringColor; ctx.lineWidth = 3; ctx.stroke();
-        } else {
-          // Plain colored dot
-          ctx.beginPath(); ctx.arc(p.cx, p.cy, dotR*0.6, 0, 2*Math.PI);
-          ctx.fillStyle = i===0 ? '#00e5cc' : i===n-1 ? '#ffeb3b' : '#ff9f43';
-          ctx.fill();
-          ctx.shadowBlur = 0;
         }
         ctx.shadowBlur = 0;
+        ctx.beginPath(); ctx.arc(p.cx, p.cy, DOT_R, 0, 2*Math.PI);
+        ctx.strokeStyle = ringCol; ctx.lineWidth = thumb ? 2.5 : 0;
+        if(!thumb) { ctx.fillStyle = ringCol; ctx.fill(); }
+        else ctx.stroke();
 
         // Frame number badge
-        ctx.fillStyle = 'rgba(0,0,0,0.7)';
-        ctx.beginPath(); ctx.arc(p.cx + dotR*0.6, p.cy - dotR*0.6, 9, 0, 2*Math.PI); ctx.fill();
-        ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(i+1, p.cx + dotR*0.6, p.cy - dotR*0.6 + 3);
-        ctx.textAlign = 'left';
+        ctx.fillStyle = 'rgba(10,22,40,0.85)';
+        ctx.beginPath(); ctx.arc(p.cx+DOT_R*0.65, p.cy-DOT_R*0.65, 8, 0, 2*Math.PI); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(i+1, p.cx+DOT_R*0.65, p.cy-DOT_R*0.65+3);
       });
 
-      // Legend
-      const ly = TRACE_H - 30;
-      const items = [['#00e5cc','Start'],['#ff9f43','Mid'],['#ffeb3b','End'],['rgba(0,229,204,0.4)','Ideal vertical']];
-      let lx = padX;
-      items.forEach(([col,lbl]) => {
-        ctx.fillStyle = col; ctx.fillRect(lx, ly, 14, 10);
-        ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '10px sans-serif';
-        ctx.fillText(lbl, lx+18, ly+9);
-        lx += ctx.measureText(lbl).width + 38;
+      // ── Title ──
+      ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = 'bold 13px Inter,sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Barbell Motion Trace — ${view === 'front' ? 'Front' : view === 'posterior' ? 'Posterior' : 'Side'} View`, PAD.left, 30);
+
+      // ── Legend ──
+      const legItems = [['#00e5cc','Frame 1 (start)'],['#ff9f43','Mid frames'],['#ff4757',`Frame ${n} (end)`],['rgba(0,229,204,0.35)','Ideal vertical']];
+      let lx = PAD.left;
+      legItems.forEach(([col,lbl]) => {
+        ctx.fillStyle = col;
+        ctx.fillRect(lx, H-32, 12, 9);
+        ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(lbl, lx+16, H-23);
+        lx += ctx.measureText(lbl).width + 36;
       });
 
-      // Title
-      ctx.fillStyle = 'rgba(255,255,255,0.8)';
-      ctx.font = 'bold 13px Inter, sans-serif';
-      ctx.fillText('Barbell Motion Trace — All Frames', padX, 22);
-
-      resolve(cv.toDataURL('image/jpeg', 0.90).split(',')[1]);
+      resolve(cv.toDataURL('image/jpeg', 0.92).split(',')[1]);
     });
   });
 }
@@ -2325,6 +2355,7 @@ async function runAnalysis() {
 PATIENT: ${patientName}${age ? `, Age ${age}` : ''}
 DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
 MOVEMENT ASSESSED: ${movement}
+CAMERA VIEW: ${cameraView === 'side' ? 'Side view (sagittal plane)' : cameraView === 'front' ? 'Front view (frontal plane)' : 'Posterior view (posterior frontal plane)'}
 CLINICAL FOCUS: ${focusText}
 ${notes ? `CLINICAL NOTES: ${notes}` : ''}
 ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
@@ -2409,7 +2440,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     const now = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
     document.getElementById('reportSubtitle').textContent =
-      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0?'MediaPipe tracked':'Visual analysis'}`;
+      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${cameraView === 'side' ? 'Side view' : cameraView === 'front' ? 'Front view' : 'Posterior view'} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0?'MediaPipe tracked':'Visual analysis'}`;
 
     // Render skeleton frames gallery
     if(annotatedFrames.length > 0) {
@@ -2472,7 +2503,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     // Render bar path motion trace
     if(barStats && smoothedBarPoints.length >= 2) {
-      const traceB64 = await drawBarMotionTrace(annotatedFrames, smoothedBarPoints);
+      const traceB64 = await drawBarMotionTrace(annotatedFrames, smoothedBarPoints, cameraView);
       if(traceB64) {
         document.getElementById('barTraceImg').src = 'data:image/jpeg;base64,' + traceB64;
         {
@@ -3099,6 +3130,19 @@ function lightboxKeyHandler(e) {
   if(e.key === 'ArrowRight' || e.key === 'ArrowDown') lightboxNav(1);
   else if(e.key === 'ArrowLeft' || e.key === 'ArrowUp') lightboxNav(-1);
   else if(e.key === 'Escape') closeLightboxDirect();
+}
+
+// ── Camera View Selector ──
+const VIEW_HINTS = {
+  side:      '📐 Side view: optimal for sagittal plane analysis — hip hinge depth, bar path vertical drift, trunk lean',
+  front:     '👁 Front view: optimal for frontal plane — knee valgus/varus, lateral bar shift, pelvic tilt',
+  posterior: '↩ Posterior view: optimal for posterior chain — spinal alignment, hip drop, scapular symmetry',
+};
+function setCameraView(view, btn) {
+  cameraView = view;
+  document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('viewHint').textContent = VIEW_HINTS[view] || '';
 }
 
 function showErr(msg) {
