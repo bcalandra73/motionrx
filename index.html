@@ -402,8 +402,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </div>
           <div class="bar-click-hint" id="barClickHint">
             <span>🎯</span>
-            <div><strong>Click the barbell in the image below to improve bar tracking accuracy.</strong><br>
-            <span style="font-size:.74rem;">This seeds the bar detection for all frames. Optional — auto-detection will run if skipped.</span></div>
+            <div><strong>Click the center of the bar shaft to seed tracking.</strong><br>
+            <span style="font-size:.74rem;">Click on the bar itself (not the plates). This locks all 8 frames to search near that horizontal position — significantly improves accuracy. Optional but recommended.</span></div>
           </div>
           <div id="barClickFrame" style="display:none;margin-top:10px;border-radius:8px;overflow:hidden;position:relative;cursor:crosshair;">
             <canvas id="barClickCanvas" style="display:block;width:100%;"></canvas>
@@ -1600,11 +1600,20 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
       }
     }
 
-    // User seed point takes priority for x; landmark y drives search center
-    const seedX   = barSeedPoint ? barSeedPoint.x : (lmX !== null ? lmX : 0.5);
-    const yCenter = lastBarY !== null ? lastBarY
-                  : (barSeedPoint ? barSeedPoint.y
-                  : (lmY !== null ? lmY : 0.5));
+    // ── Seed priority logic ──
+    // seedX: user click > hand landmark > center
+    const seedX = barSeedPoint ? barSeedPoint.x : (lmX !== null ? lmX : 0.5);
+
+    // yCenter: lastBarY from previous frame (continuity) > user seed > hand landmark > center
+    // BUT: if this is frame 1 (lastBarY===null) and user clicked, always use seed y
+    const yCenter = (lastBarY !== null)
+                  ? lastBarY                              // frames 2-8: follow tracking
+                  : (barSeedPoint ? barSeedPoint.y        // frame 1: use click if available
+                  : (lmY !== null ? lmY : 0.5));          // frame 1: landmark fallback
+
+    // Seed x band: when user clicked, restrict row search to a horizontal band
+    // around the clicked x — avoids scoring rack/background pixels on far side
+    const seedXpx_frac = seedX; // normalized, applied per-frame after img loads
 
     const img = new Image();
     img.onload = () => {
@@ -1635,11 +1644,18 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
       // Bar characteristics: chrome (bright, low sat), rubber (dark, low sat),
       // or colored bumper plates. Require continuous horizontal span ≥ 6% frame width.
       const rowScores = new Float32Array(sh);
-      const MIN_SPAN = Math.round(W * 0.06); // bar must span at least 6% width
+      const bandWidth = bandR - bandL + 1;
+      const MIN_SPAN = Math.round(bandWidth * 0.08); // bar must span ≥8% of search band
+
+      // When user clicked the bar: restrict horizontal scan to ±25% of frame around seed x
+      // This prevents rack uprights, floor, or background from outscoring the actual bar
+      const hasSeed = !!barSeedPoint;
+      const bandL = hasSeed ? Math.max(0,   Math.round((seedXpx_frac - 0.25) * W)) : 0;
+      const bandR = hasSeed ? Math.min(W-1, Math.round((seedXpx_frac + 0.25) * W)) : W-1;
 
       for(let row = 0; row < sh; row++) {
         let score = 0, runLen = 0, maxRun = 0;
-        for(let col = 0; col < W; col++) {
+        for(let col = bandL; col <= bandR; col++) {
           const idx4 = (row * W + col) * 4;
           const r = pix[idx4], g = pix[idx4+1], b = pix[idx4+2];
           const bright = (r + g + b) / 3;
@@ -1693,14 +1709,21 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
         }
       }
 
-      const MIN_SCORE = W * 0.06; // lower threshold — bar from side is narrower view
+      const MIN_SCORE = bandWidth * 0.06;
       if(bestRow >= 0 && bestScore > MIN_SCORE) {
-        // Subpixel refinement
         let ySum = 0, wSum = 0;
         for(let r2 = Math.max(0,bestRow-3); r2 <= Math.min(sh-1,bestRow+3); r2++) {
           if(rowScores[r2] > 0) { ySum += (sy+r2)*rowScores[r2]; wSum += rowScores[r2]; }
         }
-        const ry = wSum > 0 ? (ySum/wSum)/H : (sy+bestRow)/H;
+        let ry = wSum > 0 ? (ySum/wSum)/H : (sy+bestRow)/H;
+
+        // Soft seed prior: if user clicked AND confidence is weak, blend toward seed y
+        // Prevents drifting far from known bar position on ambiguous frames
+        if(barSeedPoint && bestScore < MIN_SCORE * 3) {
+          const blendFrac = 0.3; // 30% pull back toward seed y
+          ry = ry * (1 - blendFrac) + barSeedPoint.y * blendFrac;
+        }
+
         const conf = colConfirmed ? 'color-tracked' : 'color-unconfirmed';
         lastBarY = ry;
         resolve({x: seedX, y: ry, confidence: conf});
