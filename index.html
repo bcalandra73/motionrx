@@ -1332,8 +1332,7 @@ function applyTemporalSmoothing(allFrameLandmarks) {
 
 // ── Master fusion pipeline — takes raw MP results + images, returns fused landmarks ──
 async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement) {
-  // Safe conversion: MediaPipe returns NormalizedLandmarkList (array-like, not Array)
-  // Convert to plain arrays so .map(), spread, etc. all work reliably
+  // Helper: safe MediaPipe NormalizedLandmarkList → plain Array
   const toPlainArray = (lm) => {
     if(!lm) return null;
     if(Array.isArray(lm)) return lm;
@@ -1342,67 +1341,96 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement) {
     return arr;
   };
 
+  // Helper: Promise with timeout — prevents any await hanging forever
+  const withTimeout = (promise, ms, fallback) =>
+    Promise.race([promise, new Promise(res => setTimeout(() => res(fallback), ms))]);
+
   try {
-  const nFrames = mpResults.length;
-  let allLandmarks = [];
+    const nFrames = mpResults.length;
+    let allLandmarks = [];
+    const statusEl = document.getElementById('loadingStatus') || {textContent:''};
 
-  // Step 1: Run MoveNet on all frames and fuse with MediaPipe
-  for(let i = 0; i < nFrames; i++) {
-    const mpLM = toPlainArray(mpResults[i]?.poseLandmarks || null);
+    // Step 1: MoveNet fusion (with per-frame timeout)
+    for(let i = 0; i < nFrames; i++) {
+      const mpLM = toPlainArray(mpResults[i]?.poseLandmarks || null);
+      statusEl.textContent = `Refining landmarks — frame ${i+1}/${nFrames}...`;
 
-    if(moveNetReady) {
-      try {
-        const img = await new Promise((res, rej) => {
-          const im = new Image();
-          im.onload = () => res(im);
-          im.onerror = rej;
-          im.src = 'data:image/jpeg;base64,' + imageBase64Array[i];
-        });
-        const mnKP  = await runMoveNetOnImage(img);
-        const mnNorm = moveNetToNormalized(mnKP, img.width, img.height);
-        allLandmarks.push(fuseLandmarks(mpLM, mnNorm));
-      } catch(e) {
+      if(moveNetReady && imageBase64Array[i]) {
+        try {
+          const img = await withTimeout(
+            new Promise((res, rej) => {
+              const im = new Image();
+              im.onload = () => res(im);
+              im.onerror = () => res(null); // don't reject — just skip
+              im.src = 'data:image/jpeg;base64,' + imageBase64Array[i];
+            }),
+            3000, null  // 3s timeout per image load
+          );
+
+          if(img) {
+            const mnKP = await withTimeout(runMoveNetOnImage(img), 4000, null);
+            if(mnKP) {
+              const mnNorm = moveNetToNormalized(mnKP, img.width, img.height);
+              allLandmarks.push(fuseLandmarks(mpLM, mnNorm));
+            } else {
+              allLandmarks.push(mpLM);
+            }
+          } else {
+            allLandmarks.push(mpLM);
+          }
+        } catch(frameErr) {
+          console.warn(`[Fusion] Frame ${i+1} error, using MP only:`, frameErr);
+          allLandmarks.push(mpLM);
+        }
+      } else {
         allLandmarks.push(mpLM);
       }
-    } else {
-      allLandmarks.push(mpLM);
     }
-  }
 
-  // Step 2: Segment length consistency across all frames
-  allLandmarks = applySegmentConstraints(allLandmarks);
+    statusEl.textContent = 'Applying segment constraints...';
+    allLandmarks = applySegmentConstraints(allLandmarks);
 
-  // Step 3: Bilateral symmetry fallback per frame
-  allLandmarks = allLandmarks.map(lms => applyBilateralFallback(lms, movement));
+    statusEl.textContent = 'Applying bilateral symmetry fallback...';
+    allLandmarks = allLandmarks.map(lms => applyBilateralFallback(lms, movement));
 
-  // Step 4: Temporal smoothing
-  allLandmarks = applyTemporalSmoothing(allLandmarks);
+    statusEl.textContent = 'Applying temporal smoothing...';
+    allLandmarks = applyTemporalSmoothing(allLandmarks);
 
-  return allLandmarks;
+    console.log('[FusionPipeline] Complete — all refinement layers applied');
+    return allLandmarks;
 
   } catch(pipelineErr) {
-    console.error('[FusionPipeline] Error — falling back to raw MediaPipe landmarks:', pipelineErr);
-    // Graceful fallback: return plain-array MediaPipe landmarks without fusion
+    console.error('[FusionPipeline] Fatal error — falling back to raw MediaPipe:', pipelineErr);
     return mpResults.map(r => toPlainArray(r?.poseLandmarks || null));
   }
 }
 
+
 async function runMediaPipeOnFrames(frames) {
   if(!mpReady || !poseInstance) return frames.map(()=>null);
   const results = [];
+  const withTimeout = (p, ms) => Promise.race([p, new Promise(res => setTimeout(() => res(null), ms))]);
+
   for(const frame of frames) {
     try {
-      const img = new Image();
-      await new Promise((res,rej) => {
-        img.onload = res; img.onerror = rej;
-        img.src = 'data:image/jpeg;base64,' + frame.imageData;
-      });
+      const img = await withTimeout(new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = () => res(null);
+        im.src = 'data:image/jpeg;base64,' + frame.imageData;
+      }), 5000);
+
+      if(!img) { results.push(null); continue; }
+
       let result = null;
       poseInstance.onResults(r => { result = r; });
-      await poseInstance.send({image: img});
-      await new Promise(r => setTimeout(r, 50)); // let callback fire
+      await withTimeout(poseInstance.send({image: img}), 8000);
+      await new Promise(r => setTimeout(r, 80)); // let callback fire
       results.push(result);
-    } catch(e) { results.push(null); }
+    } catch(e) {
+      console.warn('[MediaPipe] Frame error:', e);
+      results.push(null);
+    }
   }
   return results;
 }
@@ -3019,7 +3047,10 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
     document.getElementById('resultsSection').scrollIntoView({behavior:'smooth'});
 
-  } catch(err) { showErr('Analysis failed: ' + err.message); }
+  } catch(err) {
+    console.error('[runAnalysis] Error:', err);
+    showErr('Analysis failed: ' + (err.message || String(err)) + ' — check browser console (F12) for details.');
+  }
 }
 
 function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) {
