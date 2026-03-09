@@ -1010,9 +1010,15 @@ function startFrameExtraction(file, vid) {
       }
 
       statusText.textContent = `✓ ${frames.length} frames extracted${phaseNames.length ? ' — phases: ' + phaseNames.slice(0,4).join(', ') : ''} — ready for analysis`;
-      // Show bar-click UI for lifts using first captured frame
+      // Show bar-click UI — use a mid-lift frame so bar is clearly visible
+      // frames[0] is often the setup/starting position which may show bar near floor
+      // Pick a frame around 30-40% through the lift for better visibility
       const isLift = /deadlift|squat|press|hinge|push|pull|lunge|sit/i.test(movement);
-      if(isLift && frames[0]) setupBarClickFrame(frames[0].imageData);
+      if(isLift && frames.length > 0) {
+        const seedFrameIdx = Math.min(frames.length - 1, Math.max(0, Math.floor(frames.length * 0.35)));
+        const seedFrame = frames[seedFrameIdx] || frames[0];
+        if(seedFrame) setupBarClickFrame(seedFrame.imageData);
+      }
 
       // ── Dense bar tracking extraction ──
       // Strategy:
@@ -1134,7 +1140,9 @@ function startFrameExtraction(file, vid) {
         rawBarPoints = interpolateMissingBarPoints(rawBarPoints, barTimes.map(t => t/dur));
 
         lastBarY = null;
-        statusText.textContent = `✓ Bar path: ${rawBarPoints.length} points tracked`;
+        statusText.textContent = `✓ Bar path: ${rawBarPoints.length} points tracked — ready for analysis`;
+        barFill.style.width = '100%';
+        barFill.style.background = 'var(--teal)';
         console.log(`[BarTracking] ${rawBarPoints.length} pts from ${barTrackingFrames.length} frames, ${anchorLandmarks.length} anchors`);
       }
     } else {
