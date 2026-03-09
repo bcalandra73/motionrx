@@ -817,6 +817,60 @@ function startFrameExtraction(file, vid) {
       extractedFrames = frames;
       barFill.style.width = '100%';
       const phaseNames = frames.filter(f=>f.phase?.id !== 'frame').map(f=>f.phase?.label).filter(Boolean);
+      statusText.textContent = `✓ ${frames.length} frames extracted${phaseNames.length ? ' — phases: ' + phaseNames.slice(0,4).join(', ') : ''} — refining phase labels...`;
+
+      // ── Smart phase relabeling: find true bottom/peak using MediaPipe angles ──
+      // Only if MediaPipe is ready and movement has a meaningful bottom/peak
+      const needsSmartLabel = /squat|lunge|deadlift|hinge|sit/i.test(movement);
+      if(mpReady && poseInstance && needsSmartLabel && frames.length >= 4) {
+        try {
+          const quickResults = await runMediaPipeOnFrames(frames);
+          const isFlexion = /squat|lunge|sit/i.test(movement); // bottom = max knee flexion
+          const isHinge   = /deadlift|hinge/i.test(movement);   // lockout = max hip extension
+
+          let extremeIdx = -1, extremeVal = isFlexion ? -Infinity : Infinity;
+          quickResults.forEach((res, i) => {
+            if(!res?.poseLandmarks) return;
+            const lm = res.poseLandmarks;
+            const v  = (idx) => lm[idx] && lm[idx].visibility > 0.3 ? lm[idx] : null;
+            if(isFlexion) {
+              // Max knee flexion angle = deepest squat
+              const lH=v(23),lK=v(25),lA=v(27), rH=v(24),rK=v(26),rA=v(28);
+              const lAng = lH&&lK&&lA ? calcAngle(lH,lK,lA) : null;
+              const rAng = rH&&rK&&rA ? calcAngle(rH,rK,rA) : null;
+              const avg  = lAng&&rAng ? (lAng+rAng)/2 : lAng||rAng;
+              // Knee flexion: larger angle = more straight, smaller = more bent
+              // Deepest = minimum angle
+              if(avg !== null && avg < extremeVal) { extremeVal = avg; extremeIdx = i; }
+            } else if(isHinge) {
+              // Max hip extension = lockout = maximum hip angle
+              const lS=v(11),lH=v(23),lK=v(25), rS=v(12),rH=v(24),rK=v(26);
+              const lAng = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
+              const rAng = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
+              const avg  = lAng&&rAng ? (lAng+rAng)/2 : lAng||rAng;
+              if(avg !== null && avg > extremeVal) { extremeVal = avg; extremeIdx = i; }
+            }
+          });
+
+          if(extremeIdx >= 0) {
+            // Find the frame currently labeled as bottom/lockout and swap to detected frame
+            const targetId = isHinge ? 'lockout' : 'bottom';
+            // Remove bottom label from current holder
+            frames.forEach(f => { if(f.phase?.id === targetId) {
+              f.phase = {id:'inter', label:'Inter', desc:'Between phases'};
+            }});
+            // Assign to detected frame
+            const detectedLabel = isFlexion
+              ? {id:'bottom',  label:'Bottom',  desc:'Deepest point — detected via knee angle'}
+              : {id:'lockout', label:'Lockout', desc:'Full extension — detected via hip angle'};
+            frames[extremeIdx].phase = detectedLabel;
+            console.log(`Smart phase: ${targetId} detected at frame ${extremeIdx+1} (angle ${Math.round(extremeVal)}°)`);
+          }
+        } catch(e) {
+          console.warn('Smart phase detection failed, using time-based labels:', e);
+        }
+      }
+
       statusText.textContent = `✓ ${frames.length} frames extracted${phaseNames.length ? ' — phases: ' + phaseNames.slice(0,4).join(', ') : ''} — ready for analysis`;
       // Show bar-click UI for lifts using first captured frame
       const isLift = /deadlift|squat|press|hinge|push|pull|lunge|sit/i.test(movement);
@@ -1056,34 +1110,41 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null) {
 
 // ── Bar Path Detection ──
 // Detects barbell position using hand landmark midpoint + color scanning
-// Persistent bar tracking state — last known y helps constrain next frame search
+// Persistent bar tracking state
 let lastBarY = null;
 
-function detectBarPosition(imageBase64, poseLandmarks) {
+function detectBarPosition(imageBase64, poseLandmarks, view) {
   return new Promise(resolve => {
+    const lm = poseLandmarks;
+    const v  = (i) => lm && lm[i] && lm[i].visibility > 0.2 ? lm[i] : null;
 
-    // Helper: get wrist/hand midpoint from landmarks
-    const getFromLandmarks = (lm) => {
-      if(!lm) return null;
+    // ── Landmark-based seed position (view-aware) ──
+    let lmX = null, lmY = null;
+
+    if(view === 'front' || view === 'posterior') {
+      // Front/posterior back squat: bar sits on upper traps between shoulders
+      // Use shoulder midpoint + small downward offset (bar is ~5-8cm below shoulders)
+      const lS = v(11), rS = v(12);
+      if(lS && rS) {
+        lmX = (lS.x + rS.x) / 2;
+        lmY = (lS.y + rS.y) / 2 + 0.04; // shift slightly below shoulder midpoint
+      } else if(lS) { lmX = lS.x; lmY = lS.y + 0.04; }
+      else if(rS)   { lmX = rS.x; lmY = rS.y + 0.04; }
+    } else {
+      // Side view: use wrist/hand midpoint — bar is gripped at hand level
       const pairs = [[15,16],[17,18],[19,20]];
       for(const [li,ri] of pairs) {
-        const L = lm[li], R = lm[ri];
-        const lok = L && L.visibility > 0.2;
-        const rok = R && R.visibility > 0.2;
-        if(lok && rok) return {x:(L.x+R.x)/2, y:(L.y+R.y)/2, conf:Math.min(L.visibility,R.visibility)};
-        if(lok) return {x:L.x, y:L.y, conf:L.visibility*0.7};
-        if(rok) return {x:R.x, y:R.y, conf:R.visibility*0.7};
+        const L = v(li), R = v(ri);
+        if(L && R) { lmX = (L.x+R.x)/2; lmY = (L.y+R.y)/2; break; }
+        if(L)      { lmX = L.x; lmY = L.y; break; }
+        if(R)      { lmX = R.x; lmY = R.y; break; }
       }
-      return null;
-    };
+    }
 
-    const lmPt = poseLandmarks ? getFromLandmarks(poseLandmarks) : null;
-
-    // Determine x: seed takes priority, else landmark, else center
-    const seedX = barSeedPoint ? barSeedPoint.x : (lmPt ? lmPt.x : 0.5);
-
-    // Determine y search center: prefer last known y for continuity, fall back to landmark
-    const yCenterNorm = lastBarY !== null ? lastBarY : (lmPt ? lmPt.y : (barSeedPoint ? barSeedPoint.y : 0.5));
+    // Seed point overrides x; landmark or seed drives y search center
+    const seedX   = barSeedPoint ? barSeedPoint.x : (lmX !== null ? lmX : 0.5);
+    const yCenter = lastBarY !== null ? lastBarY
+                  : (lmY !== null ? lmY : (barSeedPoint ? barSeedPoint.y : 0.4));
 
     const img = new Image();
     img.onload = () => {
@@ -1093,16 +1154,16 @@ function detectBarPosition(imageBase64, poseLandmarks) {
       const ctx = cv.getContext('2d');
       ctx.drawImage(img, 0, 0);
 
-      // Search window: ±18% of frame height around last known y
+      // Search window: ±18% height around yCenter
       const searchHalf = Math.round(H * 0.18);
-      const sy = Math.max(0, Math.round(yCenterNorm * H) - searchHalf);
-      const ey = Math.min(H, Math.round(yCenterNorm * H) + searchHalf);
+      const sy = Math.max(0, Math.round(yCenter * H) - searchHalf);
+      const ey = Math.min(H, Math.round(yCenter * H) + searchHalf);
       const sh = ey - sy;
 
       if(sh <= 2) {
-        const fallbackY = lmPt ? lmPt.y : yCenterNorm;
-        lastBarY = fallbackY;
-        resolve({x: seedX, y: fallbackY, confidence:'landmark'});
+        const fy = lmY !== null ? lmY : yCenter;
+        lastBarY = fy;
+        resolve({x: seedX, y: fy, confidence:'landmark'});
         return;
       }
 
@@ -1115,58 +1176,47 @@ function detectBarPosition(imageBase64, poseLandmarks) {
           const i = (row * W + col) * 4;
           const r = pix[i], g = pix[i+1], b = pix[i+2];
           const bright = (r + g + b) / 3;
-          const sat = Math.max(r,g,b) - Math.min(r,g,b);
-          // Bar materials
-          const isChrome = bright > 145 && sat < 40;           // shiny chrome
-          const isDark   = bright < 60;                         // dark iron / knurling
-          const isRubber = bright > 40 && bright < 90 && sat < 30; // black rubber bumpers
-          const isBumper = (r>130&&g<90&&b<90)||(b>130&&r<90&&g<90)||(g>130&&r<90&&b<90)||(r>150&&g>100&&b<60); // colored bumpers
-          if(isChrome)  { score += 3.0; barPix++; }
+          const sat    = Math.max(r,g,b) - Math.min(r,g,b);
+          const isChrome  = bright > 145 && sat < 40;
+          const isDark    = bright < 60;
+          const isRubber  = bright > 40 && bright < 90 && sat < 30;
+          const isBumper  = (r>130&&g<90&&b<90)||(b>130&&r<90&&g<90)||(g>130&&r<90&&b<90)||(r>150&&g>100&&b<60);
+          if(isChrome)           { score += 3.0; barPix++; }
           else if(isDark||isRubber){ score += 2.0; barPix++; }
-          else if(isBumper){ score += 2.5; barPix++; }
+          else if(isBumper)      { score += 2.5; barPix++; }
         }
-        // Require at least 8% of row width to be bar-like pixels
         rowScores[row] = barPix > W * 0.08 ? score : 0;
       }
 
-      // Find best-scoring row; apply continuity bias toward last known y
+      // Best row with continuity bias toward last known y
       let bestRow = -1, bestScore = 0;
       for(let row = 0; row < sh; row++) {
         if(rowScores[row] <= 0) continue;
-        // Continuity bonus: rows close to last known y get a boost
-        const distFromCenter = Math.abs(row - searchHalf);
-        const continuityBonus = 1 - (distFromCenter / searchHalf) * 0.3;
-        const adjScore = rowScores[row] * continuityBonus;
-        if(adjScore > bestScore) { bestScore = adjScore; bestRow = row; }
+        const distFrac = Math.abs(row - searchHalf) / searchHalf;
+        const adj = rowScores[row] * (1 - distFrac * 0.3);
+        if(adj > bestScore) { bestScore = adj; bestRow = row; }
       }
 
-      const minScore = W * 0.10;
-      if(bestRow >= 0 && bestScore > minScore) {
-        // Refine: average the top few rows within 3px of bestRow
+      if(bestRow >= 0 && bestScore > W * 0.10) {
+        // Subpixel refinement: weighted average of nearby rows
         let ySum = 0, wSum = 0;
-        for(let row = Math.max(0, bestRow-3); row <= Math.min(sh-1, bestRow+3); row++) {
-          if(rowScores[row] > 0) { ySum += (sy + row) * rowScores[row]; wSum += rowScores[row]; }
+        for(let r2 = Math.max(0,bestRow-3); r2 <= Math.min(sh-1,bestRow+3); r2++) {
+          if(rowScores[r2] > 0) { ySum += (sy+r2)*rowScores[r2]; wSum += rowScores[r2]; }
         }
-        const refinedY = wSum > 0 ? (ySum / wSum) / H : (sy + bestRow) / H;
-        lastBarY = refinedY;
-        resolve({x: seedX, y: refinedY, confidence: 'color-tracked'});
+        const ry = wSum > 0 ? (ySum/wSum)/H : (sy+bestRow)/H;
+        lastBarY = ry;
+        resolve({x: seedX, y: ry, confidence:'color-tracked'});
       } else {
-        // No bar pixels found — use landmark y if available, else last known
-        const fallbackY = lmPt ? lmPt.y : yCenterNorm;
-        // Only update lastBarY from landmark if we haven't tracked yet
-        if(lastBarY === null) lastBarY = fallbackY;
-        resolve({x: seedX, y: fallbackY, confidence: 'landmark'});
+        const fy = lmY !== null ? lmY : yCenter;
+        if(lastBarY === null) lastBarY = fy;
+        resolve({x: seedX, y: fy, confidence:'landmark'});
       }
     };
-    img.onerror = () => {
-      const fallbackY = lmPt ? lmPt.y : yCenterNorm;
-      resolve({x: seedX, y: fallbackY, confidence: 'error'});
-    };
+    img.onerror = () => resolve({x: seedX, y: lmY ?? yCenter, confidence:'error'});
     img.src = 'data:image/jpeg;base64,' + imageBase64;
   });
 }
 
-// Smooth bar path points to remove frame-to-frame jitter
 function smoothBarPoints(points) {
   if(points.length < 3) return points;
   return points.map((p, i) => {
@@ -2309,7 +2359,7 @@ async function runAnalysis() {
       // Bar detection (runs on all frames for lifts)
       let barPt = null;
       if(isLift) {
-        barPt = await detectBarPosition(frame.imageData, mpResult?.poseLandmarks || null);
+        barPt = await detectBarPosition(frame.imageData, mpResult?.poseLandmarks || null, cameraView);
         if(barPt) barPoints.push(barPt);
       }
 
@@ -2327,7 +2377,7 @@ async function runAnalysis() {
     annotatedFrames = extractedFrames.map(f => ({base64: f.imageData, canvas: null}));
     if(isLift) {
       for(const frame of extractedFrames) {
-        const bp = await detectBarPosition(frame.imageData, null);
+        const bp = await detectBarPosition(frame.imageData, null, cameraView);
         if(bp) barPoints.push(bp);
       }
     }
