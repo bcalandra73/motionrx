@@ -1805,14 +1805,14 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
       // Bar characteristics: chrome (bright, low sat), rubber (dark, low sat),
       // or colored bumper plates. Require continuous horizontal span ≥ 6% frame width.
       const rowScores = new Float32Array(sh);
-      const bandWidth = bandR - bandL + 1;
-      const MIN_SPAN = Math.round(bandWidth * 0.08); // bar must span ≥8% of search band
 
       // When user clicked the bar: restrict horizontal scan to ±25% of frame around seed x
       // This prevents rack uprights, floor, or background from outscoring the actual bar
       const hasSeed = !!barSeedPoint;
       const bandL = hasSeed ? Math.max(0,   Math.round((seedXpx_frac - 0.25) * W)) : 0;
       const bandR = hasSeed ? Math.min(W-1, Math.round((seedXpx_frac + 0.25) * W)) : W-1;
+      const bandWidth = bandR - bandL + 1;
+      const MIN_SPAN = Math.round(bandWidth * 0.08); // bar must span ≥8% of search band
 
       for(let row = 0; row < sh; row++) {
         let score = 0, runLen = 0, maxRun = 0;
@@ -3321,6 +3321,7 @@ async function runAnalysis() {
   const notes = document.getElementById('clinicalNotes').value.trim();
   const focusAreas = [...document.querySelectorAll('#focusGrid .focus-chip.on input')].map(i=>i.value);
   const focusText = focusAreas.length ? focusAreas.join(', ') : 'general movement quality';
+  const isLift = /deadlift|squat|press|hinge|push|pull/i.test(movement);
 
   document.getElementById('inputSection').style.display='none';
   document.getElementById('loadingState').style.display='block';
@@ -3338,8 +3339,6 @@ async function runAnalysis() {
   lastBarY = null; // reset bar tracking state for new analysis
   barReferenceFrame = null;
   let frameHeight = 480;   // fallback
-
-  const isLift = /deadlift|squat|press|hinge|push|pull/i.test(movement);
 
   console.log('[Analysis] Stage 1: Starting MediaPipe');
   if(mpReady && poseInstance) {
