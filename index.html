@@ -1720,8 +1720,8 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null) {
         ctx.lineWidth = 3;
         ctx.strokeText(confLabel, bx + Math.max(10, W/80), by - Math.max(8, W/100));
         ctx.fillText(confLabel, bx + Math.max(10, W/80), by - Math.max(8, W/100));
-      }nt = `bold ${Math.max(11, W/65)}px sans-serif`;
-        ctx.fillStyle = '#fff';
+      }
+
       resolve({canvas, base64: canvas.toDataURL('image/jpeg', 0.88).split(',')[1]});
     };
     img.src = 'data:image/jpeg;base64,' + imageBase64;
