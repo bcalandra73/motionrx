@@ -1137,15 +1137,26 @@ function moveNetToNormalized(keypoints, imgW, imgH) {
 // ── Fuse MediaPipe + MoveNet landmarks for a single frame ──
 // Strategy: weighted average when both confident, fallback to whichever is better
 function fuseLandmarks(mpLandmarks, mnNormalized) {
-  if(!mpLandmarks) return mnNormalized ? Object.values(mnNormalized) : null;
-  if(!mnNormalized) return mpLandmarks;
+  // Safely convert MediaPipe NormalizedLandmarkList to plain array
+  const toArray = (lm) => {
+    if(!lm) return null;
+    if(Array.isArray(lm)) return lm;
+    // MediaPipe returns array-like object — convert explicitly
+    const arr = [];
+    for(let i = 0; i < (lm.length || 33); i++) arr.push(lm[i] || null);
+    return arr;
+  };
+
+  const mpArr = toArray(mpLandmarks);
+  if(!mpArr) return mnNormalized ? Object.values(mnNormalized) : null;
+  if(!mnNormalized) return mpArr;
 
   // Deep clone MP landmarks as base
-  const fused = mpLandmarks.map((lm, i) => ({...lm, source:'mediapipe'}));
+  const fused = mpArr.map((lm, i) => lm ? {...lm, source:'mediapipe'} : null);
 
   for(const [mpIdxStr, mnLM] of Object.entries(mnNormalized)) {
     const mpIdx = parseInt(mpIdxStr);
-    const mpLM  = mpLandmarks[mpIdx];
+    const mpLM  = mpArr[mpIdx];
     if(!mpLM) { fused[mpIdx] = {...mnLM}; continue; }
 
     const mpConf = mpLM.visibility || 0;
@@ -1154,32 +1165,25 @@ function fuseLandmarks(mpLandmarks, mnNormalized) {
     if(mpConf < 0.3 && mnConf < 0.3) continue; // both bad — keep MP
 
     if(mpConf >= 0.3 && mnConf >= 0.3) {
-      // Both confident — distance check
       const dist = Math.hypot(mpLM.x - mnLM.x, mpLM.y - mnLM.y);
       if(dist < 0.08) {
-        // Agreement within 8% frame width — weighted average
-        const wMP = mpConf, wMN = mnConf;
-        const wSum = wMP + wMN;
+        const wMP = mpConf, wMN = mnConf, wSum = wMP + wMN;
         fused[mpIdx] = {
           x: (mpLM.x*wMP + mnLM.x*wMN) / wSum,
           y: (mpLM.y*wMP + mnLM.y*wMN) / wSum,
           visibility: Math.max(mpConf, mnConf),
-          source: 'fused',
-          agreement: dist
+          source: 'fused', agreement: dist
         };
       } else {
-        // Disagreement — take higher confidence, flag it
         const winner = mpConf >= mnConf ? {...mpLM} : {...mnLM};
         winner.disagreement = dist;
         winner.source = mpConf >= mnConf ? 'mp-won' : 'mn-won';
         fused[mpIdx] = winner;
-        if(dist > 0.12) console.log(`[Fusion] LM${mpIdx}: MP(${mpConf.toFixed(2)}) vs MN(${mnConf.toFixed(2)}) disagree by ${(dist*100).toFixed(1)}%`);
+        if(dist > 0.12) console.log(`[Fusion] LM${mpIdx}: disagree by ${(dist*100).toFixed(1)}%`);
       }
     } else if(mnConf > mpConf + 0.15) {
-      // MoveNet substantially more confident — use it
       fused[mpIdx] = {...mnLM, source:'mn-override'};
     }
-    // else keep MP
   }
 
   return fused;
@@ -1281,7 +1285,14 @@ function applyTemporalSmoothing(allFrameLandmarks) {
   if(n < 3) return allFrameLandmarks;
 
   const LANDMARK_COUNT = 33;
-  const smoothed = allFrameLandmarks.map(lms => lms ? [...lms] : null);
+  const smoothed = allFrameLandmarks.map(lms => {
+    if(!lms) return null;
+    if(Array.isArray(lms)) return [...lms];
+    // Convert array-like to plain array
+    const arr = [];
+    for(let i = 0; i < (lms.length || 33); i++) arr.push(lms[i] || null);
+    return arr;
+  });
 
   for(let lmIdx = 0; lmIdx < LANDMARK_COUNT; lmIdx++) {
     for(let fi = 1; fi < n-1; fi++) { // skip first and last frames
@@ -1321,12 +1332,23 @@ function applyTemporalSmoothing(allFrameLandmarks) {
 
 // ── Master fusion pipeline — takes raw MP results + images, returns fused landmarks ──
 async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement) {
+  // Safe conversion: MediaPipe returns NormalizedLandmarkList (array-like, not Array)
+  // Convert to plain arrays so .map(), spread, etc. all work reliably
+  const toPlainArray = (lm) => {
+    if(!lm) return null;
+    if(Array.isArray(lm)) return lm;
+    const arr = [];
+    for(let i = 0; i < (lm.length || 33); i++) arr.push(lm[i] || null);
+    return arr;
+  };
+
+  try {
   const nFrames = mpResults.length;
   let allLandmarks = [];
 
   // Step 1: Run MoveNet on all frames and fuse with MediaPipe
   for(let i = 0; i < nFrames; i++) {
-    const mpLM = mpResults[i]?.poseLandmarks || null;
+    const mpLM = toPlainArray(mpResults[i]?.poseLandmarks || null);
 
     if(moveNetReady) {
       try {
@@ -1357,6 +1379,12 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement) {
   allLandmarks = applyTemporalSmoothing(allLandmarks);
 
   return allLandmarks;
+
+  } catch(pipelineErr) {
+    console.error('[FusionPipeline] Error — falling back to raw MediaPipe landmarks:', pipelineErr);
+    // Graceful fallback: return plain-array MediaPipe landmarks without fusion
+    return mpResults.map(r => toPlainArray(r?.poseLandmarks || null));
+  }
 }
 
 async function runMediaPipeOnFrames(frames) {
