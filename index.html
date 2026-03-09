@@ -1523,29 +1523,36 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null) {
       if(barPoint) {
         const W = canvas.width, H = canvas.height;
         const bx = barPoint.x * W, by = barPoint.y * H;
+        // Color by confidence: green=color-tracked, amber=unconfirmed, red=landmark fallback
+        const conf = barPoint.confidence || '';
+        const dotColor = conf === 'color-tracked'       ? '#00e5cc'   // teal = confirmed
+                       : conf === 'color-unconfirmed'   ? '#ff9f43'   // amber = weak
+                       : '#ff3c3c';                                    // red = landmark only
         // Outer glow
         ctx.beginPath();
         ctx.arc(bx, by, Math.max(12, W/60), 0, 2*Math.PI);
-        ctx.strokeStyle = 'rgba(255,60,60,0.4)';
+        ctx.strokeStyle = dotColor.replace(')', ',0.4)').replace('rgb','rgba').replace('#', 'rgba(').replace(')',',0.4)');
+        ctx.strokeStyle = dotColor + '66'; // hex alpha
         ctx.lineWidth = 6;
         ctx.stroke();
         // Inner dot
         ctx.beginPath();
         ctx.arc(bx, by, Math.max(6, W/120), 0, 2*Math.PI);
-        ctx.fillStyle = '#ff3c3c';
+        ctx.fillStyle = dotColor;
         ctx.fill();
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = 2;
         ctx.stroke();
-        // Label
+        // Label with confidence indicator
+        const confLabel = conf === 'color-tracked' ? 'BAR ✓' : conf === 'landmark-fallback' ? 'BAR ~' : 'BAR';
         ctx.font = `bold ${Math.max(11, W/65)}px sans-serif`;
         ctx.fillStyle = '#fff';
         ctx.strokeStyle = 'rgba(0,0,0,0.7)';
         ctx.lineWidth = 3;
-        ctx.strokeText('BAR', bx + Math.max(10, W/80), by - Math.max(8, W/100));
-        ctx.fillText('BAR', bx + Math.max(10, W/80), by - Math.max(8, W/100));
-      }
-
+        ctx.strokeText(confLabel, bx + Math.max(10, W/80), by - Math.max(8, W/100));
+        ctx.fillText(confLabel, bx + Math.max(10, W/80), by - Math.max(8, W/100));
+      }nt = `bold ${Math.max(11, W/65)}px sans-serif`;
+        ctx.fillStyle = '#fff';
       resolve({canvas, base64: canvas.toDataURL('image/jpeg', 0.88).split(',')[1]});
     };
     img.src = 'data:image/jpeg;base64,' + imageBase64;
@@ -1560,35 +1567,44 @@ let lastBarY = null;
 function detectBarPosition(imageBase64, poseLandmarks, view) {
   return new Promise(resolve => {
     const lm = poseLandmarks;
-    const v  = (i) => lm && lm[i] && lm[i].visibility > 0.2 ? lm[i] : null;
+    const v  = (i) => lm && lm[i] && lm[i].visibility > 0.15 ? lm[i] : null;
 
-    // ── Landmark-based seed position (view-aware) ──
+    // ── Movement-aware landmark anchor ──
     let lmX = null, lmY = null;
 
     if(view === 'front' || view === 'posterior') {
-      // Front/posterior back squat: bar sits on upper traps between shoulders
-      // Use shoulder midpoint + small downward offset (bar is ~5-8cm below shoulders)
+      // Front/posterior: bar on upper traps — shoulder midpoint + small offset
       const lS = v(11), rS = v(12);
-      if(lS && rS) {
-        lmX = (lS.x + rS.x) / 2;
-        lmY = (lS.y + rS.y) / 2 + 0.04; // shift slightly below shoulder midpoint
-      } else if(lS) { lmX = lS.x; lmY = lS.y + 0.04; }
-      else if(rS)   { lmX = rS.x; lmY = rS.y + 0.04; }
+      if(lS && rS)   { lmX = (lS.x+rS.x)/2; lmY = (lS.y+rS.y)/2 + 0.04; }
+      else if(lS)    { lmX = lS.x; lmY = lS.y + 0.04; }
+      else if(rS)    { lmX = rS.x; lmY = rS.y + 0.04; }
     } else {
-      // Side view: use wrist/hand midpoint — bar is gripped at hand level
-      const pairs = [[15,16],[17,18],[19,20]];
-      for(const [li,ri] of pairs) {
-        const L = v(li), R = v(ri);
-        if(L && R) { lmX = (L.x+R.x)/2; lmY = (L.y+R.y)/2; break; }
-        if(L)      { lmX = L.x; lmY = L.y; break; }
-        if(R)      { lmX = R.x; lmY = R.y; break; }
+      // Side view: bar is at hand grip level
+      // Priority: index fingertips (19/20) → wrists (15/16) → pinky (17/18)
+      // Use ALL visible hand landmarks and take their centroid for robustness
+      const handLMs = [19,20,15,16,17,18,21,22].map(i => v(i)).filter(Boolean);
+      if(handLMs.length > 0) {
+        lmX = handLMs.reduce((s,p) => s+p.x, 0) / handLMs.length;
+        lmY = handLMs.reduce((s,p) => s+p.y, 0) / handLMs.length;
+      }
+
+      // Anatomical sanity check for deadlift/squat side view:
+      // Bar Y should be constrained between ankle and shoulder height
+      // If landmark puts bar above shoulder or below feet, clamp it
+      const lShoulder = v(11) || v(12);
+      const lAnkle    = v(27) || v(28);
+      if(lShoulder && lAnkle && lmY !== null) {
+        const minY = lShoulder.y - 0.05; // slightly above shoulder
+        const maxY = lAnkle.y + 0.05;    // slightly below ankle
+        lmY = Math.max(minY, Math.min(maxY, lmY));
       }
     }
 
-    // Seed point overrides x; landmark or seed drives y search center
+    // User seed point takes priority for x; landmark y drives search center
     const seedX   = barSeedPoint ? barSeedPoint.x : (lmX !== null ? lmX : 0.5);
     const yCenter = lastBarY !== null ? lastBarY
-                  : (lmY !== null ? lmY : (barSeedPoint ? barSeedPoint.y : 0.4));
+                  : (barSeedPoint ? barSeedPoint.y
+                  : (lmY !== null ? lmY : 0.5));
 
     const img = new Image();
     img.onload = () => {
@@ -1598,68 +1614,108 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
       const ctx = cv.getContext('2d');
       ctx.drawImage(img, 0, 0);
 
-      // Search window: ±18% height around yCenter
-      const searchHalf = Math.round(H * 0.18);
+      // ── Dual-axis search: row scan + column confirmation ──
+      // Row scan finds horizontal bar structure (chrome/rubber row)
+      // Column scan near seedX confirms bar is actually there (not background)
+
+      const searchHalf = Math.round(H * 0.20); // ±20% — wider window
       const sy = Math.max(0, Math.round(yCenter * H) - searchHalf);
       const ey = Math.min(H, Math.round(yCenter * H) + searchHalf);
       const sh = ey - sy;
 
       if(sh <= 2) {
-        const fy = lmY !== null ? lmY : yCenter;
-        lastBarY = fy;
-        resolve({x: seedX, y: fy, confidence:'landmark'});
+        lastBarY = lmY !== null ? lmY : yCenter;
+        resolve({x: seedX, y: lastBarY, confidence:'landmark'});
         return;
       }
 
       const pix = ctx.getImageData(0, sy, W, sh).data;
+
+      // ── Score each row for bar-like pixels ──
+      // Bar characteristics: chrome (bright, low sat), rubber (dark, low sat),
+      // or colored bumper plates. Require continuous horizontal span ≥ 6% frame width.
       const rowScores = new Float32Array(sh);
+      const MIN_SPAN = Math.round(W * 0.06); // bar must span at least 6% width
 
       for(let row = 0; row < sh; row++) {
-        let score = 0, barPix = 0;
+        let score = 0, runLen = 0, maxRun = 0;
         for(let col = 0; col < W; col++) {
-          const i = (row * W + col) * 4;
-          const r = pix[i], g = pix[i+1], b = pix[i+2];
+          const idx4 = (row * W + col) * 4;
+          const r = pix[idx4], g = pix[idx4+1], b = pix[idx4+2];
           const bright = (r + g + b) / 3;
           const sat    = Math.max(r,g,b) - Math.min(r,g,b);
-          const isChrome  = bright > 145 && sat < 40;
-          const isDark    = bright < 60;
-          const isRubber  = bright > 40 && bright < 90 && sat < 30;
-          const isBumper  = (r>130&&g<90&&b<90)||(b>130&&r<90&&g<90)||(g>130&&r<90&&b<90)||(r>150&&g>100&&b<60);
-          if(isChrome)           { score += 3.0; barPix++; }
-          else if(isDark||isRubber){ score += 2.0; barPix++; }
-          else if(isBumper)      { score += 2.5; barPix++; }
+
+          const isChrome = bright > 140 && sat < 45;
+          const isDark   = bright < 65 && sat < 40;
+          const isRubber = bright >= 40 && bright <= 95 && sat < 35;
+          const isBumper = (r>120&&g<85&&b<85) || (b>120&&r<85&&g<85) ||
+                           (g>120&&r<85&&b<85) || (r>140&&g>90&&b<55);
+
+          if(isChrome || isDark || isRubber || isBumper) {
+            runLen++;
+            score += isChrome ? 3.0 : isBumper ? 2.5 : 2.0;
+          } else {
+            maxRun = Math.max(maxRun, runLen);
+            runLen = 0;
+          }
         }
-        rowScores[row] = barPix > W * 0.08 ? score : 0;
+        maxRun = Math.max(maxRun, runLen);
+        // Require minimum continuous span — eliminates random dark pixels
+        rowScores[row] = maxRun >= MIN_SPAN ? score : 0;
       }
 
-      // Best row with continuity bias toward last known y
+      // ── Find best row, biased toward last known position ──
       let bestRow = -1, bestScore = 0;
       for(let row = 0; row < sh; row++) {
         if(rowScores[row] <= 0) continue;
+        // Continuity bias: rows closer to last known y score better
         const distFrac = Math.abs(row - searchHalf) / searchHalf;
-        const adj = rowScores[row] * (1 - distFrac * 0.3);
+        const adj = rowScores[row] * (1 - distFrac * 0.25);
         if(adj > bestScore) { bestScore = adj; bestRow = row; }
       }
 
-      if(bestRow >= 0 && bestScore > W * 0.10) {
-        // Subpixel refinement: weighted average of nearby rows
+      // ── Column confirmation near seedX ──
+      // Even if row scan found something, verify bar structure exists near seedX
+      const confirmX = Math.round(seedX * W);
+      const colCheckW = Math.round(W * 0.15); // check ±15% of frame width around seedX
+      let colConfirmed = false;
+      if(bestRow >= 0) {
+        const colStart = Math.max(0, confirmX - colCheckW);
+        const colEnd   = Math.min(W, confirmX + colCheckW);
+        for(let col = colStart; col < colEnd; col++) {
+          const idx4 = (bestRow * W + col) * 4;
+          const r = pix[idx4], g = pix[idx4+1], b = pix[idx4+2];
+          const bright = (r+g+b)/3, sat = Math.max(r,g,b)-Math.min(r,g,b);
+          if((bright > 140 && sat < 45) || (bright < 65 && sat < 40) ||
+             (bright >= 40 && bright <= 95 && sat < 35)) {
+            colConfirmed = true; break;
+          }
+        }
+      }
+
+      const MIN_SCORE = W * 0.06; // lower threshold — bar from side is narrower view
+      if(bestRow >= 0 && bestScore > MIN_SCORE) {
+        // Subpixel refinement
         let ySum = 0, wSum = 0;
         for(let r2 = Math.max(0,bestRow-3); r2 <= Math.min(sh-1,bestRow+3); r2++) {
           if(rowScores[r2] > 0) { ySum += (sy+r2)*rowScores[r2]; wSum += rowScores[r2]; }
         }
         const ry = wSum > 0 ? (ySum/wSum)/H : (sy+bestRow)/H;
+        const conf = colConfirmed ? 'color-tracked' : 'color-unconfirmed';
         lastBarY = ry;
-        resolve({x: seedX, y: ry, confidence:'color-tracked'});
+        resolve({x: seedX, y: ry, confidence: conf});
       } else {
+        // Color detection failed — fall back to landmark
         const fy = lmY !== null ? lmY : yCenter;
         if(lastBarY === null) lastBarY = fy;
-        resolve({x: seedX, y: fy, confidence:'landmark'});
+        resolve({x: seedX, y: fy, confidence:'landmark-fallback'});
       }
     };
     img.onerror = () => resolve({x: seedX, y: lmY ?? yCenter, confidence:'error'});
     img.src = 'data:image/jpeg;base64,' + imageBase64;
   });
 }
+
 
 function smoothBarPoints(points) {
   if(points.length < 3) return points;
