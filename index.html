@@ -828,7 +828,9 @@ function startFrameExtraction(file, vid) {
           const isFlexion = /squat|lunge|sit/i.test(movement); // bottom = max knee flexion
           const isHinge   = /deadlift|hinge/i.test(movement);   // lockout = max hip extension
 
-          let extremeIdx = -1, extremeVal = isFlexion ? -Infinity : Infinity;
+          // Flexion: find MINIMUM knee angle (most bent = deepest squat)
+          // Hinge:   find MAXIMUM hip angle (most extended = lockout)
+          let extremeIdx = -1, extremeVal = isFlexion ? Infinity : -Infinity;
           quickResults.forEach((res, i) => {
             if(!res?.poseLandmarks) return;
             const lm = res.poseLandmarks;
