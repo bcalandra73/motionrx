@@ -138,6 +138,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .frames-gallery.dual-view{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
 .phase-group{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
 .phase-group-header{background:var(--navy);color:#fff;padding:8px 12px;font-size:.70rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.phase-group:hover .phase-group-header{background:var(--navyMid,#1a3a5c)}
+.phase-group:hover .phase-view-slot img{opacity:.92;transform:scale(1.01);transition:transform .15s,opacity .15s}
 .phase-group-header .phase-badge{font-size:.63rem}
 .phase-group-views{display:grid;grid-template-columns:1fr 1fr;gap:0}
 .phase-view-slot{border-right:1px solid var(--border);overflow:hidden}
@@ -266,6 +268,11 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .lightbox.open{display:flex}
 .lightbox-img-wrap{position:relative;max-width:90vw;max-height:80vh;display:flex;align-items:center;justify-content:center}
 .lightbox-img-wrap img{max-width:90vw;max-height:78vh;border-radius:8px;display:block;box-shadow:0 8px 40px rgba(0,0,0,.6)}
+/* Dual-image lightbox */
+.lightbox-dual{position:relative;display:flex;align-items:flex-start;gap:12px;max-width:92vw;max-height:82vh}
+.lightbox-dual-slot{display:flex;flex-direction:column;align-items:center;gap:6px;flex:1;min-width:0}
+.lightbox-dual-slot img{width:100%;max-height:74vh;object-fit:contain;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.6);display:block}
+.lightbox-view-label{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--teal);background:rgba(14,124,106,.15);border:1px solid rgba(14,124,106,.3);padding:3px 10px;border-radius:20px}
 .lightbox-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.15);border:none;color:#fff;font-size:1.6rem;width:44px;height:44px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s}
 .lightbox-nav:hover{background:rgba(255,255,255,.35)}
 .lightbox-prev{left:-52px}.lightbox-next{right:-52px}
@@ -746,9 +753,23 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 <div class="lightbox" id="frameLightbox" onclick="closeLightbox(event)">
   <button class="lightbox-close" onclick="closeLightboxDirect()">✕</button>
   <div class="lightbox-counter" id="lightboxCounter"></div>
-  <div class="lightbox-img-wrap">
+  <!-- Single-image mode -->
+  <div class="lightbox-img-wrap" id="lightboxSingle">
     <button class="lightbox-nav lightbox-prev" onclick="lightboxNav(-1);event.stopPropagation()">‹</button>
     <img id="lightboxImg" src="" alt="">
+    <button class="lightbox-nav lightbox-next" onclick="lightboxNav(1);event.stopPropagation()">›</button>
+  </div>
+  <!-- Dual-image mode: both views side by side -->
+  <div class="lightbox-dual" id="lightboxDual" style="display:none">
+    <button class="lightbox-nav lightbox-prev" onclick="lightboxNav(-1);event.stopPropagation()">‹</button>
+    <div class="lightbox-dual-slot">
+      <div class="lightbox-view-label" id="lightboxDualLabel1"></div>
+      <img id="lightboxDualImg1" src="" alt="">
+    </div>
+    <div class="lightbox-dual-slot">
+      <div class="lightbox-view-label" id="lightboxDualLabel2"></div>
+      <img id="lightboxDualImg2" src="" alt="">
+    </div>
     <button class="lightbox-nav lightbox-next" onclick="lightboxNav(1);event.stopPropagation()">›</button>
   </div>
   <div class="lightbox-label" id="lightboxLabel"></div>
@@ -3958,6 +3979,8 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
           const group = document.createElement('div');
           group.className = 'phase-group';
+          group.style.cursor = 'pointer';
+          group.onclick = ((gi) => () => openLightbox(gi))(i);
 
           const header = document.createElement('div');
           header.className = 'phase-group-header';
@@ -3984,7 +4007,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           if(f1) {
             const img1 = document.createElement('img');
             img1.src = 'data:image/jpeg;base64,' + f1.base64;
-            img1.onclick = () => openLightbox(i);
+            img1.onclick = (e) => { e.stopPropagation(); openLightbox(i); };
             slot1.appendChild(img1);
           } else {
             slot1.classList.add('empty');
@@ -4002,7 +4025,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           if(f2) {
             const img2 = document.createElement('img');
             img2.src = 'data:image/jpeg;base64,' + f2.base64;
-            img2.onclick = () => openLightbox(v1Frames.length + i);
+            img2.onclick = (e) => { e.stopPropagation(); openLightbox(i); };
             slot2.appendChild(img2);
           } else {
             slot2.classList.add('empty');
@@ -4486,7 +4509,10 @@ async function exportPDF() {
 
           // Images side by side
           const imgW = (CW - 4) / Math.max(imgs.length, 1);
-          const imgH = imgW * 0.72;
+          // Use real aspect ratio — compute from first loaded image, fallback to 0.75
+          const refImg = imgs.find(im => im.complete && im.naturalWidth > 0);
+          const aspectRatio = refImg ? refImg.naturalHeight / refImg.naturalWidth : 0.75;
+          const imgH = imgW * aspectRatio;
           imgs.forEach((img, ii) => {
             if(!img.complete || !img.naturalWidth) return;
             try {
@@ -4510,7 +4536,10 @@ async function exportPDF() {
         // Single-view: 4-up grid
         const cols = Math.min(4, allFrameImgs.length);
         const fW = (CW - (cols-1)*3) / cols;
-        const fH = fW * 0.75;
+        // Compute aspect ratio from first loaded image
+        const firstLoaded = allFrameImgs.find(im => im.complete && im.naturalWidth > 0);
+        const singleAspect = firstLoaded ? firstLoaded.naturalHeight / firstLoaded.naturalWidth : 0.75;
+        const fH = fW * singleAspect;
         let col = 0;
         for(const img of allFrameImgs) {
           if(!img.complete || !img.naturalWidth) { col++; if(col>=cols){col=0;y+=fH+10;} continue; }
@@ -4787,40 +4816,72 @@ async function exportPDF() {
 }
 
 
-// ── Frame Lightbox ──
-let lightboxFrames = [];
+// Lightbox data — supports both single-image and dual-image (phase group) modes
+let lightboxFrames = [];   // [{src, label}] for single-view OR [{src1, label1, src2, label2, phaseName}] for dual-view
 let lightboxIndex = 0;
+let lightboxIsDual = false;
 
 function openLightbox(idx) {
-  // Support both single-view (.frame-card img) and dual-view (.phase-view-slot img) layouts
-  lightboxFrames = [...document.querySelectorAll('#framesGallery .frame-card img, #framesGallery .phase-view-slot img')];
+  const gallery = document.getElementById('framesGallery');
+  const isDualView = gallery?.querySelector('.phase-group') !== null;
+
+  if(isDualView) {
+    // Build one entry per phase group (both views per entry)
+    lightboxIsDual = true;
+    lightboxFrames = [];
+    gallery.querySelectorAll('.phase-group').forEach(group => {
+      const slots = group.querySelectorAll('.phase-view-slot');
+      const imgs  = [...slots].map(s => s.querySelector('img')).filter(Boolean);
+      const lbls  = [...slots].map(s => s.querySelector('.phase-view-label')?.textContent?.trim() || '');
+      const phaseName = group.querySelector('.phase-group-header')?.firstChild?.textContent
+                          ?.replace(/[▲▼]/g,'').trim() || '';
+      lightboxFrames.push({
+        src1: imgs[0]?.src || '', label1: lbls[0] || 'View 1',
+        src2: imgs[1]?.src || '', label2: lbls[1] || 'View 2',
+        phaseName
+      });
+    });
+  } else {
+    // Single-view: one entry per image
+    lightboxIsDual = false;
+    lightboxFrames = [...gallery.querySelectorAll('.frame-card img')].map(img => {
+      const lbl = img.closest('.frame-card')?.querySelector('.frame-label')?.textContent?.trim() || '';
+      return { src1: img.src, label1: lbl };
+    });
+  }
+
   if(!lightboxFrames.length) return;
-  lightboxIndex = idx;
+  lightboxIndex = Math.min(idx, lightboxFrames.length - 1);
   showLightboxFrame();
   document.getElementById('frameLightbox').classList.add('open');
   document.addEventListener('keydown', lightboxKeyHandler);
 }
 
 function showLightboxFrame() {
-  const img = lightboxFrames[lightboxIndex];
-  if(!img) return;
-  document.getElementById('lightboxImg').src = img.src;
+  const f = lightboxFrames[lightboxIndex];
+  if(!f) return;
 
-  // Caption: support both single-view (.frame-card/.frame-label) and dual-view (.phase-group)
-  let label = `Frame ${lightboxIndex + 1}`;
-  const card = img.closest('.frame-card');
-  const group = img.closest('.phase-group');
-  if(card) {
-    label = card.querySelector('.frame-label')?.textContent?.trim() || label;
-  } else if(group) {
-    const header = group.querySelector('.phase-group-header');
-    const viewLbl = img.closest('.phase-view-slot')?.querySelector('.phase-view-label')?.textContent?.trim() || '';
-    const phaseName = header?.firstChild?.textContent?.trim() || label;
-    label = viewLbl ? `${phaseName} — ${viewLbl}` : phaseName;
+  const single = document.getElementById('lightboxSingle');
+  const dual   = document.getElementById('lightboxDual');
+  const counter = document.getElementById('lightboxCounter');
+  const label   = document.getElementById('lightboxLabel');
+
+  counter.textContent = `${lightboxIndex + 1} / ${lightboxFrames.length}`;
+
+  if(lightboxIsDual && f.src2) {
+    single.style.display = 'none';
+    dual.style.display   = 'flex';
+    document.getElementById('lightboxDualImg1').src  = f.src1;
+    document.getElementById('lightboxDualImg2').src  = f.src2;
+    document.getElementById('lightboxDualLabel1').textContent = f.label1;
+    document.getElementById('lightboxDualLabel2').textContent = f.label2;
+    label.textContent = f.phaseName || '';
+  } else {
+    dual.style.display   = 'none';
+    single.style.display = 'flex';
+    document.getElementById('lightboxImg').src = f.src1;
+    label.textContent = f.label1 || `Frame ${lightboxIndex + 1}`;
   }
-
-  document.getElementById('lightboxLabel').textContent = label;
-  document.getElementById('lightboxCounter').textContent = `${lightboxIndex + 1} / ${lightboxFrames.length}`;
 }
 
 function lightboxNav(dir) {
