@@ -132,7 +132,20 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
 /* MediaPipe frames gallery */
 .frames-gallery{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.frames-gallery.dual-view{grid-template-columns:repeat(2,1fr);gap:14px}
 .frame-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+/* Dual-view paired layout */
+.phase-pair{display:contents}
+.frames-gallery.dual-view{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.phase-group{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
+.phase-group-header{background:var(--navy);color:#fff;padding:6px 12px;font-size:.68rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
+.phase-group-header .phase-badge{font-size:.63rem}
+.phase-group-views{display:grid;grid-template-columns:1fr 1fr;gap:0}
+.phase-view-slot{border-right:1px solid var(--border)}
+.phase-view-slot:last-child{border-right:none}
+.phase-view-label{font-size:.60rem;font-weight:600;color:var(--teal);letter-spacing:.05em;text-transform:uppercase;padding:3px 8px;background:var(--teal-light);text-align:center}
+.phase-view-slot img{width:100%;height:auto;display:block;cursor:pointer}
+.phase-view-slot.empty{background:#f8f9fa;min-height:80px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.7rem}
 .frame-card-img{position:relative;background:#000}
 .frame-card-img canvas{width:100%;height:auto;display:block}
 .frame-label{padding:6px 10px;font-size:.7rem;font-weight:600;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;border-top:1px solid var(--border)}
@@ -184,8 +197,12 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .phase-midpull{background:#fce8e8;color:var(--red)}
 .phase-lockout{background:#e6f4f1;color:var(--teal)}
 .phase-descent{background:#fff3e0;color:#c27000}
+.phase-descent1{background:#ede8f8;color:#6b46c1}
+.phase-descent2{background:#f0e8f8;color:#7c3aed}
 .phase-bottom{background:#fce8e8;color:var(--red)}
 .phase-ascent{background:#e6f4f1;color:var(--teal)}
+.phase-ascent1{background:#e6f4f1;color:var(--teal)}
+.phase-ascent2{background:#d4f0ea;color:#0d7a5f}
 .phase-stance{background:#e8f0f8;color:var(--navy)}
 .phase-swing{background:#fff3e0;color:#c27000}
 .phase-frame{background:#f0f0f0;color:var(--muted)}
@@ -3212,46 +3229,55 @@ function getNormLabel(name, movement) {
 // Movement phase definitions: times are proportional (0-1) within video
 const PHASE_MAPS = {
   'Hip Hinge / Deadlift Pattern': [
-    {id:'setup',   label:'Setup',    time:0.05, desc:'Starting position'},
-    {id:'liftoff', label:'Liftoff',  time:0.25, desc:'Bar leaving floor'},
-    {id:'midpull', label:'Mid-Pull', time:0.50, desc:'Knees nearly straight, hips still low'},
-    {id:'lockout', label:'Lockout',  time:0.88, desc:'Full hip extension'},
+    {id:'setup',    label:'Setup',     time:0.04, desc:'Starting position'},
+    {id:'liftoff',  label:'Liftoff',   time:0.20, desc:'Bar leaving floor'},
+    {id:'midpull',  label:'Mid-Pull',  time:0.38, desc:'Knees nearly straight, hips still low'},
+    {id:'lockout',  label:'Lockout',   time:0.52, desc:'Full hip extension'},
+    {id:'descent1', label:'Descent',   time:0.68, desc:'Hinging back down — hip break'},
+    {id:'descent2', label:'Lower',     time:0.84, desc:'Bar returning to floor'},
   ],
   'Squat (Double-Leg)': [
-    {id:'stance',  label:'Standing', time:0.05, desc:'Starting position'},
-    {id:'descent', label:'Descent',  time:0.30, desc:'Initiating descent'},
-    {id:'bottom',  label:'Bottom',   time:0.55, desc:'Deepest point'},
-    {id:'ascent',  label:'Ascent',   time:0.80, desc:'Rising phase'},
+    {id:'stance',   label:'Standing',  time:0.04, desc:'Starting position'},
+    {id:'descent',  label:'Descent',   time:0.22, desc:'Initiating descent'},
+    {id:'bottom',   label:'Bottom',    time:0.48, desc:'Deepest point'},
+    {id:'ascent1',  label:'Ascent',    time:0.68, desc:'Rising — hip drive'},
+    {id:'ascent2',  label:'Return',    time:0.88, desc:'Returning to standing'},
   ],
   'Single-Leg Squat': [
-    {id:'stance',  label:'Standing', time:0.05, desc:'Start'},
-    {id:'descent', label:'Descent',  time:0.30, desc:'Lowering'},
-    {id:'bottom',  label:'Bottom',   time:0.55, desc:'Deepest point'},
-    {id:'ascent',  label:'Ascent',   time:0.80, desc:'Return'},
+    {id:'stance',   label:'Standing',  time:0.04, desc:'Start'},
+    {id:'descent',  label:'Descent',   time:0.25, desc:'Lowering'},
+    {id:'bottom',   label:'Bottom',    time:0.50, desc:'Deepest point'},
+    {id:'ascent',   label:'Return',    time:0.80, desc:'Return to stand'},
   ],
   'Lunge': [
-    {id:'stance',  label:'Start',    time:0.05, desc:'Standing'},
-    {id:'descent', label:'Step Out', time:0.30, desc:'Stepping forward'},
-    {id:'bottom',  label:'Bottom',   time:0.55, desc:'Deepest lunge'},
-    {id:'ascent',  label:'Return',   time:0.80, desc:'Returning to start'},
+    {id:'stance',   label:'Start',     time:0.04, desc:'Standing'},
+    {id:'descent',  label:'Step Out',  time:0.28, desc:'Stepping forward'},
+    {id:'bottom',   label:'Bottom',    time:0.50, desc:'Deepest lunge'},
+    {id:'ascent',   label:'Return',    time:0.80, desc:'Returning to start'},
   ],
   'Gait / Walking': [
-    {id:'stance',  label:'Heel Strike',  time:0.05, desc:'Initial contact'},
-    {id:'midpull', label:'Mid Stance',   time:0.25, desc:'Single limb support'},
-    {id:'liftoff', label:'Toe Off',      time:0.50, desc:'Terminal stance/toe off'},
-    {id:'swing',   label:'Mid Swing',    time:0.75, desc:'Swing phase'},
+    {id:'stance',   label:'Heel Strike',  time:0.05, desc:'Initial contact'},
+    {id:'midpull',  label:'Mid Stance',   time:0.25, desc:'Single limb support'},
+    {id:'liftoff',  label:'Toe Off',      time:0.50, desc:'Terminal stance/toe off'},
+    {id:'swing',    label:'Mid Swing',    time:0.75, desc:'Swing phase'},
   ],
   'Running': [
-    {id:'stance',  label:'Initial Contact', time:0.05, desc:'Foot strike'},
-    {id:'midpull', label:'Mid Stance',      time:0.25, desc:'Loading response'},
-    {id:'liftoff', label:'Propulsion',      time:0.50, desc:'Toe off'},
-    {id:'swing',   label:'Float Phase',     time:0.75, desc:'Both feet off ground'},
+    {id:'stance',   label:'Initial Contact', time:0.05, desc:'Foot strike'},
+    {id:'midpull',  label:'Mid Stance',      time:0.25, desc:'Loading response'},
+    {id:'liftoff',  label:'Propulsion',      time:0.50, desc:'Toe off'},
+    {id:'swing',    label:'Float Phase',     time:0.75, desc:'Both feet off ground'},
   ],
   'Sit to Stand': [
-    {id:'setup',   label:'Seated',   time:0.05, desc:'Starting position'},
-    {id:'descent', label:'Lean',     time:0.30, desc:'Forward trunk lean'},
-    {id:'liftoff', label:'Liftoff',  time:0.55, desc:'Seat departure'},
-    {id:'lockout', label:'Standing', time:0.90, desc:'Full extension'},
+    {id:'setup',    label:'Seated',    time:0.05, desc:'Starting position'},
+    {id:'descent',  label:'Lean',      time:0.30, desc:'Forward trunk lean'},
+    {id:'liftoff',  label:'Liftoff',   time:0.55, desc:'Seat departure'},
+    {id:'lockout',  label:'Standing',  time:0.90, desc:'Full extension'},
+  ],
+  'Step Up / Step Down': [
+    {id:'stance',   label:'Start',     time:0.04, desc:'Standing at step'},
+    {id:'liftoff',  label:'Step Up',   time:0.28, desc:'Leading foot on step'},
+    {id:'midpull',  label:'Top',       time:0.52, desc:'Both feet on step'},
+    {id:'descent',  label:'Step Down', time:0.76, desc:'Trailing foot descending'},
   ],
 };
 
@@ -3520,7 +3546,7 @@ async function runAnalysis() {
 
       // Draw skeleton + bar dot on this frame
       const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, barPt, cameraView);
-      annotatedFrames.push({base64, canvas});
+      annotatedFrames.push({base64, canvas, phase: frame.phase});
       if(canvas) frameHeight = Math.max(frameHeight, canvas.height);
 
       if(mpResult && mpResult.poseLandmarks) {
@@ -3749,15 +3775,78 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       const gallery = document.getElementById('framesGallery');
       gallery.innerHTML = '';
 
-      // Helper to render a set of frames with an optional view label header
-      const renderFrameSet = (frames, sourceFrames, viewLabel, offset) => {
-        if(viewLabel) {
+      const dualView = hasDualView && annotatedFrames2.length > 0;
+
+      if(dualView) {
+        // ── Paired dual-view layout ──
+        gallery.classList.add('dual-view');
+        const v1Frames = annotatedFrames;
+        const v2Frames = annotatedFrames2;
+        const maxFrames = Math.max(v1Frames.length, v2Frames.length);
+
+        for(let i = 0; i < maxFrames; i++) {
+          const f1 = v1Frames[i];
+          const f2 = v2Frames[i];
+          const phase = f1?.phase || f2?.phase;
+          const phaseId = phase?.id || 'frame';
+          const phaseLabel = phase?.label || ('Frame ' + (i+1));
+          const phaseDesc = phase?.desc || '';
+
+          const group = document.createElement('div');
+          group.className = 'phase-group';
+
           const header = document.createElement('div');
-          header.style.cssText = 'width:100%;font-size:.72rem;font-weight:700;color:var(--teal);letter-spacing:.07em;text-transform:uppercase;padding:6px 2px 4px;border-bottom:1px solid var(--teal-light);margin-bottom:4px;';
-          header.textContent = `📐 ${viewLabel}`;
-          gallery.appendChild(header);
+          header.className = 'phase-group-header';
+          header.innerHTML = '<span>' + phaseLabel + (phaseDesc ? ' <span style="font-weight:400;opacity:.75;font-size:.66rem;">— ' + phaseDesc + '</span>' : '') + '</span>'
+            + '<span class="phase-badge phase-' + phaseId + '">#' + (i+1) + '</span>';
+          group.appendChild(header);
+
+          const viewsRow = document.createElement('div');
+          viewsRow.className = 'phase-group-views';
+
+          // View 1 slot
+          const slot1 = document.createElement('div');
+          slot1.className = 'phase-view-slot';
+          const lbl1 = document.createElement('div');
+          lbl1.className = 'phase-view-label';
+          lbl1.textContent = view1Label.split(' (')[0];
+          slot1.appendChild(lbl1);
+          if(f1) {
+            const img1 = document.createElement('img');
+            img1.src = 'data:image/jpeg;base64,' + f1.base64;
+            img1.onclick = () => openLightbox(i);
+            slot1.appendChild(img1);
+          } else {
+            slot1.classList.add('empty');
+            slot1.appendChild(document.createTextNode('—'));
+          }
+          viewsRow.appendChild(slot1);
+
+          // View 2 slot
+          const slot2 = document.createElement('div');
+          slot2.className = 'phase-view-slot';
+          const lbl2 = document.createElement('div');
+          lbl2.className = 'phase-view-label';
+          lbl2.textContent = view2Label.split(' (')[0];
+          slot2.appendChild(lbl2);
+          if(f2) {
+            const img2 = document.createElement('img');
+            img2.src = 'data:image/jpeg;base64,' + f2.base64;
+            img2.onclick = () => openLightbox(v1Frames.length + i);
+            slot2.appendChild(img2);
+          } else {
+            slot2.classList.add('empty');
+            slot2.appendChild(document.createTextNode('—'));
+          }
+          viewsRow.appendChild(slot2);
+
+          group.appendChild(viewsRow);
+          gallery.appendChild(group);
         }
-        frames.forEach((f,i) => {
+      } else {
+        // ── Single-view grid layout ──
+        gallery.classList.remove('dual-view');
+        annotatedFrames.forEach((f, i) => {
           const card = document.createElement('div');
           card.className = 'frame-card';
           const imgWrap = document.createElement('div');
@@ -3765,24 +3854,18 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const img = document.createElement('img');
           img.src = 'data:image/jpeg;base64,' + f.base64;
           img.style.cssText = 'width:100%;height:auto;display:block;';
-          img.onclick = () => openLightbox(offset + i);
+          img.onclick = () => openLightbox(i);
           imgWrap.appendChild(img);
           const lbl = document.createElement('div');
           lbl.className = 'frame-label';
-          const phase = sourceFrames[i]?.phase;
+          const phase = f.phase;
           const phaseId = phase?.id || 'frame';
-          const phaseLabel = phase?.label || `Frame ${i+1}`;
-          const viewTag = viewLabel ? `<span style="font-size:.62rem;opacity:.6;margin-left:4px;">${viewLabel.split(' ')[0]}</span>` : '';
-          lbl.innerHTML = `<span>${phaseLabel}${viewTag}</span><span class="phase-badge phase-${phaseId}">${phaseId === 'frame' ? '#'+(i+1) : phase?.desc || ''}</span>`;
-          card.appendChild(imgWrap); card.appendChild(lbl);
+          const phaseLabel = phase?.label || ('Frame ' + (i+1));
+          lbl.innerHTML = '<span>' + phaseLabel + '</span><span class="phase-badge phase-' + phaseId + '">' + (phaseId === 'frame' ? '#'+(i+1) : phase?.desc || '') + '</span>';
+          card.appendChild(imgWrap);
+          card.appendChild(lbl);
           gallery.appendChild(card);
         });
-      };
-
-      const dualView = hasDualView && annotatedFrames2.length > 0;
-      renderFrameSet(annotatedFrames, extractedFrames, dualView ? view1Label : null, 0);
-      if(dualView) {
-        renderFrameSet(annotatedFrames2, extractedFrames2, view2Label, annotatedFrames.length);
       }
 
       document.getElementById('framesSection').style.display='block';
