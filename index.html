@@ -132,18 +132,17 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
 /* MediaPipe frames gallery */
 .frames-gallery{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
-.frames-gallery.dual-view{grid-template-columns:repeat(2,1fr);gap:14px}
 .frame-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
 /* Dual-view paired layout */
 .phase-pair{display:contents}
 .frames-gallery.dual-view{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
 .phase-group{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
-.phase-group-header{background:var(--navy);color:#fff;padding:6px 12px;font-size:.68rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
+.phase-group-header{background:var(--navy);color:#fff;padding:8px 12px;font-size:.70rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
 .phase-group-header .phase-badge{font-size:.63rem}
 .phase-group-views{display:grid;grid-template-columns:1fr 1fr;gap:0}
-.phase-view-slot{border-right:1px solid var(--border)}
+.phase-view-slot{border-right:1px solid var(--border);overflow:hidden}
 .phase-view-slot:last-child{border-right:none}
-.phase-view-label{font-size:.60rem;font-weight:600;color:var(--teal);letter-spacing:.05em;text-transform:uppercase;padding:3px 8px;background:var(--teal-light);text-align:center}
+.phase-view-label{font-size:.60rem;font-weight:700;color:#fff;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;background:var(--navy);text-align:center;opacity:.75}
 .phase-view-slot img{width:100%;height:auto;display:block;cursor:pointer}
 .phase-view-slot.empty{background:#f8f9fa;min-height:80px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.7rem}
 .frame-card-img{position:relative;background:#000}
@@ -290,10 +289,11 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 @media print{header,.report-header-right{display:none}#inputSection,#loadingState{display:none!important}#resultsSection{display:block!important}}
 @media(max-width:680px){
   header{padding:0 16px}.container{padding:20px 14px 60px}
-  .two-col,.form-grid,.report-grid,.score-strip,.frames-gallery{grid-template-columns:1fr}
+  .two-col,.form-grid,.report-grid,.score-strip,.frames-gallery,.frames-gallery.dual-view{grid-template-columns:1fr}
   .focus-grid{grid-template-columns:1fr 1fr}
   .report-section.full{grid-column:1}
   .report-header{flex-direction:column}
+  .phase-group-views{grid-template-columns:1fr 1fr} /* keep side-by-side on mobile */
 }
 </style>
 </head>
@@ -687,8 +687,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
     <!-- Skeleton frames -->
     <div class="report-section full" id="framesSection" style="margin-bottom:16px;display:none;">
-      <div class="section-head"><span class="sh-icon">🦴</span><h3>MediaPipe Skeleton Analysis — Tracked Frames</h3></div>
-      <div class="section-body">
+      <div class="section-head"><span class="sh-icon">🦴</span><h3 id="framesSectionTitle">MediaPipe Skeleton Analysis — Tracked Frames</h3></div>
+      <div class="section-body" style="padding:12px 10px;">
         <div class="frames-gallery" id="framesGallery"></div>
       </div>
     </div>
@@ -1063,9 +1063,10 @@ function startFrameExtraction(file, vid) {
           }
 
           // ── Store phase-frame hand positions as landmark anchors for dense bar tracking ──
+          // Also store hip/knee angles for FSM phase classification
           window._phaseLandmarkAnchors = [];
+          window._phaseHipData = [];
           const phaseFrameTimes = frames.map((f, fi) => {
-            // Reconstruct the time fraction for each phase frame
             return phaseTimeProportions[fi] !== undefined ? phaseTimeProportions[fi] : fi / Math.max(1, frames.length - 1);
           });
           quickFused.forEach((lms, fi) => {
@@ -1077,6 +1078,22 @@ function startFrameExtraction(file, vid) {
                 t: phaseFrameTimes[fi] || (fi / Math.max(1, frames.length - 1)),
                 handX: handLMs.reduce((s,p)=>s+p.x,0) / handLMs.length,
                 handY: handLMs.reduce((s,p)=>s+p.y,0) / handLMs.length,
+              });
+            }
+            // Hip angle: shoulder(11/12) → hip(23/24) → knee(25/26)
+            const lS=v(11),lH=v(23),lK=v(25), rS=v(12),rH=v(24),rK=v(26);
+            const lHip = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
+            const rHip = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
+            const hipAngle = lHip!=null&&rHip!=null ? (lHip+rHip)/2 : (lHip??rHip);
+            // Knee angle: hip(23/24) → knee(25/26) → ankle(27/28)
+            const lA=v(27), rA=v(28);
+            const lKnee = lH&&lK&&lA ? calcAngle(lH,lK,lA) : null;
+            const rKnee = rH&&rK&&rA ? calcAngle(rH,rK,rA) : null;
+            const kneeAngle = lKnee!=null&&rKnee!=null ? (lKnee+rKnee)/2 : (lKnee??rKnee);
+            if(hipAngle != null) {
+              window._phaseHipData.push({
+                t: phaseFrameTimes[fi] ?? (fi / Math.max(1, frames.length - 1)),
+                hipAngle, kneeAngle
               });
             }
           });
@@ -1147,7 +1164,13 @@ function startFrameExtraction(file, vid) {
                 if(handKps.length > 0) {
                   const hx = handKps.reduce((s,k)=>s+k.x/img.width,0) / handKps.length;
                   const hy = handKps.reduce((s,k)=>s+k.y/img.height,0) / handKps.length;
-                  anchorLandmarks.push({t: frame.t, handX: hx, handY: hy});
+                  // MoveNet indices: 5=lShoulder,6=rShoulder, 11=lHip,12=rHip, 13=lKnee,14=rKnee, 15=lAnkle,16=rAnkle
+                  const kp = (i) => { const k=kps[i]; return (k&&k.score>0.2) ? {x:k.x/img.width,y:k.y/img.height} : null; };
+                  const lS=kp(5),rS=kp(6), lH=kp(11),rH=kp(12), lK=kp(13),rK=kp(14);
+                  const lHipA = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
+                  const rHipA = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
+                  const hipAngle = lHipA!=null&&rHipA!=null ? (lHipA+rHipA)/2 : (lHipA??rHipA);
+                  anchorLandmarks.push({t: frame.t, handX: hx, handY: hy, hipAngle});
                 }
               }
             } catch(e) { /* skip this anchor on error */ }
@@ -1213,6 +1236,147 @@ function startFrameExtraction(file, vid) {
         barFill.style.width = '100%';
         barFill.style.background = 'var(--teal)';
         console.log(`[BarTracking] ${rawBarPoints.length} pts from ${barTrackingFrames.length} frames, ${anchorLandmarks.length} anchors`);
+
+        // ── FSM Phase Classification ──
+        // Use hip angle observations from anchors + SmartPhase frames to classify
+        // each of the 8 phase frames with full movement cycle labels
+        if(frames.length >= 4 && /deadlift|hinge|squat|lunge|sit/i.test(movement)) {
+          try {
+            // Collect all hip angle observations: {t, hipAngle}
+            const hipObs = [];
+            // From MoveNet anchor frames
+            anchorLandmarks.forEach(a => {
+              if(a.hipAngle != null) hipObs.push({t: a.t, h: a.hipAngle});
+            });
+            // From SmartPhase MediaPipe frames (higher quality)
+            if(window._phaseHipData) {
+              window._phaseHipData.forEach(d => {
+                if(d.hipAngle != null) hipObs.push({t: d.t, h: d.hipAngle});
+              });
+            }
+            hipObs.sort((a,b) => a.t - b.t);
+
+            if(hipObs.length >= 3) {
+              // Interpolate hip angle at each dense bar-tracking frame time
+              const denseT = barTrackingFrames.map(f => f.t);
+              const denseH = denseT.map(t => {
+                // Linear interpolation between observations
+                let lo = hipObs[0], hi = hipObs[hipObs.length-1];
+                for(let i=0; i<hipObs.length-1; i++) {
+                  if(hipObs[i].t <= t && hipObs[i+1].t >= t) { lo=hipObs[i]; hi=hipObs[i+1]; break; }
+                }
+                const span = hi.t - lo.t;
+                if(span < 0.001) return lo.h;
+                return lo.h + (hi.h - lo.h) * ((t - lo.t) / span);
+              });
+
+              // Gaussian smooth (σ≈3 frames)
+              const smoothH = denseH.map((_, i) => {
+                let sum=0, w=0;
+                for(let j=Math.max(0,i-5); j<=Math.min(denseH.length-1,i+5); j++) {
+                  const g = Math.exp(-0.5*((j-i)/3)**2);
+                  sum += denseH[j]*g; w += g;
+                }
+                return sum/w;
+              });
+
+              // Find global peak (max hip extension = lockout) and valley (min = setup/bottom)
+              let peakIdx=0, valleyIdx=0;
+              smoothH.forEach((h,i) => {
+                if(h > smoothH[peakIdx]) peakIdx = i;
+                if(h < smoothH[valleyIdx]) valleyIdx = i;
+              });
+              const peakT = denseT[peakIdx];
+              const valleyT = denseT[valleyIdx];
+
+              console.log(`[FSM] Peak extension @ t=${peakT.toFixed(3)} (${smoothH[peakIdx].toFixed(1)}°), Valley @ t=${valleyT.toFixed(3)} (${smoothH[valleyIdx].toFixed(1)}°)`);
+
+              // Classify each phase frame based on its position relative to peak
+              const isHinge = /deadlift|hinge/i.test(movement);
+              const isSquat = /squat|lunge/i.test(movement);
+
+              frames.forEach((frame, fi) => {
+                const ft = phaseTimeProportions[fi] ?? (fi / Math.max(1, frames.length-1));
+
+                // Find nearest dense frame index for this phase frame time
+                let nearestIdx = 0;
+                let minDist = Infinity;
+                denseT.forEach((t, i) => { const d=Math.abs(t-ft); if(d<minDist){minDist=d;nearestIdx=i;} });
+                const frameH = smoothH[nearestIdx];
+
+                // Compute local velocity (derivative of hip angle)
+                const i1 = Math.max(0, nearestIdx-3);
+                const i2 = Math.min(smoothH.length-1, nearestIdx+3);
+                const velocity = (smoothH[i2] - smoothH[i1]) / ((denseT[i2]||1) - (denseT[i1]||0) + 0.001);
+                // +velocity = hip extending (concentric for hinge), -velocity = hip flexing (eccentric)
+
+                // Distance from peak as fraction of total hip angle range
+                const hipRange = smoothH[peakIdx] - smoothH[valleyIdx];
+                const distFromPeak = Math.abs(frameH - smoothH[peakIdx]);
+                const normalizedDist = hipRange > 5 ? distFromPeak / hipRange : 1;
+
+                let newPhase = null;
+
+                if(isHinge) {
+                  // Deadlift FSM states (by hip angle and velocity):
+                  // SETUP: early, hip very flexed, near valley
+                  // LIFTOFF: hip flexed, velocity just turning positive (hip extending)
+                  // MID-PULL: mid-concentric, hip extending rapidly
+                  // LOCKOUT: near peak hip extension
+                  // DESCENT-HIP: past peak, hip flexing, upper portion
+                  // DESCENT-LOW: hip flexed again, bar near floor
+                  const atPeak = normalizedDist < 0.15;
+                  const prePeak = ft <= peakT;
+                  const nearValley = normalizedDist > 0.75;
+
+                  if(atPeak) {
+                    newPhase = {id:'lockout', label:'Lockout', desc:'Full hip extension — detected via FSM'};
+                  } else if(prePeak && nearValley) {
+                    // Are we at the very start (setup) or already moving?
+                    const isMoving = Math.abs(velocity) > 15; // deg/s threshold
+                    newPhase = isMoving
+                      ? {id:'liftoff', label:'Liftoff', desc:'Bar leaving floor'}
+                      : {id:'setup', label:'Setup', desc:'Starting position'};
+                  } else if(prePeak && !nearValley) {
+                    newPhase = {id:'midpull', label:'Mid-Pull', desc:'Knees extending, hips still driving'};
+                  } else if(!prePeak && normalizedDist < 0.45) {
+                    newPhase = {id:'descent1', label:'Descent', desc:'Hinging back down — hip break'};
+                  } else {
+                    newPhase = {id:'descent2', label:'Lower', desc:'Bar returning toward floor'};
+                  }
+                } else if(isSquat) {
+                  // Squat FSM: valley = bottom of squat, peak = standing
+                  const atBottom = normalizedDist > 0.75 && Math.abs(ft - valleyT) < 0.25;
+                  const atTop = normalizedDist < 0.15;
+                  const prePeak = ft <= peakT;
+                  const descending = velocity < -10; // hip flexing = descending
+                  const ascending = velocity > 10;
+
+                  if(atTop && ft < 0.15) {
+                    newPhase = {id:'stance', label:'Standing', desc:'Starting position'};
+                  } else if(atBottom) {
+                    newPhase = {id:'bottom', label:'Bottom', desc:'Deepest point — FSM detected'};
+                  } else if(atTop && ft > 0.85) {
+                    newPhase = {id:'ascent2', label:'Return', desc:'Returning to standing'};
+                  } else if(descending) {
+                    newPhase = {id:'descent', label:'Descent', desc:'Lowering phase'};
+                  } else if(ascending) {
+                    newPhase = {id:'ascent1', label:'Ascent', desc:'Rising — hip drive'};
+                  }
+                }
+
+                if(newPhase) {
+                  console.log(`[FSM] Frame ${fi+1} (t=${ft.toFixed(2)}): ${frame.phase?.label} → ${newPhase.label} (h=${frameH.toFixed(1)}° v=${velocity.toFixed(0)}°/s)`);
+                  frame.phase = newPhase;
+                }
+              });
+
+              console.log('[FSM] Phase relabeling complete');
+            }
+          } catch(fsmErr) {
+            console.warn('[FSM] Phase classification failed, keeping SmartPhase labels:', fsmErr);
+          }
+        }
       }
     } else {
       statusText.textContent = 'Seek failed — trying playback...';
@@ -3797,8 +3961,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
           const header = document.createElement('div');
           header.className = 'phase-group-header';
-          header.innerHTML = '<span>' + phaseLabel + (phaseDesc ? ' <span style="font-weight:400;opacity:.75;font-size:.66rem;">— ' + phaseDesc + '</span>' : '') + '</span>'
-            + '<span class="phase-badge phase-' + phaseId + '">#' + (i+1) + '</span>';
+          // Direction indicator based on phase id
+          const concentric = ['liftoff','midpull','lockout','ascent','ascent1','ascent2','stance'].includes(phaseId);
+          const eccentric   = ['descent','descent1','descent2'].includes(phaseId);
+          const dirIcon = concentric ? ' <span style="color:var(--teal);font-size:.75rem;">▲</span>'
+                        : eccentric  ? ' <span style="color:#a78bfa;font-size:.75rem;">▼</span>' : '';
+          header.innerHTML = '<span>' + phaseLabel + dirIcon
+            + (phaseDesc ? '<span style="font-weight:400;opacity:.7;font-size:.63rem;display:block;margin-top:1px;text-transform:none;letter-spacing:0;">' + phaseDesc + '</span>' : '')
+            + '</span><span class="phase-badge phase-' + phaseId + '" style="flex-shrink:0;">#' + (i+1) + '</span>';
           group.appendChild(header);
 
           const viewsRow = document.createElement('div');
@@ -3869,6 +4039,16 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       }
 
       document.getElementById('framesSection').style.display='block';
+      // Update section title based on view mode
+      const titleEl = document.getElementById('framesSectionTitle');
+      if(titleEl) {
+        if(dualView) {
+          titleEl.textContent = `Dual-Plane Analysis — ${view1Label.split(' (')[0]} + ${view2Label.split(' (')[0]} · ${annotatedFrames.length} phase pairs`;
+        } else {
+          const vName = cameraView==='side' ? 'Side View' : cameraView==='front' ? 'Front View' : 'Posterior View';
+          titleEl.textContent = `Motion Capture — ${vName} · ${annotatedFrames.length} Tracked Frames`;
+        }
+      }
     }
 
     // Render ASI
