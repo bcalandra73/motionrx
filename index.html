@@ -3530,6 +3530,8 @@ async function runAnalysis() {
     const s2b = document.getElementById('s2b');
     if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
     console.log('[Analysis] Stage 3b: Running second video pipeline');
+    // Small delay to let MediaPipe settle after primary run
+    await new Promise(r => setTimeout(r, 200));
     if(mpReady && poseInstance) {
       const mpResults2 = await runMediaPipeOnFrames(extractedFrames2);
       const fusedLandmarks2 = await fusedLandmarkPipeline(
@@ -3836,7 +3838,12 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     }
 
     console.log('[Analysis] Stage 5: Calling renderReport, report:', !!report);
-    report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
+    try {
+      report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
+    } catch(renderErr) {
+      console.error('[renderReport] CRASH:', renderErr.message, renderErr.stack);
+      showErr('Render error: ' + renderErr.message);
+    }
     document.getElementById('resultsSection').scrollIntoView({behavior:'smooth'});
 
   } catch(err) {
@@ -4536,6 +4543,17 @@ function showErr(msg) {
   b.style.display='block';
   b.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
+
+// Global error handlers to catch any uncaught crashes
+window.onerror = (msg, src, line, col, err) => {
+  console.error('[GlobalError]', msg, 'at', src, line, col, err?.stack);
+  showErr(`Uncaught error: ${msg} (line ${line})`);
+};
+window.addEventListener('unhandledrejection', e => {
+  console.error('[UnhandledPromise]', e.reason);
+  showErr(`Async error: ${e.reason?.message || String(e.reason)}`);
+});
+
 </script>
 </body>
 </html>
