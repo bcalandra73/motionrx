@@ -3853,8 +3853,13 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     document.getElementById('resultsSection').scrollIntoView({behavior:'smooth'});
 
   } catch(err) {
-    console.error('[runAnalysis] Error:', err);
-    showErr('Analysis failed: ' + (err.message || String(err)) + ' — check browser console (F12) for details.');
+    console.error('[runAnalysis] CRASH:', err.message);
+    console.error('[runAnalysis] Stack:', err.stack);
+    console.error('[runAnalysis] Full error:', err);
+    const msg = (err.message || String(err));
+    // Alert is impossible to miss — remove once bug is identified
+    alert('MotionRx crash: ' + msg + '\n\nCheck F12 console for stack trace.');
+    showErr('Analysis failed: ' + msg + ' — check browser console (F12) for details.');
   }
 }
 
@@ -4545,9 +4550,11 @@ function showErr(msg) {
   document.getElementById('loadingState').style.display='none';
   document.getElementById('inputSection').style.display='block';
   const b=document.getElementById('errorBox');
-  b.innerHTML=`<strong>⚠️ </strong>${msg}`;
-  b.style.display='block';
-  b.scrollIntoView({behavior:'smooth',block:'nearest'});
+  b.innerHTML=`<strong>⚠️ Error: </strong>${msg}`;
+  b.style.cssText = 'display:block;position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;background:#fee;border:2px solid #c00;border-radius:8px;padding:14px 20px;max-width:700px;width:90%;font-size:.88rem;box-shadow:0 4px 24px rgba(0,0,0,.3);';
+  // Auto-dismiss after 30s
+  setTimeout(() => { b.style.position=''; b.style.transform=''; b.style.zIndex=''; b.style.boxShadow=''; }, 30000);
+  window.scrollTo({top:0,behavior:'smooth'});
 }
 
 // Global error handlers to catch any uncaught crashes
