@@ -2103,9 +2103,9 @@ function drawBarPathOverlay(bgImageB64, barPoints, view) {
       // Info panel
       const drifts = pts.map(p => Math.abs(p.cx-idealX)/W);
       const maxD = Math.max(...drifts), avgD = drifts.reduce((s,v)=>s+v,0)/drifts.length;
-      const SCALE = 180 / W; // ~1.8m subject height in pixels
-      const maxCm = (maxD * W * SCALE).toFixed(1);
-      const avgCm = (avgD * W * SCALE).toFixed(1);
+      const NORM_TO_CM = 180; // 1.0 normalized = ~180cm (1.8m subject)
+      const maxCm = (maxD * NORM_TO_CM).toFixed(1);
+      const avgCm = (avgD * NORM_TO_CM).toFixed(1);
       const qual  = +maxCm < 3 ? 'Optimal' : +maxCm < 6 ? 'Acceptable' : 'Elevated drift';
       const qualC = +maxCm < 3 ? '#00e5cc' : +maxCm < 6 ? '#ffd32a' : '#ff4757';
       const pW = Math.min(230, W*0.42), pH = 74, px = 12, py = H-pH-12;
@@ -2399,7 +2399,7 @@ function drawBarMotionTrace(annotatedFrames, barPoints, view, referenceFrame) {
 }
 
 
-function analyzeBarPath(barPoints, frameH, view, movement) {
+function analyzeBarPath(barPoints, view, movement) {
   if(!barPoints || barPoints.length < 2) return null;
   const startX = barPoints[0].x;
   const startY = barPoints[0].y;
@@ -2407,11 +2407,16 @@ function analyzeBarPath(barPoints, frameH, view, movement) {
   const avgDrift = barPoints.reduce((s,p) => s + Math.abs(p.x - startX), 0) / barPoints.length;
   const totalVertical = Math.abs(startY - Math.min(...barPoints.map(p => p.y))); // normalized
 
-  // Convert normalized units to approximate cm (assuming ~1.8m person fills ~80% of frame height)
-  const pixelsPerMeter = frameH / (1.8 / 0.8);
-  const maxDriftCm = Math.round(maxDrift * pixelsPerMeter * 100) / 10;
-  const avgDriftCm = Math.round(avgDrift * pixelsPerMeter * 100) / 10;
-  const verticalRomCm = Math.round(totalVertical * pixelsPerMeter * 100) / 10;
+  // Convert normalized units to cm
+  // Bar points are normalized 0-1 relative to frame dimensions
+  // Assumption: subject ~1.8m tall fills ~80% of frame height
+  // So 1.0 normalized height ≈ 1.8/0.8 = 2.25m = 225cm
+  // For horizontal: frame width ≈ frame height * aspect ratio, but we use height as reference
+  // Simpler: assume subject height (1.8m) spans the full normalized range → 1 unit = 180cm
+  const NORM_TO_CM = 180; // 1.0 normalized = ~180cm (1.8m subject)
+  const maxDriftCm  = Math.round(maxDrift     * NORM_TO_CM * 10) / 10;
+  const avgDriftCm  = Math.round(avgDrift     * NORM_TO_CM * 10) / 10;
+  const verticalRomCm = Math.round(totalVertical * NORM_TO_CM * 10) / 10;
 
   // Drift direction label — view-aware
   const endX = barPoints[barPoints.length-1].x;
@@ -3353,7 +3358,7 @@ async function runAnalysis() {
 
   // Bar path stats
   const smoothedBarPoints = barPoints.length >= 3 ? smoothBarPoints(barPoints) : barPoints;
-  const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, frameHeight, cameraView, movement) : null;
+  const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, cameraView, movement) : null;
   const barPathLine = barStats
     ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}`
     : '';
