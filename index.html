@@ -3427,7 +3427,8 @@ async function runAnalysis() {
     showErr('Frames are still processing. Please wait a moment or upload a JPG/PNG screenshot instead.'); return;
   }
 
-  const patientName = document.getElementById('patientName').value.trim() || 'Patient';
+  try {
+    const patientName = document.getElementById('patientName').value.trim() || 'Patient';
   const age = document.getElementById('patientAge').value;
   const diagnosis = document.getElementById('diagnosis').value.trim();
   const notes = document.getElementById('clinicalNotes').value.trim();
@@ -3597,15 +3598,18 @@ async function runAnalysis() {
     aggregated = mergedAggregated;
     console.log('[Analysis] Dual-view merge complete. Frontal overrides:', mergeNotes.length);
   }
+  console.log('[Analysis] Checkpoint A: building bar stats');
 
   // Bar path stats
   const smoothedBarPoints = barPoints.length >= 3 ? smoothBarPoints(barPoints) : barPoints;
   const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, cameraView, movement) : null;
+  console.log('[Analysis] Checkpoint B: barStats=', !!barStats);
   const barPathLine = barStats
     ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}`
     : '';
 
   // Step 4: Send up to 8 annotated frames to Claude (up to 4 per view if dual)
+  console.log('[Analysis] Checkpoint C: building frames to send');
   const maxPerView = hasDualView ? 4 : 8;
   const framesToSend  = annotatedFrames.slice(0, maxPerView);
   const framesToSend2 = hasDualView ? annotatedFrames2.slice(0, maxPerView) : [];
@@ -3614,6 +3618,7 @@ async function runAnalysis() {
   const view1Label = cameraView === 'side' ? 'Side view (sagittal plane)' : cameraView === 'front' ? 'Front view (frontal plane)' : 'Posterior view';
   const view2Label = cameraView2 === 'side' ? 'Side view (sagittal plane)' : cameraView2 === 'front' ? 'Front view (frontal plane)' : 'Posterior view';
 
+  console.log('[Analysis] Checkpoint D: building prompt');
   const dualViewNote = hasDualView
     ? `DUAL-PLANE ANALYSIS: Two camera angles were captured. Images 1–${framesToSend.length} are from the ${view1Label}; images ${framesToSend.length+1}–${frameCount} are from the ${view2Label}. Angles have been merged: sagittal-plane measurements (hip/knee flexion, trunk lean) taken from the most appropriate view, frontal-plane measurements (valgus, pelvic tilt, symmetry) from the other. Use both sets of frames to give a more complete 3D movement picture than a single-view analysis allows.`
     : `CAMERA VIEW: ${view1Label}`;
@@ -3664,7 +3669,8 @@ Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
 }
 Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
-  try {
+  console.log('[Analysis] Checkpoint E: entering API call, frameCount=', frameCount);
+  // API call
     const content = [
       ...framesToSend.map(f => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:f.base64}})),
       ...framesToSend2.map(f => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:f.base64}})),
