@@ -1770,7 +1770,7 @@ async function runMediaPipeOnFrames(frames) {
 }
 
 // Draw skeleton with confidence-based rendering (solid=confident, dashed=estimated)
-function drawSkeleton(imageBase64, poseResult, barPoint=null) {
+function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
   return new Promise(resolve => {
     const img = new Image();
     img.onload = () => {
@@ -1816,12 +1816,20 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null) {
         });
 
         // Draw joints — color by confidence
+        // Face landmarks (0-10): only show nose (0) on frontal views as head reference
+        const isFrontalView = (view === 'front' || view === 'posterior');
         const jr = Math.max(4, W/110);
         lm.forEach((p, i) => {
           if(p.visibility < 0.2) return;
+          // On frontal views, suppress face landmarks (1-10: eyes, ears, mouth)
+          // They're inaccurate when subject is close to camera and add visual noise
+          // Keep only nose (0) as a small head-position reference dot
+          if(isFrontalView && i >= 1 && i <= 10) return;
           const conf = p.visibility;
           ctx.beginPath();
-          ctx.arc(p.x*W, p.y*H, jr, 0, 2*Math.PI);
+          // Face landmarks rendered smaller (nose only on frontal)
+          const r = (i === 0 && isFrontalView) ? Math.max(3, W/150) : jr;
+          ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
           if(conf >= 0.6) {
             ctx.fillStyle = i < 11 ? '#ffeb3b' : '#00e5cc'; // high confidence
           } else if(conf >= 0.35) {
@@ -3511,7 +3519,7 @@ async function runAnalysis() {
       }
 
       // Draw skeleton + bar dot on this frame
-      const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, barPt);
+      const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, barPt, cameraView);
       annotatedFrames.push({base64, canvas});
       if(canvas) frameHeight = Math.max(frameHeight, canvas.height);
 
@@ -3565,7 +3573,7 @@ async function runAnalysis() {
       for(let i = 0; i < extractedFrames2.length; i++) {
         const frame = extractedFrames2[i];
         const mpResult = fusedResults2[i];
-        const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null);
+        const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2);
         annotatedFrames2.push({base64, canvas, phase: frame.phase});
         if(mpResult && mpResult.poseLandmarks) {
           allAngles2.push(extractAngles(mpResult.poseLandmarks));
