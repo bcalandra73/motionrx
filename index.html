@@ -156,9 +156,9 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 /* Bar-click overlay */
 .bar-click-overlay{position:relative;cursor:crosshair;user-select:none}
 .bar-click-overlay canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
-.bar-click-hint{background:#fff8e0;border:1px solid #f0c040;border-radius:6px;padding:10px 14px;font-size:.8rem;color:#92600a;margin-top:10px;display:none}
+
 .bar-click-hint.show{display:flex;align-items:center;gap:8px}
-.bar-click-done{background:var(--teal-light);border:1px solid var(--teal);color:var(--teal);border-radius:6px;padding:8px 14px;font-size:.78rem;font-weight:600;display:none;align-items:center;gap:8px;margin-top:8px}
+
 .bar-click-done.show{display:flex}
 
 /* Camera guide modal */
@@ -400,14 +400,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             <span id="frameStatusText">Processing...</span>
             <div class="frame-bar"><div class="frame-bar-fill" id="frameBarFill" style="width:0%"></div></div>
           </div>
-          <div class="bar-click-hint" id="barClickHint">
-            <span>🎯</span>
-            <div><strong>Click the center of the bar shaft to seed tracking.</strong><br>
-            <span style="font-size:.74rem;">Click on the bar itself (not the plates). This locks all 8 frames to search near that horizontal position — significantly improves accuracy. Optional but recommended.</span></div>
-          </div>
-          <div id="barClickFrame" style="display:none;margin-top:10px;border-radius:8px;overflow:hidden;position:relative;cursor:crosshair;">
-            <canvas id="barClickCanvas" style="display:block;width:100%;"></canvas>
-            <div class="bar-click-done" id="barClickDone">✓ Bar marked at this position — tracking seeded. <button class="btn-link" onclick="clearBarSeed()" style="margin-left:8px;">Clear</button></div>
+
           </div>
         </div>
 
@@ -1010,15 +1003,7 @@ function startFrameExtraction(file, vid) {
       }
 
       statusText.textContent = `✓ ${frames.length} frames extracted${phaseNames.length ? ' — phases: ' + phaseNames.slice(0,4).join(', ') : ''} — ready for analysis`;
-      // Show bar-click UI — use a mid-lift frame so bar is clearly visible
-      // frames[0] is often the setup/starting position which may show bar near floor
-      // Pick a frame around 30-40% through the lift for better visibility
       const isLift = /deadlift|squat|press|hinge|push|pull|lunge|sit/i.test(movement);
-      if(isLift && frames.length > 0) {
-        const seedFrameIdx = Math.min(frames.length - 1, Math.max(0, Math.floor(frames.length * 0.35)));
-        const seedFrame = frames[seedFrameIdx] || frames[0];
-        if(seedFrame) setupBarClickFrame(seedFrame.imageData);
-      }
 
       // ── Dense bar tracking extraction ──
       // Strategy:
@@ -1742,11 +1727,26 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
     let lmX = null, lmY = null;
 
     if(view === 'front' || view === 'posterior') {
-      // Front/posterior: bar on upper traps — shoulder midpoint + small offset
-      const lS = v(11), rS = v(12);
-      if(lS && rS)   { lmX = (lS.x+rS.x)/2; lmY = (lS.y+rS.y)/2 + 0.04; }
-      else if(lS)    { lmX = lS.x; lmY = lS.y + 0.04; }
-      else if(rS)    { lmX = rS.x; lmY = rS.y + 0.04; }
+      // Front/posterior landmark depends on movement:
+      // - Squat/press: bar on upper traps → shoulder midpoint + offset
+      // - Deadlift/hinge: bar at hands → use hand landmarks (same as side view)
+      const isDeadliftFront = /deadlift|hinge|rdl/i.test(
+        document.getElementById('movementType')?.value || ''
+      );
+      if(isDeadliftFront) {
+        // Deadlift from front: bar at hand level
+        const handLMs = [15,16,17,18,19,20].map(i => v(i)).filter(Boolean);
+        if(handLMs.length > 0) {
+          lmX = handLMs.reduce((s,p)=>s+p.x,0) / handLMs.length;
+          lmY = handLMs.reduce((s,p)=>s+p.y,0) / handLMs.length;
+        }
+      } else {
+        // Squat/press from front: bar on upper traps
+        const lS = v(11), rS = v(12);
+        if(lS && rS)   { lmX = (lS.x+rS.x)/2; lmY = (lS.y+rS.y)/2 + 0.04; }
+        else if(lS)    { lmX = lS.x; lmY = lS.y + 0.04; }
+        else if(rS)    { lmX = rS.x; lmY = rS.y + 0.04; }
+      }
     } else {
       // Side view: bar is at hand grip level
       // Priority: index fingertips (19/20) → wrists (15/16) → pinky (17/18)
@@ -1769,20 +1769,10 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
       }
     }
 
-    // ── Seed priority logic ──
-    // seedX: user click > hand landmark > center
-    const seedX = barSeedPoint ? barSeedPoint.x : (lmX !== null ? lmX : 0.5);
-
-    // yCenter: lastBarY from previous frame (continuity) > user seed > hand landmark > center
-    // BUT: if this is frame 1 (lastBarY===null) and user clicked, always use seed y
-    const yCenter = (lastBarY !== null)
-                  ? lastBarY                              // frames 2-8: follow tracking
-                  : (barSeedPoint ? barSeedPoint.y        // frame 1: use click if available
-                  : (lmY !== null ? lmY : 0.5));          // frame 1: landmark fallback
-
-    // Seed x band: when user clicked, restrict row search to a horizontal band
-    // around the clicked x — avoids scoring rack/background pixels on far side
-    const seedXpx_frac = seedX; // normalized, applied per-frame after img loads
+    // ── Seed logic: landmark position drives search center ──
+    const seedX = lmX !== null ? lmX : 0.5;
+    const yCenter = lastBarY !== null ? lastBarY : (lmY !== null ? lmY : 0.5);
+    const seedXpx_frac = seedX;
 
     const img = new Image();
     img.onload = () => {
@@ -1814,13 +1804,11 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
       // or colored bumper plates. Require continuous horizontal span ≥ 6% frame width.
       const rowScores = new Float32Array(sh);
 
-      // When user clicked the bar: restrict horizontal scan to ±25% of frame around seed x
-      // This prevents rack uprights, floor, or background from outscoring the actual bar
-      const hasSeed = !!barSeedPoint;
-      const bandL = hasSeed ? Math.max(0,   Math.round((seedXpx_frac - 0.25) * W)) : 0;
-      const bandR = hasSeed ? Math.min(W-1, Math.round((seedXpx_frac + 0.25) * W)) : W-1;
+      // Restrict scan to ±30% around landmark x anchor — avoids rack/background interference
+      const bandL = Math.max(0,   Math.round((seedXpx_frac - 0.30) * W));
+      const bandR = Math.min(W-1, Math.round((seedXpx_frac + 0.30) * W));
       const bandWidth = bandR - bandL + 1;
-      const MIN_SPAN = Math.round(bandWidth * 0.08); // bar must span ≥8% of search band
+      const MIN_SPAN = Math.round(bandWidth * 0.07); // bar must span ≥7% of search band
 
       for(let row = 0; row < sh; row++) {
         let score = 0, runLen = 0, maxRun = 0;
@@ -1885,13 +1873,6 @@ function detectBarPosition(imageBase64, poseLandmarks, view) {
           if(rowScores[r2] > 0) { ySum += (sy+r2)*rowScores[r2]; wSum += rowScores[r2]; }
         }
         let ry = wSum > 0 ? (ySum/wSum)/H : (sy+bestRow)/H;
-
-        // Soft seed prior: if user clicked AND confidence is weak, blend toward seed y
-        // Prevents drifting far from known bar position on ambiguous frames
-        if(barSeedPoint && bestScore < MIN_SCORE * 3) {
-          const blendFrac = 0.3; // 30% pull back toward seed y
-          ry = ry * (1 - blendFrac) + barSeedPoint.y * blendFrac;
-        }
 
         const conf = colConfirmed ? 'color-tracked' : 'color-unconfirmed';
         lastBarY = ry;
@@ -2418,27 +2399,44 @@ function drawBarMotionTrace(annotatedFrames, barPoints, view, referenceFrame) {
 }
 
 
-function analyzeBarPath(barPoints, frameH) {
+function analyzeBarPath(barPoints, frameH, view, movement) {
   if(!barPoints || barPoints.length < 2) return null;
   const startX = barPoints[0].x;
+  const startY = barPoints[0].y;
   const maxDrift = Math.max(...barPoints.map(p => Math.abs(p.x - startX)));
   const avgDrift = barPoints.reduce((s,p) => s + Math.abs(p.x - startX), 0) / barPoints.length;
-  const totalVertical = Math.abs(barPoints[0].y - barPoints[barPoints.length-1].y);
+  const totalVertical = Math.abs(startY - Math.min(...barPoints.map(p => p.y))); // normalized
+
   // Convert normalized units to approximate cm (assuming ~1.8m person fills ~80% of frame height)
   const pixelsPerMeter = frameH / (1.8 / 0.8);
-  const maxDriftCm = Math.round(maxDrift * pixelsPerMeter * 100) / 10; // normalized -> cm
+  const maxDriftCm = Math.round(maxDrift * pixelsPerMeter * 100) / 10;
   const avgDriftCm = Math.round(avgDrift * pixelsPerMeter * 100) / 10;
+  const verticalRomCm = Math.round(totalVertical * pixelsPerMeter * 100) / 10;
 
-  // Determine direction of drift
+  // Drift direction label — view-aware
   const endX = barPoints[barPoints.length-1].x;
   const midX = barPoints[Math.floor(barPoints.length/2)]?.x || startX;
-  const driftDir = midX > startX ? 'anterior (forward)' : midX < startX ? 'posterior (backward)' : 'minimal';
+  let driftDir;
+  if(view === 'side') {
+    driftDir = Math.abs(midX - startX) < 0.01 ? 'minimal'
+             : midX > startX ? 'anterior (forward)' : 'posterior (backward)';
+  } else {
+    driftDir = Math.abs(midX - startX) < 0.01 ? 'minimal'
+             : midX > startX ? 'right lateral' : 'left lateral';
+  }
+
+  // For deadlift/hinge from front view, low drift is EXPECTED and not the key metric
+  // Key metric is vertical ROM confirming bar traveled full range
+  const isDeadliftFront = (view === 'front' || view === 'posterior') &&
+                          /deadlift|hinge|rdl/i.test(movement || '');
 
   return {
     maxDriftCm,
     avgDriftCm,
+    verticalRomCm,
     driftDir,
     frameCount: barPoints.length,
+    isDeadliftFront,
     quality: maxDriftCm < 3 ? 'Optimal' : maxDriftCm < 6 ? 'Acceptable' : 'Significant deviation',
     flag: maxDriftCm < 3 ? 'flag-ok' : maxDriftCm < 6 ? 'flag-med' : 'flag-high'
   };
@@ -3204,72 +3202,10 @@ function showGuide() {
 }
 
 // ── Bar Click Seed ──
-let barSeedPoint = null;   // normalized {x, y} from user click
-let barClickSourceB64 = null;
 
-function setupBarClickFrame(imageB64) {
-  barClickSourceB64 = imageB64;
-  const canvas = document.getElementById('barClickCanvas');
-  const container = document.getElementById('barClickFrame');
-  const hint = document.getElementById('barClickHint');
 
-  const img = new Image();
-  img.onload = () => {
-    canvas.width = img.width;
-    canvas.height = img.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
-    container.style.display = 'block';
-    hint.classList.add('show');
-    drawBarSeedOnCanvas(ctx, img.width, img.height);
-  };
-  img.src = 'data:image/jpeg;base64,' + imageB64;
 
-  canvas.onclick = (e) => {
-    const rect = canvas.getBoundingClientRect();
-    // Scale click coords to actual canvas dimensions
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const cx = (e.clientX - rect.left) * scaleX;
-    const cy = (e.clientY - rect.top) * scaleY;
-    barSeedPoint = {x: cx / canvas.width, y: cy / canvas.height};
-    const ctx = canvas.getContext('2d');
-    const i = new Image();
-    i.onload = () => { ctx.drawImage(i,0,0); drawBarSeedOnCanvas(ctx, canvas.width, canvas.height); };
-    i.src = 'data:image/jpeg;base64,' + barClickSourceB64;
-    document.getElementById('barClickDone').classList.add('show');
-  };
-}
 
-function drawBarSeedOnCanvas(ctx, W, H) {
-  if(!barSeedPoint) return;
-  const bx = barSeedPoint.x * W, by = barSeedPoint.y * H;
-  ctx.beginPath();
-  ctx.arc(bx, by, Math.max(10, W/60), 0, 2*Math.PI);
-  ctx.strokeStyle = '#ff3c3c';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(bx, by, Math.max(4, W/150), 0, 2*Math.PI);
-  ctx.fillStyle = '#ff3c3c';
-  ctx.fill();
-  // Crosshair
-  ctx.strokeStyle = 'rgba(255,60,60,0.6)';
-  ctx.lineWidth = 1.5;
-  const r = Math.max(20, W/40);
-  ctx.beginPath(); ctx.moveTo(bx-r, by); ctx.lineTo(bx+r, by); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(bx, by-r); ctx.lineTo(bx, by+r); ctx.stroke();
-}
-
-function clearBarSeed() {
-  barSeedPoint = null;
-  document.getElementById('barClickDone').classList.remove('show');
-  const canvas = document.getElementById('barClickCanvas');
-  const ctx = canvas.getContext('2d');
-  const i = new Image();
-  i.onload = () => ctx.drawImage(i,0,0);
-  i.src = 'data:image/jpeg;base64,' + barClickSourceB64;
-}
 
 function flagAngle(name, val) {
   const ref = REF_RANGES[name];
@@ -3417,7 +3353,7 @@ async function runAnalysis() {
 
   // Bar path stats
   const smoothedBarPoints = barPoints.length >= 3 ? smoothBarPoints(barPoints) : barPoints;
-  const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, frameHeight) : null;
+  const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, frameHeight, cameraView, movement) : null;
   const barPathLine = barStats
     ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}`
     : '';
@@ -3596,12 +3532,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         }
       }
       const flagClass = barStats.flag;
-          document.getElementById('barPathStats').innerHTML = `
+      const driftLabel = barStats.isDeadliftFront ? 'Lateral Sway' : 'Max Horizontal Drift';
+      document.getElementById('barPathStats').innerHTML = `
             <div style="margin-bottom:14px;">
               <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">Bar Path Metrics</div>
               <table class="angles-table">
                 <tbody>
-                  <tr><td>Max Horizontal Drift</td><td><span class="val ${flagClass}">${barStats.maxDriftCm} cm</span></td></tr>
+                  ${barStats.isDeadliftFront ? `<tr><td>Vertical ROM</td><td><span class="val flag-ok">${barStats.verticalRomCm} cm</span></td></tr>` : ''}
+                  <tr><td>${driftLabel}</td><td><span class="val ${flagClass}">${barStats.maxDriftCm} cm</span></td></tr>
                   <tr><td>Average Drift</td><td><span class="val">${barStats.avgDriftCm} cm</span></td></tr>
                   <tr><td>Drift Direction</td><td><span class="val">${barStats.driftDir}</span></td></tr>
                   <tr><td>Path Quality</td><td><span class="val ${flagClass}">${barStats.quality}</span></td></tr>
