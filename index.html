@@ -4311,490 +4311,533 @@ async function exportPDF() {
   try {
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const PW = 210, PH = 297;
-    const ML = 15, MR = 15, MT = 0;
+    const ML = 15, MR = 15;
     const CW = PW - ML - MR;
+    const FOOTER_H = 11;
+    const PAGE_BODY_TOP  = 18;   // y-start on pages 2+  (after mini-header)
+    const PAGE_BODY_BOT  = PH - FOOTER_H - 4;  // last usable y before footer
 
     // ── Design tokens ──
     const C = {
-      navy:     [15, 39, 68],
-      navyMid:  [26, 58, 92],
-      teal:     [14, 124, 106],
-      tealPale: [230, 244, 241],
-      tealMid:  [126, 200, 192],
-      muted:    [107, 122, 141],
-      border:   [213, 220, 232],
-      surface:  [248, 250, 252],
-      white:    [255, 255, 255],
-      text:     [26, 35, 50],
-      red:      [192, 57, 43],
-      amber:    [217, 119, 6],
-      green:    [14, 124, 106],
-      purple:   [124, 58, 237],
+      navy:    [15,39,68], navyMid:[26,58,92],
+      teal:    [14,124,106], tealPale:[230,244,241], tealMid:[126,200,192],
+      muted:   [107,122,141], border:[213,220,232], surface:[248,250,252],
+      white:   [255,255,255], text:[26,35,50],
+      red:     [192,57,43], amber:[217,119,6], purple:[124,58,237],
     };
 
-    const brand = getBranding();
-    const subtitle = document.getElementById('reportSubtitle').textContent;
-    const now = new Date().toLocaleDateString('en-US', {month:'long', day:'numeric', year:'numeric'});
+    const brand   = getBranding();
+    const subtitle= document.getElementById('reportSubtitle').textContent;
+    const now     = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
 
-    // ── Helpers ──
-    const setColor = (rgb) => doc.setTextColor(...rgb);
-    const setFill  = (rgb) => doc.setFillColor(...rgb);
-    const setDraw  = (rgb) => doc.setDrawColor(...rgb);
+    const setColor = r => doc.setTextColor(...r);
+    const setFill  = r => doc.setFillColor(...r);
+    const setDraw  = r => doc.setDrawColor(...r);
 
-    function rule(x, yy, w, thickness=0.25, color=C.border) {
-      setDraw(color); doc.setLineWidth(thickness);
-      doc.line(x, yy, x+w, yy);
+    function hRule(x,yy,w,thick=0.25,col=C.border){
+      setDraw(col); doc.setLineWidth(thick); doc.line(x,yy,x+w,yy);
     }
 
-    function pageGuard(needed=30) {
-      if(y + needed > PH - 14) { doc.addPage(); drawPageHeader(); y = 52; }
-    }
-
-    // Helper: draw repeated page header (for pages 2+)
+    // ── Mini header drawn on page 2+ ──
     function drawPageHeader() {
-      setFill(C.navy); doc.rect(0, 0, PW, 10, 'F');
-      setFill(C.teal); doc.rect(0, 10, PW, 1.2, 'F');
+      setFill(C.navy); doc.rect(0,0,PW,10,'F');
+      setFill(C.teal); doc.rect(0,10,PW,1.2,'F');
       doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.tealMid);
       doc.text('MOTIONRX CLINICAL REPORT', ML, 7);
       doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor([143,165,192]);
-      doc.text(brand.practice || 'MotionRx', PW-MR, 7, {align:'right'});
+      doc.text(brand.practice||'MotionRx', PW-MR, 7, {align:'right'});
     }
 
-    // ── PAGE 1: COVER HEADER ──
-    // Deep navy banner
-    setFill(C.navy); doc.rect(0, 0, PW, 46, 'F');
-    // Teal left accent stripe
-    setFill(C.teal); doc.rect(0, 0, 4, 46, 'F');
-    // Teal bottom rule
-    setFill(C.teal); doc.rect(0, 46, PW, 1.5, 'F');
-    // Subtle grid pattern in header (decorative dots)
-    setFill([255,255,255]); doc.setGState(doc.GState({opacity: 0.04}));
-    for(let gx = 20; gx < PW; gx += 12) {
-      for(let gy = 5; gy < 46; gy += 10) { doc.circle(gx, gy, 0.6, 'F'); }
+    // ── Page break: add new page, draw mini-header, reset y ──
+    function newPage() {
+      doc.addPage();
+      drawPageHeader();
+      y = PAGE_BODY_TOP + 4;
     }
-    doc.setGState(doc.GState({opacity: 1}));
 
-    // MotionRx wordmark
+    // ── Ensure `needed` mm fits before footer; break if not ──
+    function guard(needed) {
+      if(y + needed > PAGE_BODY_BOT) newPage();
+    }
+
+    // ── Convert an <img> element to jpeg data-url at given render width (mm→px=1:1 for canvas) ──
+    function imgToJpeg(imgEl, quality=0.85) {
+      if(!imgEl?.complete || !imgEl.naturalWidth) return null;
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = imgEl.naturalWidth; cv.height = imgEl.naturalHeight;
+        cv.getContext('2d').drawImage(imgEl, 0, 0);
+        return { data: cv.toDataURL('image/jpeg', quality),
+                 aspect: imgEl.naturalHeight / imgEl.naturalWidth };
+      } catch(e) { return null; }
+    }
+
+    // ── Section heading: left accent bar + title + rule ──
+    // Returns the height consumed (so caller can pre-guard)
+    const SECTION_HEAD_H = 12;
+    function sectionHead(title, accentColor=C.teal) {
+      setFill(accentColor); doc.rect(ML, y, 3, 7, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.navy);
+      doc.text(title.toUpperCase(), ML+6, y+5.2);
+      hRule(ML+6, y+7.5, CW-6, 0.3, C.border);
+      y += SECTION_HEAD_H;
+    }
+
+    // ── Body text with per-line page guard ──
+    function bodyText(text, color=C.text, size=8.5, indent=2) {
+      if(!text?.trim()) return;
+      doc.setFont('helvetica','normal'); doc.setFontSize(size); setColor(color);
+      const lines = doc.splitTextToSize(text.replace(/\n+/g,' '), CW-indent-4);
+      lines.forEach(line => {
+        guard(6);
+        doc.text(line, ML+indent, y); y += 4.8;
+      });
+      y += 2;
+    }
+
+    // ════════════════════════════════════════════════
+    // PAGE 1 COVER HEADER
+    // ════════════════════════════════════════════════
+    setFill(C.navy); doc.rect(0,0,PW,46,'F');
+    setFill(C.teal); doc.rect(0,0,4,46,'F');
+    setFill(C.teal); doc.rect(0,46,PW,1.5,'F');
+    // Subtle dot grid
+    setFill([255,255,255]); doc.setGState(doc.GState({opacity:0.04}));
+    for(let gx=20;gx<PW;gx+=12) for(let gy=5;gy<46;gy+=10) doc.circle(gx,gy,0.6,'F');
+    doc.setGState(doc.GState({opacity:1}));
+
     doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.tealMid);
     doc.text('MOTIONRX', 9, 11);
     doc.setFont('helvetica','normal'); doc.setFontSize(7); setColor([143,165,192]);
     doc.text('CLINICAL REPORT', 9, 16);
-
-    // Report date top-right
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor([143,165,192]);
     doc.text(now, PW-MR, 11, {align:'right'});
-
-    // Practice name — large
     doc.setFont('helvetica','bold'); doc.setFontSize(18); setColor(C.white);
-    doc.text(brand.practice || 'Clinical Motion Assessment', 9, 30);
-
-    // Clinician + contact — right-aligned, stacked
+    doc.text(brand.practice||'Clinical Motion Assessment', 9, 30);
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor([143,165,192]);
-    let hLines = [];
-    if(brand.clinician) hLines.push(brand.clinician);
-    if(brand.address)   hLines.push(brand.address);
-    if(brand.contact)   hLines.push(brand.contact);
-    hLines.forEach((l, i) => doc.text(l, PW-MR, 23 + i*5, {align:'right'}));
-
-    // Report type label
+    [brand.clinician,brand.address,brand.contact].filter(Boolean)
+      .forEach((l,i) => doc.text(l, PW-MR, 23+i*5, {align:'right'}));
     doc.setFont('helvetica','bold'); doc.setFontSize(8); setColor([143,165,192]);
     doc.text('BIOMECHANICAL MOTION ANALYSIS', 9, 42);
 
     let y = 54;
 
-    // ── PATIENT + ASSESSMENT BLOCK ──
-    // Two-column info card
+    // ── PATIENT BLOCK ──
     setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.3);
     doc.roundedRect(ML, y, CW, 22, 2, 2, 'FD');
-    // Left col: patient
     doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.muted);
     doc.text('PATIENT & ASSESSMENT', ML+4, y+5.5);
     doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(C.text);
-    const subLines = doc.splitTextToSize(subtitle, CW/2 - 8);
-    subLines.slice(0,3).forEach((l,i) => doc.text(l, ML+4, y+10+i*4.5));
-    // Right col: teal divider + score
-    const scoreVal = document.querySelector('.score-tile-value')?.textContent?.trim();
-    const scoreClass = document.querySelector('.score-tile-value')?.className || '';
+    doc.splitTextToSize(subtitle, CW/2-8).slice(0,3).forEach((l,i)=>doc.text(l,ML+4,y+10+i*4.5));
+    const scoreVal   = document.querySelector('.score-tile-value')?.textContent?.trim();
+    const scoreClass = document.querySelector('.score-tile-value')?.className||'';
     if(scoreVal) {
-      rule(ML + CW/2, y+3, 0, 16, C.border); // vertical rule
+      hRule(ML+CW/2, y+3, 0, 16, C.border);
       doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.muted);
       doc.text('MOVEMENT QUALITY SCORE', ML+CW/2+5, y+5.5);
-      const scoreRgb = scoreClass.includes('score-good') ? C.teal : scoreClass.includes('score-warn') ? C.amber : C.red;
-      setColor(scoreRgb);
-      doc.setFont('helvetica','bold'); doc.setFontSize(22);
+      const sRgb = scoreClass.includes('score-good')?C.teal:scoreClass.includes('score-warn')?C.amber:C.red;
+      setColor(sRgb); doc.setFont('helvetica','bold'); doc.setFontSize(22);
       doc.text(scoreVal, ML+CW/2+5, y+18);
-      doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor(C.muted);
-      const scoreSummary = document.querySelectorAll('.score-tile-value')[5]?.textContent?.trim() || '';
-      if(scoreSummary) doc.text(scoreSummary.substring(0,45), ML+CW/2+5, y+21, {maxWidth: CW/2-8});
     }
     y += 28;
 
-    // ── SCORE STRIP ──
+    // ── SCORE TILES ──
     const tiles = document.querySelectorAll('.score-tile');
-    const scoreTiles = [...tiles].filter((_,i) => i > 0 && i < tiles.length-1); // skip first (score) and last (summary)
-    if(scoreTiles.length > 0) {
-      const tCols = Math.min(scoreTiles.length, 4);
-      const tW = (CW - (tCols-1)*3) / tCols;
-      scoreTiles.slice(0, tCols).forEach((tile, i) => {
-        const tx = ML + i*(tW+3);
+    const scoreTiles = [...tiles].filter((_,i)=>i>0&&i<tiles.length-1);
+    if(scoreTiles.length>0) {
+      const tCols = Math.min(scoreTiles.length,4);
+      const tW = (CW-(tCols-1)*3)/tCols;
+      scoreTiles.slice(0,tCols).forEach((tile,i)=>{
+        const tx = ML+i*(tW+3);
         setFill(C.white); setDraw(C.border); doc.setLineWidth(0.25);
-        doc.roundedRect(tx, y, tW, 16, 1.5, 1.5, 'FD');
-        // Teal top accent
-        setFill(C.teal); doc.roundedRect(tx, y, tW, 1.5, 1, 0, 'F');
-        const valEl = tile.querySelector('.score-tile-value');
-        const lblEl = tile.querySelector('.score-tile-label');
-        const val = valEl?.textContent?.trim() || '';
-        const lbl = lblEl?.textContent?.trim() || '';
-        const cls = valEl?.className || '';
-        const rgb = cls.includes('score-good') ? C.teal : cls.includes('score-warn') ? C.amber : cls.includes('score-poor') ? C.red : C.navyMid;
+        doc.roundedRect(tx,y,tW,16,1.5,1.5,'FD');
+        setFill(C.teal); doc.roundedRect(tx,y,tW,1.5,1,0,'F');
+        const val = tile.querySelector('.score-tile-value')?.textContent?.trim()||'';
+        const lbl = tile.querySelector('.score-tile-label')?.textContent?.trim()||'';
+        const cls = tile.querySelector('.score-tile-value')?.className||'';
+        const rgb = cls.includes('score-good')?C.teal:cls.includes('score-warn')?C.amber:cls.includes('score-poor')?C.red:C.navyMid;
         setColor(rgb); doc.setFont('helvetica','bold'); doc.setFontSize(val.length>6?7:10);
-        doc.text(val.substring(0,20), tx+tW/2, y+10, {align:'center', maxWidth:tW-3});
+        doc.text(val.substring(0,20),tx+tW/2,y+10,{align:'center',maxWidth:tW-3});
         setColor(C.muted); doc.setFont('helvetica','normal'); doc.setFontSize(5.5);
-        doc.text(lbl, tx+tW/2, y+14, {align:'center'});
+        doc.text(lbl,tx+tW/2,y+14,{align:'center'});
       });
       y += 22;
     }
 
-    // ── Section head helper (redesigned) ──
-    function sectionHead(title, accentColor=C.teal) {
-      pageGuard(20);
-      // Left accent bar + title
-      setFill(accentColor); doc.rect(ML, y, 3, 7, 'F');
-      doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.navy);
-      doc.text(title.toUpperCase(), ML+6, y+5.2);
-      rule(ML+6, y+7.5, CW-6, 0.3, C.border);
-      y += 11;
-    }
-
-    // ── Body text helper ──
-    function bodyText(text, color=C.text, size=8.5, indent=2) {
-      if(!text?.trim()) return;
-      doc.setFont('helvetica','normal'); doc.setFontSize(size); setColor(color);
-      const lines = doc.splitTextToSize(text.replace(/\n+/g,' '), CW - indent - 4);
-      lines.forEach(line => {
-        if(y > PH - 14) { doc.addPage(); drawPageHeader(); y = 18; }
-        doc.text(line, ML + indent, y); y += 4.8;
-      });
-      y += 2;
-    }
-
-    // ── SKELETON FRAMES ──
-    // Support both single-view (.frame-card img) and dual-view (.phase-view-slot img)
-    const allFrameImgs = [...document.querySelectorAll('#framesGallery .frame-card img, #framesGallery .phase-view-slot img')];
-    const isDualView = document.querySelector('#framesGallery .phase-group') !== null;
+    // ════════════════════════════════════════════════
+    // SKELETON FRAMES
+    // ════════════════════════════════════════════════
+    const isDualView   = document.querySelector('#framesGallery .phase-group') !== null;
+    const allFrameImgs = [...document.querySelectorAll(
+      isDualView ? '#framesGallery .phase-view-slot img' : '#framesGallery .frame-card img'
+    )];
 
     if(allFrameImgs.length > 0) {
-      pageGuard(60);
-      const sectionTitle = document.getElementById('framesSectionTitle')?.textContent || 'Tracked Frames';
-      sectionHead(sectionTitle.replace(/[·—].*/,'').trim());
+      const secTitle = (document.getElementById('framesSectionTitle')?.textContent||'Tracked Frames')
+                        .replace(/[·—].*/,'').trim();
 
       if(isDualView) {
-        // Dual-view: render phase groups — each group = one phase card with 2 images side by side
-        const groups = document.querySelectorAll('#framesGallery .phase-group');
-        groups.forEach(group => {
-          const header = group.querySelector('.phase-group-header');
-          const phaseName = header?.firstChild?.textContent?.trim()?.replace(/[▲▼]/g,'').trim() || '';
-          const slots = group.querySelectorAll('.phase-view-slot');
-          const imgs = [...slots].map(s => s.querySelector('img')).filter(Boolean);
-          const viewLabels = [...slots].map(s => s.querySelector('.phase-view-label')?.textContent?.trim() || '');
+        const groups = [...document.querySelectorAll('#framesGallery .phase-group')];
 
-          if(imgs.length === 0) return;
-          pageGuard(52);
+        // Pre-compute JPEG + aspect for every group so we know exact heights before placing
+        const groupData = groups.map(group => {
+          const slots     = group.querySelectorAll('.phase-view-slot');
+          const imgs      = [...slots].map(s=>s.querySelector('img')).filter(Boolean);
+          const viewLabels= [...slots].map(s=>s.querySelector('.phase-view-label')?.textContent?.trim()||'');
+          const phaseName = group.querySelector('.phase-group-header')?.firstChild
+                              ?.textContent?.replace(/[▲▼]/g,'').trim()||'';
+          const jpegs     = imgs.map(im=>imgToJpeg(im));
+          const aspect    = jpegs.find(j=>j)?.aspect || 0.75;
+          // Each image: half the content width minus gap
+          const imgW      = (CW - 6) / Math.max(imgs.length,1);
+          const imgH      = imgW * aspect;
+          const totalH    = 6.5 + 4 + imgH + 9;  // label bar + gap + image + label + margin
+          return { phaseName, imgs, viewLabels, jpegs, imgW, imgH, totalH };
+        });
 
-          // Phase label row
+        // Section heading — guard for heading + at least first group
+        const firstH = groupData[0]?.totalH || 60;
+        guard(SECTION_HEAD_H + firstH);
+        sectionHead(secTitle);
+
+        groupData.forEach(({phaseName, imgs, viewLabels, jpegs, imgW, imgH, totalH}) => {
+          // Guard for this entire group as a unit — scale down if page is too short
+          const available = PAGE_BODY_BOT - y;
+          let renderImgH = imgH;
+          if(totalH > available) {
+            if(totalH > PAGE_BODY_BOT - PAGE_BODY_TOP) {
+              // Group taller than full page — scale to fit
+              renderImgH = PAGE_BODY_BOT - PAGE_BODY_TOP - 6.5 - 4 - 9;
+            } else {
+              newPage();
+            }
+          }
+          const renderImgW = renderImgH / (imgH / imgW);
+
+          // Phase label bar
           setFill(C.navy); doc.roundedRect(ML, y, CW, 6.5, 1, 1, 'F');
           doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.white);
           doc.text(phaseName, ML+4, y+4.5);
           y += 8;
 
-          // Images side by side
-          const imgW = (CW - 4) / Math.max(imgs.length, 1);
-          // Use real aspect ratio — compute from first loaded image, fallback to 0.75
-          const refImg = imgs.find(im => im.complete && im.naturalWidth > 0);
-          const aspectRatio = refImg ? refImg.naturalHeight / refImg.naturalWidth : 0.75;
-          const imgH = imgW * aspectRatio;
-          imgs.forEach((img, ii) => {
-            if(!img.complete || !img.naturalWidth) return;
-            try {
-              const cv = document.createElement('canvas');
-              cv.width = img.naturalWidth; cv.height = img.naturalHeight;
-              cv.getContext('2d').drawImage(img, 0, 0);
-              const data = cv.toDataURL('image/jpeg', 0.84);
-              const ix = ML + ii*(imgW+4);
-              // Subtle border
-              setDraw(C.border); doc.setLineWidth(0.3);
-              doc.roundedRect(ix, y, imgW, imgH, 1, 1, 'D');
-              doc.addImage(data, 'JPEG', ix, y, imgW, imgH);
-              // View label below
-              doc.setFont('helvetica','bold'); doc.setFontSize(6); setColor(C.teal);
-              doc.text(viewLabels[ii] || '', ix+imgW/2, y+imgH+4, {align:'center'});
-            } catch(e){}
+          // Images side by side — centered if fewer than 2
+          const totalImgW = jpegs.filter(Boolean).length * renderImgW + (jpegs.filter(Boolean).length-1)*6;
+          let ix = ML + (CW - totalImgW)/2;
+          jpegs.forEach((jpeg, ii) => {
+            if(!jpeg) return;
+            setDraw(C.border); doc.setLineWidth(0.25);
+            doc.roundedRect(ix, y, renderImgW, renderImgH, 1, 1, 'D');
+            doc.addImage(jpeg.data, 'JPEG', ix, y, renderImgW, renderImgH);
+            doc.setFont('helvetica','bold'); doc.setFontSize(6); setColor(C.teal);
+            doc.text(viewLabels[ii]||'', ix+renderImgW/2, y+renderImgH+4, {align:'center'});
+            ix += renderImgW + 6;
           });
-          y += imgH + 8;
+          y += renderImgH + 10;
         });
+
       } else {
-        // Single-view: 4-up grid
-        const cols = Math.min(4, allFrameImgs.length);
-        const fW = (CW - (cols-1)*3) / cols;
-        // Compute aspect ratio from first loaded image
-        const firstLoaded = allFrameImgs.find(im => im.complete && im.naturalWidth > 0);
-        const singleAspect = firstLoaded ? firstLoaded.naturalHeight / firstLoaded.naturalWidth : 0.75;
-        const fH = fW * singleAspect;
-        let col = 0;
-        for(const img of allFrameImgs) {
-          if(!img.complete || !img.naturalWidth) { col++; if(col>=cols){col=0;y+=fH+10;} continue; }
-          try {
-            pageGuard(fH + 14);
-            const cv = document.createElement('canvas');
-            cv.width = img.naturalWidth; cv.height = img.naturalHeight;
-            cv.getContext('2d').drawImage(img, 0, 0);
-            const data = cv.toDataURL('image/jpeg', 0.84);
-            const fx = ML + col*(fW+3);
-            setDraw(C.border); doc.setLineWidth(0.3);
-            doc.roundedRect(fx, y, fW, fH, 1, 1, 'D');
-            doc.addImage(data, 'JPEG', fx, y, fW, fH);
-            // Label
-            const lbl = img.closest('.frame-card')?.querySelector('.frame-label')?.textContent?.trim() || '';
+        // Single-view: up to 3 per row (better use of space, less squishing)
+        const firstImg = allFrameImgs.find(im=>im.complete&&im.naturalWidth>0);
+        const aspect   = firstImg ? firstImg.naturalHeight/firstImg.naturalWidth : 0.75;
+        const COLS     = Math.min(3, allFrameImgs.length);
+        const fW       = (CW - (COLS-1)*4) / COLS;
+        const fH       = fW * aspect;
+        const ROW_H    = fH + 9;  // image + label below
+
+        guard(SECTION_HEAD_H + ROW_H);
+        sectionHead(secTitle);
+
+        let col = 0, rowY = y;
+        allFrameImgs.forEach((img, ii) => {
+          if(col === 0) {
+            // Start of a new row — guard for full row
+            guard(ROW_H);
+            rowY = y;
+          }
+          const jpeg = imgToJpeg(img, 0.85);
+          if(jpeg) {
+            const fx = ML + col*(fW+4);
+            setDraw(C.border); doc.setLineWidth(0.25);
+            doc.roundedRect(fx, rowY, fW, fH, 1, 1, 'D');
+            doc.addImage(jpeg.data, 'JPEG', fx, rowY, fW, fH);
+            const lbl = img.closest('.frame-card')?.querySelector('.frame-label')?.textContent?.trim()||'';
             doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor(C.muted);
-            doc.text(lbl.substring(0,28), fx+fW/2, y+fH+4, {align:'center'});
-          } catch(e){}
+            doc.text(lbl.substring(0,28), fx+fW/2, rowY+fH+4, {align:'center'});
+          }
           col++;
-          if(col >= cols) { col=0; y += fH+10; }
-        }
-        if(col > 0) y += fH + 10;
+          if(col >= COLS) { col=0; y = rowY + ROW_H; }
+        });
+        if(col>0) y = rowY + ROW_H;
       }
       y += 4;
     }
 
-    // ── JOINT ANGLES TABLE ──
+    // ════════════════════════════════════════════════
+    // JOINT ANGLES TABLE
+    // ════════════════════════════════════════════════
     const anglesSection = document.getElementById('anglesSection');
     if(anglesSection && anglesSection.style.display !== 'none') {
-      pageGuard(45);
+      const rows   = [...anglesSection.querySelectorAll('tbody tr')];
+      const colW   = [58,24,36,CW-122];
+      const hdrs   = ['Joint','Avg Angle','Range','Reference Range'];
+      const ROW_H  = 6.5;
+      const HEAD_H = 7;
+      // Guard for section title + table header + at least 3 data rows
+      guard(SECTION_HEAD_H + HEAD_H + ROW_H*3);
       sectionHead('Measured Joint Angles');
-      const rows = anglesSection.querySelectorAll('tbody tr');
-      const colW = [58, 24, 36, CW - 122];
-      const headers = ['Joint', 'Avg Angle', 'Range', 'Reference Range'];
 
-      // Header row
-      setFill(C.navy); doc.rect(ML, y, CW, 7, 'F');
+      // Table header
+      setFill(C.navy); doc.rect(ML, y, CW, HEAD_H, 'F');
       doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.white);
       let cx = ML+3;
-      headers.forEach((h,i) => { doc.text(h, cx, y+5); cx += colW[i]; });
-      y += 7;
+      hdrs.forEach((h,i)=>{ doc.text(h,cx,y+5); cx+=colW[i]; });
+      y += HEAD_H;
 
       rows.forEach((row, ri) => {
-        if(y > PH-14) { doc.addPage(); drawPageHeader(); y = 18; }
-        setFill(ri%2===0 ? C.surface : C.white);
-        doc.rect(ML, y, CW, 6.5, 'F');
-        // Left color tab on flagged rows
-        const rowCls = row.className || '';
-        if(rowCls.includes('flag')) {
-          setFill(rowCls.includes('high') ? C.red : C.amber);
-          doc.rect(ML, y, 2, 6.5, 'F');
+        // If row would cross footer, start new page and redraw table header
+        if(y + ROW_H > PAGE_BODY_BOT) {
+          newPage();
+          setFill(C.navy); doc.rect(ML, y, CW, HEAD_H, 'F');
+          doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.white);
+          cx = ML+3; hdrs.forEach((h,i)=>{ doc.text(h,cx,y+5); cx+=colW[i]; });
+          y += HEAD_H;
         }
-        const cells = row.querySelectorAll('td');
+        setFill(ri%2===0?C.surface:C.white); doc.rect(ML, y, CW, ROW_H, 'F');
+        const rowCls = row.className||'';
+        if(rowCls.includes('flag')) {
+          setFill(rowCls.includes('high')?C.red:C.amber); doc.rect(ML, y, 2, ROW_H, 'F');
+        }
         cx = ML+3;
-        cells.forEach((cell, ci) => {
+        row.querySelectorAll('td').forEach((cell,ci)=>{
           const valEl = cell.querySelector('.val');
-          let txt = (valEl ? valEl.textContent : cell.textContent).trim().substring(0,42);
-          const cls = valEl?.className || '';
-          const rgb = cls.includes('flag-high') ? C.red : cls.includes('flag-med') ? C.amber : cls.includes('flag-ok') ? C.teal : C.text;
-          setColor(rgb);
-          doc.setFont('helvetica', ci===1?'bold':'normal'); doc.setFontSize(7.5);
-          doc.text(txt, cx, y+4.5, {maxWidth: colW[ci]-3});
-          cx += colW[ci];
+          const txt   = (valEl?valEl.textContent:cell.textContent).trim().substring(0,42);
+          const cls   = valEl?.className||'';
+          setColor(cls.includes('flag-high')?C.red:cls.includes('flag-med')?C.amber:cls.includes('flag-ok')?C.teal:C.text);
+          doc.setFont('helvetica',ci===1?'bold':'normal'); doc.setFontSize(7.5);
+          doc.text(txt, cx, y+4.5, {maxWidth:colW[ci]-3}); cx+=colW[ci];
         });
-        y += 6.5;
+        y += ROW_H;
       });
-      // Bottom border
-      setDraw(C.border); doc.setLineWidth(0.3); doc.line(ML, y, ML+CW, y);
+      hRule(ML, y, CW, 0.3, C.border);
       y += 8;
     }
 
-    // ── ASYMMETRY INDEX ──
+    // ════════════════════════════════════════════════
+    // ASYMMETRY INDEX
+    // ════════════════════════════════════════════════
     const asiSection = document.getElementById('asiSection');
     if(asiSection && asiSection.style.display !== 'none') {
-      pageGuard(42);
+      const asiCards = [...asiSection.querySelectorAll('.asi-card')];
+      const aCols    = Math.min(asiCards.length, 4);
+      const aW       = (CW-(aCols-1)*4)/aCols;
+      const CARD_H   = 30;
+      guard(SECTION_HEAD_H + CARD_H);
       sectionHead('Limb Symmetry Index', C.purple);
-      const asiCards = asiSection.querySelectorAll('.asi-card');
-      const aCols = Math.min(asiCards.length, 4);
-      const aW = (CW - (aCols-1)*4) / aCols;
       let aCol=0, aRowY=y;
-      asiCards.forEach(card => {
-        const joint  = card.querySelector('.asi-joint')?.textContent?.trim() || '';
-        const vals   = card.querySelector('.asi-values')?.textContent?.trim() || '';
-        const lsi    = card.querySelector('.asi-lsi-val')?.textContent?.trim() || '';
-        const cls    = card.querySelector('.asi-lsi-val')?.className || '';
-        const rgb    = cls.includes('asi-poor') ? C.red : cls.includes('asi-warn') ? C.amber : C.teal;
-        const ax = ML + aCol*(aW+4);
+      asiCards.forEach(card=>{
+        if(aCol===0) { guard(CARD_H); aRowY=y; }
+        const joint = card.querySelector('.asi-joint')?.textContent?.trim()||'';
+        const vals  = card.querySelector('.asi-values')?.textContent?.trim()||'';
+        const lsi   = card.querySelector('.asi-lsi-val')?.textContent?.trim()||'';
+        const cls   = card.querySelector('.asi-lsi-val')?.className||'';
+        const rgb   = cls.includes('asi-poor')?C.red:cls.includes('asi-warn')?C.amber:C.teal;
+        const ax    = ML+aCol*(aW+4);
         setFill(C.white); setDraw(C.border); doc.setLineWidth(0.25);
-        doc.roundedRect(ax, aRowY, aW, 28, 2, 2, 'FD');
-        setFill(rgb); doc.roundedRect(ax, aRowY, aW, 2, 1, 0, 'F');
+        doc.roundedRect(ax,aRowY,aW,CARD_H,2,2,'FD');
+        setFill(rgb); doc.roundedRect(ax,aRowY,aW,2,1,0,'F');
         doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.muted);
-        doc.text(joint.toUpperCase(), ax+aW/2, aRowY+7, {align:'center'});
+        doc.text(joint.toUpperCase(),ax+aW/2,aRowY+8,{align:'center'});
         setColor(rgb); doc.setFont('helvetica','bold'); doc.setFontSize(15);
-        doc.text(lsi, ax+aW/2, aRowY+18, {align:'center'});
+        doc.text(lsi,ax+aW/2,aRowY+19,{align:'center'});
         doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor(C.muted);
-        doc.text(vals.replace(/\s+/g,' '), ax+aW/2, aRowY+25, {align:'center', maxWidth:aW-6});
-        aCol++;
-        if(aCol >= aCols) { aCol=0; aRowY+=32; }
+        doc.text(vals.replace(/\s+/g,' '),ax+aW/2,aRowY+27,{align:'center',maxWidth:aW-6});
+        aCol++; if(aCol>=aCols){aCol=0; y=aRowY+CARD_H+4; aRowY=y;}
       });
-      y = aRowY + (aCol>0?32:0) + 4;
+      if(aCol>0) y = aRowY+CARD_H+4;
+      y += 2;
     }
 
-    // ── PROMS ──
+    // ════════════════════════════════════════════════
+    // PROMS
+    // ════════════════════════════════════════════════
     const promsSection = document.getElementById('promsResultSection');
     if(promsSection && promsSection.style.display !== 'none') {
-      pageGuard(38);
+      const promCards = [...promsSection.querySelectorAll('.prom-result-card')];
+      const pCols     = Math.min(promCards.length, 4);
+      const pW        = (CW-(pCols-1)*4)/pCols;
+      const CARD_H    = 26;
+      guard(SECTION_HEAD_H + CARD_H);
       sectionHead('Patient Reported Outcomes');
-      const promCards = promsSection.querySelectorAll('.prom-result-card');
-      const pCols = Math.min(promCards.length, 4);
-      const pW = (CW - (pCols-1)*4) / pCols;
       let pCol=0, pRowY=y;
-      promCards.forEach(card => {
-        const score  = card.querySelector('.prom-result-score')?.textContent?.trim() || '';
-        const name   = card.querySelector('.prom-result-name')?.textContent?.trim()  || '';
-        const interp = card.querySelector('.prom-result-interp')?.textContent?.trim()|| '';
-        const cls    = card.querySelector('.prom-result-score')?.className || '';
-        const rgb    = cls.includes('score-poor') ? C.red : cls.includes('score-warn') ? C.amber : cls.includes('score-good') ? C.teal : C.navyMid;
-        const px = ML + pCol*(pW+4);
+      promCards.forEach(card=>{
+        if(pCol===0){ guard(CARD_H); pRowY=y; }
+        const score  = card.querySelector('.prom-result-score')?.textContent?.trim()||'';
+        const name   = card.querySelector('.prom-result-name')?.textContent?.trim()||'';
+        const interp = card.querySelector('.prom-result-interp')?.textContent?.trim()||'';
+        const cls    = card.querySelector('.prom-result-score')?.className||'';
+        const rgb    = cls.includes('score-poor')?C.red:cls.includes('score-warn')?C.amber:cls.includes('score-good')?C.teal:C.navyMid;
+        const px     = ML+pCol*(pW+4);
         setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.25);
-        doc.roundedRect(px, pRowY, pW, 24, 2, 2, 'FD');
+        doc.roundedRect(px,pRowY,pW,CARD_H,2,2,'FD');
         setColor(rgb); doc.setFont('helvetica','bold'); doc.setFontSize(13);
-        doc.text(score, px+pW/2, pRowY+11, {align:'center'});
+        doc.text(score,px+pW/2,pRowY+11,{align:'center'});
         doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.navy);
-        doc.text(name, px+pW/2, pRowY+17, {align:'center'});
+        doc.text(name,px+pW/2,pRowY+17,{align:'center'});
         doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor(C.muted);
-        doc.text(interp.substring(0,30), px+pW/2, pRowY+22, {align:'center'});
-        pCol++; if(pCol>=4){pCol=0;pRowY+=28;}
+        doc.text(interp.substring(0,30),px+pW/2,pRowY+23,{align:'center'});
+        pCol++; if(pCol>=pCols){pCol=0; y=pRowY+CARD_H+4; pRowY=y;}
       });
-      y = pRowY + (pCol>0?28:0) + 6;
+      if(pCol>0) y=pRowY+CARD_H+4;
+      y+=2;
     }
 
-    // ── BAR PATH ──
+    // ════════════════════════════════════════════════
+    // BAR PATH
+    // ════════════════════════════════════════════════
     const barSection = document.getElementById('barPathSection');
-    const barImg = document.getElementById('barTraceImg');
-    if(barSection && barSection.style.display !== 'none' && barImg?.src?.startsWith('data:')) {
-      pageGuard(75);
-      sectionHead('Barbell Path Analysis');
-      const bW = CW * 0.52, bH = bW * 0.72;
-      try { doc.addImage(barImg.src, 'JPEG', ML, y, bW, bH); } catch(e){}
-      const statsRows = document.querySelectorAll('#barPathStats table tbody tr');
-      let sy = y + 4;
-      statsRows.forEach(row => {
-        const cells = row.querySelectorAll('td');
-        if(cells.length < 2) return;
-        doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.muted);
-        doc.text(cells[0].textContent.trim(), ML+bW+6, sy);
-        const valEl = cells[1].querySelector('.val');
-        const cls = valEl?.className||'';
-        setColor(cls.includes('flag-high')?C.red:cls.includes('flag-med')?C.amber:C.teal);
-        doc.setFont('helvetica','bold'); doc.setFontSize(9);
-        doc.text(valEl?.textContent?.trim()||cells[1].textContent.trim(), ML+bW+6, sy+5);
-        sy += 14;
-      });
-      y += bH + 8;
-    }
+    const barImgEl   = document.getElementById('barTraceImg');
+    if(barSection && barSection.style.display!=='none' && barImgEl?.src?.startsWith('data:')) {
+      const barJpeg = imgToJpeg(barImgEl, 0.88);
+      if(barJpeg) {
+        // Lay out: image left (55% width), stats right; compute exact height from real aspect
+        const bW      = CW * 0.54;
+        const bH      = bW * barJpeg.aspect;
+        const statsRows = [...document.querySelectorAll('#barPathStats table tbody tr')];
+        const STATS_H   = statsRows.length * 14 + 4;
+        const blockH    = Math.max(bH, STATS_H);
 
-    // ── KEY FINDINGS ──
-    const findings = document.querySelectorAll('.finding');
-    if(findings.length > 0) {
-      pageGuard(40);
-      sectionHead('Key Findings');
-      findings.forEach(f => {
-        pageGuard(18);
-        const dot   = f.querySelector('.finding-dot');
-        const title = f.querySelector('.finding-title')?.textContent?.trim() || '';
-        const detail= f.querySelector('.finding-desc')?.textContent?.trim() || '';
-        const dotCls= dot?.className || '';
-        const rgb   = dotCls.includes('dot-high') ? C.red : dotCls.includes('dot-med') ? C.amber : C.teal;
-        const boxH  = Math.max(10, doc.splitTextToSize(detail||' ', CW-14).length * 4.5 + 8);
-        setFill([...rgb.map((v,i)=>Math.min(255, v + [220,230,220][i]))]);
-        setFill(rgb===C.red ? [252,235,232] : rgb===C.amber ? [255,248,232] : C.tealPale);
-        setDraw(rgb); doc.setLineWidth(0.4);
-        doc.roundedRect(ML, y, CW, boxH, 1.5, 1.5, 'FD');
-        setFill(rgb); doc.roundedRect(ML, y, 3, boxH, 1, 0, 'F');
-        doc.setFont('helvetica','bold'); doc.setFontSize(8.5); setColor(C.text);
-        doc.text(title, ML+6, y+5.5);
-        if(detail) {
+        guard(SECTION_HEAD_H + blockH + 4);
+        sectionHead('Barbell Path Analysis');
+
+        // Draw image at correct aspect
+        setDraw(C.border); doc.setLineWidth(0.25);
+        doc.roundedRect(ML, y, bW, bH, 1, 1, 'D');
+        doc.addImage(barJpeg.data, 'JPEG', ML, y, bW, bH);
+
+        // Stats column
+        let sy = y + 4;
+        statsRows.forEach(row=>{
+          const cells = row.querySelectorAll('td');
+          if(cells.length<2) return;
           doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.muted);
-          const dLines = doc.splitTextToSize(detail, CW-10);
-          dLines.forEach((l,li) => doc.text(l, ML+6, y+10+li*4.5));
-        }
-        y += boxH + 3;
-      });
-      y += 3;
+          doc.text(cells[0].textContent.trim(), ML+bW+6, sy);
+          const valEl = cells[1].querySelector('.val');
+          const cls   = valEl?.className||'';
+          setColor(cls.includes('flag-high')?C.red:cls.includes('flag-med')?C.amber:C.teal);
+          doc.setFont('helvetica','bold'); doc.setFontSize(9);
+          doc.text(valEl?.textContent?.trim()||cells[1].textContent.trim(), ML+bW+6, sy+5);
+          sy += 14;
+        });
+        y += blockH + 8;
+      }
     }
 
-    // ── BIOMECHANICAL ANALYSIS ──
+    // ════════════════════════════════════════════════
+    // KEY FINDINGS
+    // ════════════════════════════════════════════════
+    const findings = [...document.querySelectorAll('.finding')];
+    if(findings.length>0) {
+      guard(SECTION_HEAD_H + 20);
+      sectionHead('Key Findings');
+      findings.forEach(f=>{
+        const dot    = f.querySelector('.finding-dot');
+        const title  = f.querySelector('.finding-title')?.textContent?.trim()||'';
+        const detail = f.querySelector('.finding-desc')?.textContent?.trim()||'';
+        const dotCls = dot?.className||'';
+        const rgb    = dotCls.includes('dot-high')?C.red:dotCls.includes('dot-med')?C.amber:C.teal;
+        const dLines = detail ? doc.splitTextToSize(detail, CW-12) : [];
+        const boxH   = Math.max(11, dLines.length*4.5+10);
+        guard(boxH+3);
+        setFill(rgb===C.red?[252,235,232]:rgb===C.amber?[255,248,232]:C.tealPale);
+        setDraw(rgb); doc.setLineWidth(0.4);
+        doc.roundedRect(ML,y,CW,boxH,1.5,1.5,'FD');
+        setFill(rgb); doc.roundedRect(ML,y,3,boxH,1,0,'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(8.5); setColor(C.text);
+        doc.text(title, ML+6, y+6);
+        if(dLines.length) {
+          doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.muted);
+          dLines.forEach((l,li)=>doc.text(l,ML+6,y+11+li*4.5));
+        }
+        y += boxH+3;
+      });
+      y += 2;
+    }
+
+    // ════════════════════════════════════════════════
+    // BIOMECHANICAL ANALYSIS
+    // ════════════════════════════════════════════════
     const bioEl = document.querySelector('.report-section.full .narrative');
     if(bioEl?.textContent?.trim()) {
-      pageGuard(35);
+      guard(SECTION_HEAD_H+20);
       sectionHead('Biomechanical Analysis');
       bodyText(bioEl.textContent.trim());
     }
 
-    // ── CLINICAL IMPRESSIONS ──
+    // ════════════════════════════════════════════════
+    // CLINICAL IMPRESSIONS
+    // ════════════════════════════════════════════════
     const allNarratives = document.querySelectorAll('.narrative');
-    if(allNarratives.length > 1 && allNarratives[1]?.textContent?.trim()) {
-      pageGuard(35);
+    if(allNarratives.length>1 && allNarratives[1]?.textContent?.trim()) {
+      guard(SECTION_HEAD_H+20);
       sectionHead('Clinical Impressions');
       bodyText(allNarratives[1].textContent.trim());
     }
 
-    // ── RECOMMENDATIONS ──
-    const recs = document.querySelectorAll('.rec-item');
-    if(recs.length > 0) {
-      pageGuard(40);
+    // ════════════════════════════════════════════════
+    // RECOMMENDATIONS
+    // ════════════════════════════════════════════════
+    const recs = [...document.querySelectorAll('.rec-item')];
+    if(recs.length>0) {
+      guard(SECTION_HEAD_H+20);
       sectionHead('Clinical Recommendations');
-      recs.forEach((rec, i) => {
-        pageGuard(18);
-        const txt = rec.querySelector('.rec-text')?.textContent?.trim() || '';
-        const lines = doc.splitTextToSize(txt, CW-14);
-        const boxH = Math.max(9, lines.length*4.8 + 5);
+      recs.forEach((rec,i)=>{
+        const txt    = rec.querySelector('.rec-text')?.textContent?.trim()||'';
+        const lines  = doc.splitTextToSize(txt, CW-14);
+        const boxH   = Math.max(10, lines.length*4.8+6);
+        guard(boxH+3);
         setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.25);
-        doc.roundedRect(ML, y, CW, boxH, 1.5, 1.5, 'FD');
-        // Number badge
-        setFill(C.teal); doc.circle(ML+5, y+boxH/2, 3.5, 'F');
+        doc.roundedRect(ML,y,CW,boxH,1.5,1.5,'FD');
+        setFill(C.teal); doc.circle(ML+5,y+boxH/2,3.5,'F');
         doc.setFont('helvetica','bold'); doc.setFontSize(7.5); setColor(C.white);
-        doc.text(String(i+1), ML+5, y+boxH/2+2.5, {align:'center'});
-        // Text
+        doc.text(String(i+1),ML+5,y+boxH/2+2.5,{align:'center'});
         doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(C.text);
-        lines.forEach((l,li) => doc.text(l, ML+12, y+5+li*4.8));
-        y += boxH + 3;
+        lines.forEach((l,li)=>doc.text(l,ML+12,y+5+li*4.8));
+        y += boxH+3;
       });
       y += 3;
     }
 
-    // ── PATIENT EDUCATION ──
-    const eduItems = document.querySelectorAll('.edu-item');
-    if(eduItems.length > 0) {
-      pageGuard(35);
+    // ════════════════════════════════════════════════
+    // PATIENT EDUCATION
+    // ════════════════════════════════════════════════
+    const eduItems = [...document.querySelectorAll('.edu-item')];
+    if(eduItems.length>0) {
+      guard(SECTION_HEAD_H+16);
       sectionHead('Patient Education');
-      eduItems.forEach(edu => {
-        const txt = edu.querySelector('.edu-text')?.textContent?.trim() || '';
+      eduItems.forEach(edu=>{
+        const txt = edu.querySelector('.edu-text')?.textContent?.trim()||'';
         if(!txt) return;
-        pageGuard(16);
         const lines = doc.splitTextToSize(txt, CW-10);
-        const boxH = lines.length*4.8 + 7;
+        const boxH  = lines.length*4.8+8;
+        guard(boxH+3);
         setFill(C.tealPale); setDraw(C.teal); doc.setLineWidth(0.3);
-        doc.roundedRect(ML, y, CW, boxH, 2, 2, 'FD');
+        doc.roundedRect(ML,y,CW,boxH,2,2,'FD');
         doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(C.teal);
-        lines.forEach((l,li) => doc.text(l, ML+5, y+5.5+li*4.8));
-        y += boxH + 3;
+        lines.forEach((l,li)=>doc.text(l,ML+5,y+6+li*4.8));
+        y+=boxH+3;
       });
     }
 
-    // ── FOOTER on every page ──
+    // ════════════════════════════════════════════════
+    // FOOTER — every page
+    // ════════════════════════════════════════════════
     const totalPages = doc.getNumberOfPages();
-    for(let p = 1; p <= totalPages; p++) {
+    for(let p=1;p<=totalPages;p++) {
       doc.setPage(p);
-      // Footer band
-      setFill(C.navy); doc.rect(0, PH-11, PW, 11, 'F');
-      setFill(C.teal); doc.rect(0, PH-11, PW, 1, 'F');
+      setFill(C.navy); doc.rect(0,PH-FOOTER_H,PW,FOOTER_H,'F');
+      setFill(C.teal); doc.rect(0,PH-FOOTER_H,PW,1,'F');
       doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor([143,165,192]);
-      const footLeft = [brand.practice, brand.clinician].filter(Boolean).join('  ·  ');
-      doc.text(footLeft || 'MotionRx Clinical Report', ML, PH-4);
+      doc.text([brand.practice,brand.clinician].filter(Boolean).join('  ·  ')||'MotionRx', ML, PH-4);
       setColor(C.tealMid); doc.setFont('helvetica','bold'); doc.setFontSize(6.5);
       doc.text(`${p} / ${totalPages}`, PW/2, PH-4, {align:'center'});
       doc.setFont('helvetica','normal'); setColor([143,165,192]);
@@ -4802,12 +4845,11 @@ async function exportPDF() {
     }
 
     // ── SAVE ──
-    const patientName = document.getElementById('patientName').value.trim() || 'Patient';
-    const safeDate = now.replace(/[, ]+/g,'-');
-    doc.save(`MotionRx_${patientName.replace(/\s+/g,'_')}_${safeDate}.pdf`);
+    const patientName = document.getElementById('patientName').value.trim()||'Patient';
+    doc.save(`MotionRx_${patientName.replace(/\s+/g,'_')}_${now.replace(/[, ]+/g,'-')}.pdf`);
 
   } catch(err) {
-    alert('PDF generation failed: ' + err.message);
+    alert('PDF generation failed: '+err.message);
     console.error(err);
   } finally {
     btn.textContent = origText;
