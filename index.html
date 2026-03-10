@@ -51,6 +51,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .upload-zone{border:2px dashed var(--border);border-radius:8px;padding:36px 20px;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg);position:relative}
 .upload-zone:hover,.upload-zone.drag-over{border-color:var(--teal);background:var(--teal-light)}
 .upload-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.upload-zone-secondary{padding:24px 16px;border-style:dashed;opacity:.85}
+.upload-zone-secondary:hover{opacity:1}
 .upload-icon{font-size:2rem;margin-bottom:10px;display:block}
 .upload-title{font-size:.9rem;font-weight:600;color:var(--navy);margin-bottom:4px}
 .upload-sub{font-size:.78rem;color:var(--muted);line-height:1.5}
@@ -358,53 +360,108 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="card no-mb">
         <div class="card-header">
           <div class="card-header-icon">🎬</div>
-          <div><h2>Media Upload</h2><p>Video (up to 8 frames analyzed) or still image</p></div>
+          <div><h2>Media Upload</h2><p>Upload one video or add a second angle for dual-plane analysis</p></div>
         </div>
 
-        <div id="uploadZone" class="upload-zone">
-          <input type="file" id="fileInput" accept="video/*,image/*">
-          <span class="upload-icon">📁</span>
-          <div class="upload-title">Drop file here or click to browse</div>
-          <div class="upload-sub">MP4, MOV, AVI · JPG, PNG</div>
-        </div>
-        <!-- Camera view selector -->
-        <div style="margin-top:12px;">
-          <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">Camera View Angle</div>
-          <div style="display:flex;gap:8px;">
-            <button type="button" class="view-btn active" id="viewSide" onclick="setCameraView('side',this)" title="Camera positioned to the side — best for hip hinge, squat depth, bar path vertical drift">
-              <span class="view-btn-icon">◀▶</span><span>Side View</span>
-            </button>
-            <button type="button" class="view-btn" id="viewFront" onclick="setCameraView('front',this)" title="Camera facing the patient — best for frontal plane, knee valgus, lateral symmetry">
-              <span class="view-btn-icon">👁</span><span>Front View</span>
-            </button>
-            <button type="button" class="view-btn" id="viewPost" onclick="setCameraView('posterior',this)" title="Camera behind the patient — best for posterior chain, spinal alignment, hip drop">
-              <span class="view-btn-icon">↩</span><span>Posterior View</span>
-            </button>
+        <!-- Dual upload grid -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+
+          <!-- PRIMARY VIDEO -->
+          <div>
+            <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">
+              Primary View <span style="color:var(--teal);font-weight:700;">Required</span>
+            </div>
+            <div id="uploadZone" class="upload-zone">
+              <input type="file" id="fileInput" accept="video/*,image/*">
+              <span class="upload-icon">📁</span>
+              <div class="upload-title">Drop file or click to browse</div>
+              <div class="upload-sub">MP4, MOV, AVI · JPG, PNG</div>
+            </div>
+            <!-- View selector for primary -->
+            <div style="margin-top:8px;">
+              <div style="font-size:.68rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:5px;">Camera Angle</div>
+              <div style="display:flex;gap:6px;">
+                <button type="button" class="view-btn active" id="viewSide" onclick="setCameraView('side',this)" title="Side view — sagittal plane">
+                  <span class="view-btn-icon">◀▶</span><span>Side</span>
+                </button>
+                <button type="button" class="view-btn" id="viewFront" onclick="setCameraView('front',this)" title="Front view — frontal plane">
+                  <span class="view-btn-icon">👁</span><span>Front</span>
+                </button>
+                <button type="button" class="view-btn" id="viewPost" onclick="setCameraView('posterior',this)" title="Posterior view">
+                  <span class="view-btn-icon">↩</span><span>Post.</span>
+                </button>
+              </div>
+              <div id="viewHint" style="font-size:.68rem;color:var(--teal);margin-top:4px;line-height:1.4;">
+                📐 Side: sagittal plane — hip hinge, squat depth, bar path
+              </div>
+            </div>
+            <div class="file-preview" id="filePreview">
+              <div class="preview-wrap" id="previewWrap"></div>
+              <div class="preview-actions">
+                <span class="preview-filename" id="previewFilename"></span>
+                <button class="btn-link" onclick="resetUpload()">Remove</button>
+              </div>
+              <div class="frame-status" id="frameStatus">
+                <span id="frameStatusText">Processing...</span>
+                <div class="frame-bar"><div class="frame-bar-fill" id="frameBarFill" style="width:0%"></div></div>
+              </div>
+            </div>
           </div>
-          <div id="viewHint" style="font-size:.72rem;color:var(--teal);margin-top:5px;line-height:1.4;">
-            📐 Side view: optimal for sagittal plane analysis — hip hinge depth, bar path vertical drift, trunk lean
+
+          <!-- SECONDARY VIDEO -->
+          <div>
+            <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">
+              Second Angle <span style="color:var(--muted);font-weight:400;font-size:.68rem;">(Optional — improves accuracy)</span>
+            </div>
+            <div id="uploadZone2" class="upload-zone upload-zone-secondary" id="uploadZone2">
+              <input type="file" id="fileInput2" accept="video/*,image/*">
+              <span class="upload-icon" style="font-size:1.4rem;opacity:.5;">➕</span>
+              <div class="upload-title" style="font-size:.82rem;opacity:.7;">Add second camera angle</div>
+              <div class="upload-sub">Front, posterior, or opposite side</div>
+            </div>
+            <!-- View selector for secondary (hidden until file added) -->
+            <div id="view2Selector" style="margin-top:8px;display:none;">
+              <div style="font-size:.68rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:5px;">Camera Angle</div>
+              <div style="display:flex;gap:6px;">
+                <button type="button" class="view-btn" id="view2Side" onclick="setCameraView2('side',this)" title="Side view">
+                  <span class="view-btn-icon">◀▶</span><span>Side</span>
+                </button>
+                <button type="button" class="view-btn active" id="view2Front" onclick="setCameraView2('front',this)" title="Front view">
+                  <span class="view-btn-icon">👁</span><span>Front</span>
+                </button>
+                <button type="button" class="view-btn" id="view2Post" onclick="setCameraView2('posterior',this)" title="Posterior view">
+                  <span class="view-btn-icon">↩</span><span>Post.</span>
+                </button>
+              </div>
+              <div id="viewHint2" style="font-size:.68rem;color:var(--teal);margin-top:4px;line-height:1.4;">
+                📐 Front: frontal plane — valgus, pelvic tilt, symmetry
+              </div>
+            </div>
+            <div class="file-preview" id="filePreview2">
+              <div class="preview-wrap" id="previewWrap2"></div>
+              <div class="preview-actions">
+                <span class="preview-filename" id="previewFilename2"></span>
+                <button class="btn-link" onclick="resetUpload2()">Remove</button>
+              </div>
+              <div class="frame-status" id="frameStatus2">
+                <span id="frameStatusText2">Processing...</span>
+                <div class="frame-bar"><div class="frame-bar-fill" id="frameBarFill2" style="width:0%"></div></div>
+              </div>
+            </div>
           </div>
+
         </div>
 
-        <button type="button" onclick="showGuide()" style="margin-top:10px;display:flex;align-items:center;gap:6px;background:var(--navy-light);border:1px solid var(--border);border-radius:6px;padding:7px 14px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:500;color:var(--navy-mid);cursor:pointer;width:100%;justify-content:center;transition:all .15s;" onmouseover="this.style.background='var(--teal-light)';this.style.borderColor='var(--teal)';this.style.color='var(--teal)'" onmouseout="this.style.background='var(--navy-light)';this.style.borderColor='var(--border)';this.style.color='var(--navy-mid)'">
+        <!-- Dual-view benefit callout — shown when second video is added -->
+        <div id="dualViewBadge" style="display:none;background:linear-gradient(135deg,var(--teal-light),var(--navy-light));border:1px solid var(--teal);border-radius:8px;padding:10px 14px;font-size:.78rem;color:var(--navy);margin-bottom:12px;">
+          <strong style="color:var(--teal);">✦ Dual-plane analysis active</strong> — MediaPipe will run on both videos independently. Sagittal angles from <strong id="dualPrimaryLabel">side view</strong>, frontal plane angles from <strong id="dualSecondaryLabel">front view</strong>. Results merged for higher accuracy.
+        </div>
+
+        <button type="button" onclick="showGuide()" style="margin-bottom:12px;display:flex;align-items:center;gap:6px;background:var(--navy-light);border:1px solid var(--border);border-radius:6px;padding:7px 14px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:500;color:var(--navy-mid);cursor:pointer;width:100%;justify-content:center;transition:all .15s;" onmouseover="this.style.background='var(--teal-light)';this.style.borderColor='var(--teal)';this.style.color='var(--teal)'" onmouseout="this.style.background='var(--navy-light)';this.style.borderColor='var(--border)';this.style.color='var(--navy-mid)'">
           💡 View camera setup tips for best tracking accuracy
         </button>
 
-        <div class="file-preview" id="filePreview">
-          <div class="preview-wrap" id="previewWrap"></div>
-          <div class="preview-actions">
-            <span class="preview-filename" id="previewFilename"></span>
-            <button class="btn-link" onclick="resetUpload()">Remove</button>
-          </div>
-          <div class="frame-status" id="frameStatus">
-            <span id="frameStatusText">Processing...</span>
-            <div class="frame-bar"><div class="frame-bar-fill" id="frameBarFill" style="width:0%"></div></div>
-          </div>
-
-          </div>
-        </div>
-
-        <div style="margin-top:20px;">
+        <div style="margin-top:8px;">
           <div class="card-header" style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);">
             <div class="card-header-icon">🎯</div>
             <div><h2>Analysis Focus Areas</h2><p>Select all that apply</p></div>
@@ -422,7 +479,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </div>
         </div>
       </div>
-    </div>
+
 
     <!-- Practice Branding -->
     <div class="card" style="margin-bottom:16px;">
@@ -576,6 +633,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="step-list">
       <div class="step-item active" id="s1"><div class="step-icon">✓</div> Extracting video frames</div>
       <div class="step-item" id="s2"><div class="step-icon">✓</div> Running MediaPipe pose detection</div>
+      <div class="step-item" id="s2b" style="display:none;"><div class="step-icon">✓</div> Processing second camera angle</div>
       <div class="step-item" id="s3"><div class="step-icon">✓</div> Calculating joint angles</div>
       <div class="step-item" id="s4"><div class="step-icon">✓</div> Sending to Claude AI for clinical analysis</div>
       <div class="step-item" id="s5"><div class="step-icon">✓</div> Compiling report</div>
@@ -699,6 +757,13 @@ let aggregated = {};  // module-level so always in scope
 let cameraView = 'side'; // 'side' | 'front' | 'posterior'
 let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
+
+// ── Second video state ──
+let uploadedFile2 = null, fileType2 = null;
+let extractedFrames2 = [];
+let cameraView2 = 'front'; // default second angle to front
+let rawBarPoints2 = [];
+let barTrackingFrames2 = [];
 let barTrackingFrames = []; // higher-density frames for bar path only
 let rawBarPoints = [];      // full-density bar path points {x,y,confidence,t}
 let barReferenceFrame = null;  // base64 of first bar-tracking frame for visualization
@@ -1211,6 +1276,103 @@ function resetUpload() {
   document.getElementById('frameStatus').classList.remove('visible');
 }
 
+// ── Second video file input ──
+const fileInput2 = document.getElementById('fileInput2');
+if(fileInput2) {
+  fileInput2.addEventListener('change', e => { if(e.target.files[0]) handleFile2(e.target.files[0]); });
+}
+const uploadZone2 = document.getElementById('uploadZone2');
+if(uploadZone2) {
+  uploadZone2.addEventListener('dragover', e => { e.preventDefault(); uploadZone2.classList.add('drag-over'); });
+  uploadZone2.addEventListener('dragleave', () => uploadZone2.classList.remove('drag-over'));
+  uploadZone2.addEventListener('drop', e => {
+    e.preventDefault(); uploadZone2.classList.remove('drag-over');
+    if(e.dataTransfer.files[0]) handleFile2(e.dataTransfer.files[0]);
+  });
+}
+
+// ── Frame extraction for second video (mirrors primary, uses *2 state) ──
+async function startFrameExtraction2(file, vid) {
+  const statusEl   = document.getElementById('frameStatus2');
+  const statusText = document.getElementById('frameStatusText2');
+  const barFill    = document.getElementById('frameBarFill2');
+  statusEl.classList.add('visible');
+  statusText.textContent = 'Loading video...';
+  barFill.style.width = '5%';
+
+  let started = false;
+
+  async function doExtract2() {
+    if(started) return; started = true;
+    const dur = vid.duration;
+    if(!dur || !isFinite(dur) || dur === 0) {
+      // Fallback: play capture
+      vid.muted = true;
+      try {
+        await vid.play();
+        await new Promise(r => setTimeout(r, 700));
+        vid.pause();
+        const b64 = captureFrameFromVideo(vid);
+        if(b64) {
+          extractedFrames2 = [{imageData: b64}];
+          barFill.style.width = '100%';
+          statusText.textContent = '✓ Frame captured';
+        }
+      } catch(e) { statusText.textContent = '⚠️ Could not capture frame'; }
+      return;
+    }
+
+    const movement = document.getElementById('movementType').value || '';
+    const {times: phaseTimeProportions, labels: phaseLabels} = getPhaseTimes(movement, dur);
+    const times = phaseTimeProportions.map(t => t * dur);
+    statusText.textContent = `Extracting ${times.length} frames...`;
+    const frames = [];
+    for(let i = 0; i < times.length; i++) {
+      const b64 = await seekCapture2(vid, Math.max(0.05, times[i]));
+      if(b64) frames.push({imageData: b64, phase: phaseLabels[i]});
+      barFill.style.width = `${Math.round(((i+1)/times.length)*90)}%`;
+    }
+    if(frames.length > 0) {
+      extractedFrames2 = frames;
+      barFill.style.width = '100%';
+      statusText.textContent = `✓ ${frames.length} frames (${cameraView2} view) — ready`;
+    } else {
+      statusText.textContent = '⚠️ Frame extraction failed';
+    }
+  }
+
+  vid.addEventListener('loadedmetadata', doExtract2);
+  vid.addEventListener('canplay', doExtract2);
+  vid.addEventListener('canplaythrough', doExtract2);
+  setTimeout(async () => {
+    if(extractedFrames2.length === 0 && !started) {
+      started = true;
+      vid.muted = true;
+      try {
+        await vid.play(); await new Promise(r => setTimeout(r, 700)); vid.pause();
+        const b64 = captureFrameFromVideo(vid);
+        if(b64) { extractedFrames2 = [{imageData: b64}]; barFill.style.width='100%'; statusText.textContent='✓ Frame captured'; }
+      } catch(e) {}
+    }
+  }, 8000);
+  vid.addEventListener('error', () => { statusText.textContent = '⚠️ Video format not supported'; });
+}
+
+// Seek capture for second video (separate event listener instance)
+function seekCapture2(vid, t) {
+  return new Promise(resolve => {
+    let done = false;
+    const timer = setTimeout(() => { if(!done){done=true;resolve(null);} }, 5000);
+    const onSeeked = () => {
+      if(done) return; done=true; clearTimeout(timer);
+      vid.removeEventListener('seeked', onSeeked);
+      resolve(captureFrameFromVideo(vid));
+    };
+    vid.addEventListener('seeked', onSeeked);
+    try { vid.currentTime = t; } catch(e) { resolve(null); }
+  });
+}
+
 // ── Focus chips ──
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.focus-chip').forEach(chip => {
@@ -1227,6 +1389,7 @@ function resetAll() {
   document.getElementById('resultsSection').style.display='none';
   document.getElementById('inputSection').style.display='block';
   resetUpload();
+  resetUpload2();
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -3356,6 +3519,83 @@ async function runAnalysis() {
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
 
+  // ── Stage 3b: Second video pipeline (if uploaded) ──
+  let annotatedFrames2 = [];
+  let allAngles2 = [];
+  let aggregated2 = {};
+  let angleLines2 = '';
+  const hasDualView = uploadedFile2 && extractedFrames2.length > 0;
+
+  if(hasDualView) {
+    const s2b = document.getElementById('s2b');
+    if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
+    console.log('[Analysis] Stage 3b: Running second video pipeline');
+    if(mpReady && poseInstance) {
+      const mpResults2 = await runMediaPipeOnFrames(extractedFrames2);
+      const fusedLandmarks2 = await fusedLandmarkPipeline(
+        mpResults2,
+        extractedFrames2.map(f => f.imageData),
+        movement
+      );
+      const fusedResults2 = fusedLandmarks2.map((lms, i) => ({
+        poseLandmarks: lms,
+        _raw: mpResults2[i]
+      }));
+      for(let i = 0; i < extractedFrames2.length; i++) {
+        const frame = extractedFrames2[i];
+        const mpResult = fusedResults2[i];
+        const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null);
+        annotatedFrames2.push({base64, canvas, phase: frame.phase});
+        if(mpResult && mpResult.poseLandmarks) {
+          allAngles2.push(extractAngles(mpResult.poseLandmarks));
+        }
+      }
+    } else {
+      annotatedFrames2 = extractedFrames2.map(f => ({base64: f.imageData, canvas: null}));
+    }
+    aggregated2 = allAngles2.length > 0 ? aggregateAngles(allAngles2) : {};
+    angleLines2 = Object.entries(aggregated2).map(([k,v]) =>
+      `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles2.length} frames)`
+    ).join('\n');
+    console.log('[Analysis] Stage 3b complete:', Object.keys(aggregated2).length, 'angles from second view');
+  }
+
+  // ── Merge angles: prefer sagittal-dominant angles from side view, frontal from front/posterior ──
+  // Sagittal-dominant: hip flexion, knee flexion, ankle DF, trunk lean, elbow
+  // Frontal-dominant: hip abduction, valgus, pelvic tilt, shoulder abduction
+  const SAGITTAL_ANGLES = ['Hip Flexion','Knee Flexion','Ankle Dorsiflexion','Trunk Lean','Elbow Flexion','Shoulder Flexion'];
+  const FRONTAL_ANGLES  = ['Hip Abduction','Knee Valgus','Pelvic Tilt','Shoulder Abduction','Trunk Lateral Lean'];
+
+  let mergedAggregated = {...aggregated};
+  let mergeNotes = [];
+
+  if(hasDualView && Object.keys(aggregated2).length > 0) {
+    const sideIsFrontal = (cameraView === 'front' || cameraView === 'posterior');
+    const primaryAgg   = sideIsFrontal ? aggregated2 : aggregated;   // sagittal-best
+    const secondaryAgg = sideIsFrontal ? aggregated  : aggregated2;  // frontal-best
+    const primaryView  = sideIsFrontal ? cameraView2 : cameraView;
+    const secondView   = sideIsFrontal ? cameraView  : cameraView2;
+
+    // Start with all angles from sagittal view
+    mergedAggregated = {...primaryAgg};
+    // Override with frontal-dominant angles from the frontal view
+    Object.keys(secondaryAgg).forEach(key => {
+      const isFrontal = FRONTAL_ANGLES.some(f => key.toLowerCase().includes(f.toLowerCase()));
+      if(isFrontal) {
+        mergedAggregated[key] = secondaryAgg[key];
+        mergeNotes.push(`${key} from ${secondView} view`);
+      }
+    });
+    // Add any angles only present in secondary
+    Object.keys(secondaryAgg).forEach(key => {
+      if(!(key in mergedAggregated)) {
+        mergedAggregated[key] = secondaryAgg[key];
+      }
+    });
+    aggregated = mergedAggregated;
+    console.log('[Analysis] Dual-view merge complete. Frontal overrides:', mergeNotes.length);
+  }
+
   // Bar path stats
   const smoothedBarPoints = barPoints.length >= 3 ? smoothBarPoints(barPoints) : barPoints;
   const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, cameraView, movement) : null;
@@ -3363,21 +3603,35 @@ async function runAnalysis() {
     ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}`
     : '';
 
-  // Step 4: Send up to 8 annotated frames to Claude
-  const framesToSend = annotatedFrames.slice(0, 8);
-  const frameCount = framesToSend.length;
+  // Step 4: Send up to 8 annotated frames to Claude (up to 4 per view if dual)
+  const maxPerView = hasDualView ? 4 : 8;
+  const framesToSend  = annotatedFrames.slice(0, maxPerView);
+  const framesToSend2 = hasDualView ? annotatedFrames2.slice(0, maxPerView) : [];
+  const frameCount = framesToSend.length + framesToSend2.length;
+
+  const view1Label = cameraView === 'side' ? 'Side view (sagittal plane)' : cameraView === 'front' ? 'Front view (frontal plane)' : 'Posterior view';
+  const view2Label = cameraView2 === 'side' ? 'Side view (sagittal plane)' : cameraView2 === 'front' ? 'Front view (frontal plane)' : 'Posterior view';
+
+  const dualViewNote = hasDualView
+    ? `DUAL-PLANE ANALYSIS: Two camera angles were captured. Images 1–${framesToSend.length} are from the ${view1Label}; images ${framesToSend.length+1}–${frameCount} are from the ${view2Label}. Angles have been merged: sagittal-plane measurements (hip/knee flexion, trunk lean) taken from the most appropriate view, frontal-plane measurements (valgus, pelvic tilt, symmetry) from the other. Use both sets of frames to give a more complete 3D movement picture than a single-view analysis allows.`
+    : `CAMERA VIEW: ${view1Label}`;
+
+  const mergedAngleLines = Object.entries(aggregated).map(([k,v]) =>
+    `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}°)${hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : ''}`
+  ).join('\n');
 
   const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay: cyan joints/lines = high confidence, orange joints = estimated position (body was partially occluded, e.g. by a barbell), dashed lines = low confidence segment. A red dot labeled BAR marks the detected barbell position where applicable.
 
 PATIENT: ${patientName}${age ? `, Age ${age}` : ''}
 DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
 MOVEMENT ASSESSED: ${movement}
-CAMERA VIEW: ${cameraView === 'side' ? 'Side view (sagittal plane)' : cameraView === 'front' ? 'Front view (frontal plane)' : 'Posterior view (posterior frontal plane)'}
+${dualViewNote}
 CLINICAL FOCUS: ${focusText}
 ${notes ? `CLINICAL NOTES: ${notes}` : ''}
 ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
-${angleLines ? `MEASURED JOINT ANGLES (MediaPipe across all frames):\n${angleLines}` : ''}
+${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
+${hasDualView && angleLines2 ? `\nSECOND VIEW ANGLES (${view2Label}):\n${angleLines2}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
 ${asiToPromptText(aggregated) ? `\n${asiToPromptText(aggregated)}` : ''}
 ${promsToPromptText(collectPROMs()) ? `\n${promsToPromptText(collectPROMs())}` : ''}
@@ -3390,8 +3644,9 @@ ${(() => {
 })()}
 
 OCCLUSION NOTE: Where orange or dashed skeleton segments appear, the barbell was obscuring the body. Use the surrounding landmark positions and the measured angle data to make clinically informed inferences about those positions rather than ignoring them.
+${hasDualView ? '\nDUAL-VIEW ADVANTAGE: With two camera angles you can identify frontal-plane issues (pelvic drop, knee valgus, lateral trunk lean, foot progression) that are invisible from a single sagittal view. Use both views actively in your analysis.' : ''}
 
-Use all available data — skeleton overlays, joint angles${barStats ? ', and bar path deviation' : ''} — for a precise, data-driven clinical report. Reference specific measurements throughout.
+Use all available data — skeleton overlays, joint angles${barStats ? ', and bar path deviation' : ''}${hasDualView ? ', and both camera perspectives' : ''} — for a precise, data-driven clinical report. Reference specific measurements throughout.
 
 Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
 {
@@ -3410,6 +3665,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
   try {
     const content = [
       ...framesToSend.map(f => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:f.base64}})),
+      ...framesToSend2.map(f => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:f.base64}})),
       {type:'text', text:prompt}
     ];
 
@@ -3458,31 +3714,48 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     const now = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
     document.getElementById('reportSubtitle').textContent =
-      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${cameraView === 'side' ? 'Side view' : cameraView === 'front' ? 'Front view' : 'Posterior view'} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0?'MediaPipe tracked':'Visual analysis'}`;
+      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${hasDualView ? `Dual-plane (${view1Label.split(' (')[0]} + ${view2Label.split(' (')[0]})` : (cameraView === 'side' ? 'Side view' : cameraView === 'front' ? 'Front view' : 'Posterior view')} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0?'MediaPipe tracked':'Visual analysis'}`;
 
     // Render skeleton frames gallery
     if(annotatedFrames.length > 0) {
       const gallery = document.getElementById('framesGallery');
       gallery.innerHTML = '';
-      annotatedFrames.forEach((f,i) => {
-        const card = document.createElement('div');
-        card.className = 'frame-card';
-        const imgWrap = document.createElement('div');
-        imgWrap.className = 'frame-card-img';
-        const img = document.createElement('img');
-        img.src = 'data:image/jpeg;base64,' + f.base64;
-        img.style.cssText = 'width:100%;height:auto;display:block;';
-        img.onclick = () => openLightbox(i);
-        imgWrap.appendChild(img);
-        const lbl = document.createElement('div');
-        lbl.className = 'frame-label';
-        const phase = extractedFrames[i]?.phase;
-        const phaseId = phase?.id || 'frame';
-        const phaseLabel = phase?.label || `Frame ${i+1}`;
-        lbl.innerHTML = `<span>${phaseLabel}</span><span class="phase-badge phase-${phaseId}">${phaseId === 'frame' ? '#'+(i+1) : phase?.desc || ''}</span>`;
-        card.appendChild(imgWrap); card.appendChild(lbl);
-        gallery.appendChild(card);
-      });
+
+      // Helper to render a set of frames with an optional view label header
+      const renderFrameSet = (frames, sourceFrames, viewLabel, offset) => {
+        if(viewLabel) {
+          const header = document.createElement('div');
+          header.style.cssText = 'width:100%;font-size:.72rem;font-weight:700;color:var(--teal);letter-spacing:.07em;text-transform:uppercase;padding:6px 2px 4px;border-bottom:1px solid var(--teal-light);margin-bottom:4px;';
+          header.textContent = `📐 ${viewLabel}`;
+          gallery.appendChild(header);
+        }
+        frames.forEach((f,i) => {
+          const card = document.createElement('div');
+          card.className = 'frame-card';
+          const imgWrap = document.createElement('div');
+          imgWrap.className = 'frame-card-img';
+          const img = document.createElement('img');
+          img.src = 'data:image/jpeg;base64,' + f.base64;
+          img.style.cssText = 'width:100%;height:auto;display:block;';
+          img.onclick = () => openLightbox(offset + i);
+          imgWrap.appendChild(img);
+          const lbl = document.createElement('div');
+          lbl.className = 'frame-label';
+          const phase = sourceFrames[i]?.phase;
+          const phaseId = phase?.id || 'frame';
+          const phaseLabel = phase?.label || `Frame ${i+1}`;
+          lbl.innerHTML = `<span>${phaseLabel}</span><span class="phase-badge phase-${phaseId}">${phaseId === 'frame' ? '#'+(i+1) : phase?.desc || ''}</span>`;
+          card.appendChild(imgWrap); card.appendChild(lbl);
+          gallery.appendChild(card);
+        });
+      };
+
+      const dualView = hasDualView && annotatedFrames2.length > 0;
+      renderFrameSet(annotatedFrames, extractedFrames, dualView ? view1Label : null, 0);
+      if(dualView) {
+        renderFrameSet(annotatedFrames2, extractedFrames2, view2Label, annotatedFrames.length);
+      }
+
       document.getElementById('framesSection').style.display='block';
     }
 
@@ -4173,9 +4446,86 @@ const VIEW_HINTS = {
 };
 function setCameraView(view, btn) {
   cameraView = view;
-  document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+  // Only update primary view buttons (those inside #viewSide, #viewFront, #viewPost)
+  ['viewSide','viewFront','viewPost'].forEach(id => {
+    const b = document.getElementById(id);
+    if(b) b.classList.remove('active');
+  });
   btn.classList.add('active');
   document.getElementById('viewHint').textContent = VIEW_HINTS[view] || '';
+}
+
+function setCameraView2(view, btn) {
+  cameraView2 = view;
+  ['view2Side','view2Front','view2Post'].forEach(id => {
+    const b = document.getElementById(id);
+    if(b) b.classList.remove('active');
+  });
+  btn.classList.add('active');
+  const hints = {
+    side: '📐 Side: sagittal plane — hip hinge, squat depth, bar path',
+    front: '📐 Front: frontal plane — valgus, pelvic tilt, symmetry',
+    posterior: '📐 Posterior: hip drop, spinal alignment, foot progression'
+  };
+  const h = document.getElementById('viewHint2');
+  if(h) h.textContent = hints[view] || '';
+  updateDualViewBadge();
+}
+
+function handleFile2(file) {
+  uploadedFile2 = file;
+  fileType2 = file.type.startsWith('image/') ? 'image' : 'video';
+  extractedFrames2 = [];
+
+  document.getElementById('uploadZone2').style.display = 'none';
+  document.getElementById('filePreview2').style.display = 'block';
+  document.getElementById('previewFilename2').textContent = file.name;
+  document.getElementById('view2Selector').style.display = 'block';
+  updateDualViewBadge();
+
+  const wrap = document.getElementById('previewWrap2');
+  wrap.innerHTML = '';
+  const url = URL.createObjectURL(file);
+  const badge = document.createElement('div');
+  badge.className = 'preview-badge';
+
+  if(fileType2 === 'image') {
+    badge.textContent = 'IMAGE';
+    const img = document.createElement('img');
+    img.src = url;
+    img.style.cssText = 'width:100%;max-height:200px;object-fit:contain;display:block;';
+    wrap.appendChild(img); wrap.appendChild(badge);
+    const reader = new FileReader();
+    reader.onload = () => { extractedFrames2 = [{imageData: reader.result.split(',')[1]}]; };
+    reader.readAsDataURL(file);
+  } else {
+    badge.textContent = 'VIDEO';
+    const vid = document.createElement('video');
+    vid.src = url; vid.controls = true; vid.muted = true; vid.playsInline = true;
+    vid.style.cssText = 'width:100%;max-height:200px;object-fit:contain;display:block;';
+    wrap.appendChild(vid); wrap.appendChild(badge);
+    startFrameExtraction2(file, vid);
+  }
+}
+
+function resetUpload2() {
+  uploadedFile2 = null; fileType2 = null; extractedFrames2 = []; rawBarPoints2 = [];
+  const fi2 = document.getElementById('fileInput2');
+  if(fi2) fi2.value = '';
+  document.getElementById('uploadZone2').style.display = 'block';
+  document.getElementById('filePreview2').style.display = 'none';
+  document.getElementById('view2Selector').style.display = 'none';
+  document.getElementById('frameStatus2').classList.remove('visible');
+  document.getElementById('dualViewBadge').style.display = 'none';
+}
+
+function updateDualViewBadge() {
+  const badge = document.getElementById('dualViewBadge');
+  if(!uploadedFile2) { badge.style.display = 'none'; return; }
+  badge.style.display = 'block';
+  const viewNames = {side:'side view', front:'front view', posterior:'posterior view'};
+  document.getElementById('dualPrimaryLabel').textContent = viewNames[cameraView] || cameraView;
+  document.getElementById('dualSecondaryLabel').textContent = viewNames[cameraView2] || cameraView2;
 }
 
 function showErr(msg) {
