@@ -4288,384 +4288,471 @@ async function exportPDF() {
   try {
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const PW = 210, PH = 297;
-    const ML = 14, MR = 14, MT = 0;
+    const ML = 15, MR = 15, MT = 0;
     const CW = PW - ML - MR;
+
+    // ── Design tokens ──
+    const C = {
+      navy:     [15, 39, 68],
+      navyMid:  [26, 58, 92],
+      teal:     [14, 124, 106],
+      tealPale: [230, 244, 241],
+      tealMid:  [126, 200, 192],
+      muted:    [107, 122, 141],
+      border:   [213, 220, 232],
+      surface:  [248, 250, 252],
+      white:    [255, 255, 255],
+      text:     [26, 35, 50],
+      red:      [192, 57, 43],
+      amber:    [217, 119, 6],
+      green:    [14, 124, 106],
+      purple:   [124, 58, 237],
+    };
 
     const brand = getBranding();
     const subtitle = document.getElementById('reportSubtitle').textContent;
     const now = new Date().toLocaleDateString('en-US', {month:'long', day:'numeric', year:'numeric'});
 
-    // ── HEADER BAND ──
-    doc.setFillColor(15, 39, 68); // --navy
-    doc.rect(0, 0, PW, 38, 'F');
+    // ── Helpers ──
+    const setColor = (rgb) => doc.setTextColor(...rgb);
+    const setFill  = (rgb) => doc.setFillColor(...rgb);
+    const setDraw  = (rgb) => doc.setDrawColor(...rgb);
 
-    // Teal accent bar
-    doc.setFillColor(14, 124, 106);
-    doc.rect(0, 38, PW, 4, 'F');
-
-    // Practice name
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(16);
-    doc.setTextColor(255, 255, 255);
-    doc.text(brand.practice, ML, 14);
-
-    // Clinician + contact
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8.5);
-    doc.setTextColor(143, 165, 192);
-    let headerRight = [];
-    if(brand.clinician) headerRight.push(brand.clinician);
-    if(brand.address)   headerRight.push(brand.address);
-    if(brand.contact)   headerRight.push(brand.contact);
-    headerRight.forEach((line, i) => doc.text(line, ML, 21 + i * 5));
-
-    // MotionRx badge top-right
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.setTextColor(126, 200, 192);
-    doc.text('MOTIONRX CLINICAL REPORT', PW - MR, 10, {align: 'right'});
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.5);
-    doc.setTextColor(143, 165, 192);
-    doc.text(now, PW - MR, 16, {align: 'right'});
-
-    // Report title
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
-    doc.setTextColor(255, 255, 255);
-    doc.text('Clinical Motion Assessment Report', ML, 31);
-
-    let y = 50;
-
-    // ── SUBTITLE BAR ──
-    doc.setFillColor(232, 240, 248);
-    doc.roundedRect(ML, y, CW, 10, 2, 2, 'F');
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(26, 58, 92);
-    doc.text(subtitle, ML + 4, y + 6.5);
-    y += 16;
-
-    // ── SCORE TILES ──
-    const tiles = document.querySelectorAll('.score-tile');
-    if(tiles.length > 0) {
-      const tileW = (CW - (tiles.length - 1) * 3) / tiles.length;
-      tiles.forEach((tile, i) => {
-        const tx = ML + i * (tileW + 3);
-        doc.setFillColor(255, 255, 255);
-        doc.setDrawColor(213, 220, 232);
-        doc.roundedRect(tx, y, tileW, 20, 2, 2, 'FD');
-
-        const valEl = tile.querySelector('.score-tile-value');
-        const lblEl = tile.querySelector('.score-tile-label');
-        const valText = valEl?.textContent?.trim() || '';
-        const lblText = lblEl?.textContent?.trim() || '';
-
-        // Color the value
-        const cls = valEl?.className || '';
-        if(cls.includes('score-good'))      doc.setTextColor(14, 124, 106);
-        else if(cls.includes('score-warn')) doc.setTextColor(217, 119, 6);
-        else if(cls.includes('score-poor')) doc.setTextColor(192, 57, 43);
-        else                                doc.setTextColor(26, 35, 50);
-
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(valText.length > 8 ? 7 : 12);
-        doc.text(valText.substring(0,30), tx + tileW/2, y + 11, {align:'center', maxWidth: tileW - 4});
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(6.5);
-        doc.setTextColor(107, 122, 141);
-        doc.text(lblText, tx + tileW/2, y + 17, {align:'center'});
-      });
-      y += 26;
+    function rule(x, yy, w, thickness=0.25, color=C.border) {
+      setDraw(color); doc.setLineWidth(thickness);
+      doc.line(x, yy, x+w, yy);
     }
 
-    // helper: section heading
-    function sectionHead(title, icon='') {
-      doc.setFillColor(15, 39, 68);
-      doc.roundedRect(ML, y, CW, 8, 1.5, 1.5, 'F');
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text((icon ? icon + ' ' : '') + title.toUpperCase(), ML + 4, y + 5.5);
+    function pageGuard(needed=30) {
+      if(y + needed > PH - 14) { doc.addPage(); drawPageHeader(); y = 52; }
+    }
+
+    // Helper: draw repeated page header (for pages 2+)
+    function drawPageHeader() {
+      setFill(C.navy); doc.rect(0, 0, PW, 10, 'F');
+      setFill(C.teal); doc.rect(0, 10, PW, 1.2, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.tealMid);
+      doc.text('MOTIONRX CLINICAL REPORT', ML, 7);
+      doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor([143,165,192]);
+      doc.text(brand.practice || 'MotionRx', PW-MR, 7, {align:'right'});
+    }
+
+    // ── PAGE 1: COVER HEADER ──
+    // Deep navy banner
+    setFill(C.navy); doc.rect(0, 0, PW, 46, 'F');
+    // Teal left accent stripe
+    setFill(C.teal); doc.rect(0, 0, 4, 46, 'F');
+    // Teal bottom rule
+    setFill(C.teal); doc.rect(0, 46, PW, 1.5, 'F');
+    // Subtle grid pattern in header (decorative dots)
+    setFill([255,255,255]); doc.setGState(doc.GState({opacity: 0.04}));
+    for(let gx = 20; gx < PW; gx += 12) {
+      for(let gy = 5; gy < 46; gy += 10) { doc.circle(gx, gy, 0.6, 'F'); }
+    }
+    doc.setGState(doc.GState({opacity: 1}));
+
+    // MotionRx wordmark
+    doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.tealMid);
+    doc.text('MOTIONRX', 9, 11);
+    doc.setFont('helvetica','normal'); doc.setFontSize(7); setColor([143,165,192]);
+    doc.text('CLINICAL REPORT', 9, 16);
+
+    // Report date top-right
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor([143,165,192]);
+    doc.text(now, PW-MR, 11, {align:'right'});
+
+    // Practice name — large
+    doc.setFont('helvetica','bold'); doc.setFontSize(18); setColor(C.white);
+    doc.text(brand.practice || 'Clinical Motion Assessment', 9, 30);
+
+    // Clinician + contact — right-aligned, stacked
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor([143,165,192]);
+    let hLines = [];
+    if(brand.clinician) hLines.push(brand.clinician);
+    if(brand.address)   hLines.push(brand.address);
+    if(brand.contact)   hLines.push(brand.contact);
+    hLines.forEach((l, i) => doc.text(l, PW-MR, 23 + i*5, {align:'right'}));
+
+    // Report type label
+    doc.setFont('helvetica','bold'); doc.setFontSize(8); setColor([143,165,192]);
+    doc.text('BIOMECHANICAL MOTION ANALYSIS', 9, 42);
+
+    let y = 54;
+
+    // ── PATIENT + ASSESSMENT BLOCK ──
+    // Two-column info card
+    setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.3);
+    doc.roundedRect(ML, y, CW, 22, 2, 2, 'FD');
+    // Left col: patient
+    doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.muted);
+    doc.text('PATIENT & ASSESSMENT', ML+4, y+5.5);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(C.text);
+    const subLines = doc.splitTextToSize(subtitle, CW/2 - 8);
+    subLines.slice(0,3).forEach((l,i) => doc.text(l, ML+4, y+10+i*4.5));
+    // Right col: teal divider + score
+    const scoreVal = document.querySelector('.score-tile-value')?.textContent?.trim();
+    const scoreClass = document.querySelector('.score-tile-value')?.className || '';
+    if(scoreVal) {
+      rule(ML + CW/2, y+3, 0, 16, C.border); // vertical rule
+      doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.muted);
+      doc.text('MOVEMENT QUALITY SCORE', ML+CW/2+5, y+5.5);
+      const scoreRgb = scoreClass.includes('score-good') ? C.teal : scoreClass.includes('score-warn') ? C.amber : C.red;
+      setColor(scoreRgb);
+      doc.setFont('helvetica','bold'); doc.setFontSize(22);
+      doc.text(scoreVal, ML+CW/2+5, y+18);
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor(C.muted);
+      const scoreSummary = document.querySelectorAll('.score-tile-value')[5]?.textContent?.trim() || '';
+      if(scoreSummary) doc.text(scoreSummary.substring(0,45), ML+CW/2+5, y+21, {maxWidth: CW/2-8});
+    }
+    y += 28;
+
+    // ── SCORE STRIP ──
+    const tiles = document.querySelectorAll('.score-tile');
+    const scoreTiles = [...tiles].filter((_,i) => i > 0 && i < tiles.length-1); // skip first (score) and last (summary)
+    if(scoreTiles.length > 0) {
+      const tCols = Math.min(scoreTiles.length, 4);
+      const tW = (CW - (tCols-1)*3) / tCols;
+      scoreTiles.slice(0, tCols).forEach((tile, i) => {
+        const tx = ML + i*(tW+3);
+        setFill(C.white); setDraw(C.border); doc.setLineWidth(0.25);
+        doc.roundedRect(tx, y, tW, 16, 1.5, 1.5, 'FD');
+        // Teal top accent
+        setFill(C.teal); doc.roundedRect(tx, y, tW, 1.5, 1, 0, 'F');
+        const valEl = tile.querySelector('.score-tile-value');
+        const lblEl = tile.querySelector('.score-tile-label');
+        const val = valEl?.textContent?.trim() || '';
+        const lbl = lblEl?.textContent?.trim() || '';
+        const cls = valEl?.className || '';
+        const rgb = cls.includes('score-good') ? C.teal : cls.includes('score-warn') ? C.amber : cls.includes('score-poor') ? C.red : C.navyMid;
+        setColor(rgb); doc.setFont('helvetica','bold'); doc.setFontSize(val.length>6?7:10);
+        doc.text(val.substring(0,20), tx+tW/2, y+10, {align:'center', maxWidth:tW-3});
+        setColor(C.muted); doc.setFont('helvetica','normal'); doc.setFontSize(5.5);
+        doc.text(lbl, tx+tW/2, y+14, {align:'center'});
+      });
+      y += 22;
+    }
+
+    // ── Section head helper (redesigned) ──
+    function sectionHead(title, accentColor=C.teal) {
+      pageGuard(20);
+      // Left accent bar + title
+      setFill(accentColor); doc.rect(ML, y, 3, 7, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.navy);
+      doc.text(title.toUpperCase(), ML+6, y+5.2);
+      rule(ML+6, y+7.5, CW-6, 0.3, C.border);
       y += 11;
     }
 
-    // helper: body text block (auto word-wrap)
-    function bodyText(text, color=[26,35,50], size=8.5) {
-      if(!text) return;
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(size);
-      doc.setTextColor(...color);
-      const lines = doc.splitTextToSize(text.replace(/\n+/g, ' '), CW - 4);
+    // ── Body text helper ──
+    function bodyText(text, color=C.text, size=8.5, indent=2) {
+      if(!text?.trim()) return;
+      doc.setFont('helvetica','normal'); doc.setFontSize(size); setColor(color);
+      const lines = doc.splitTextToSize(text.replace(/\n+/g,' '), CW - indent - 4);
       lines.forEach(line => {
-        if(y > PH - 20) { doc.addPage(); y = 18; }
-        doc.text(line, ML + 2, y);
-        y += 4.8;
+        if(y > PH - 14) { doc.addPage(); drawPageHeader(); y = 18; }
+        doc.text(line, ML + indent, y); y += 4.8;
       });
       y += 2;
     }
 
-    // helper: page guard
-    function pageGuard(needed=30) {
-      if(y + needed > PH - 16) { doc.addPage(); y = 18; }
-    }
-
     // ── SKELETON FRAMES ──
-    const frameImgs = document.querySelectorAll('#framesGallery .frame-card img');
-    if(frameImgs.length > 0) {
+    // Support both single-view (.frame-card img) and dual-view (.phase-view-slot img)
+    const allFrameImgs = [...document.querySelectorAll('#framesGallery .frame-card img, #framesGallery .phase-view-slot img')];
+    const isDualView = document.querySelector('#framesGallery .phase-group') !== null;
+
+    if(allFrameImgs.length > 0) {
       pageGuard(60);
-      sectionHead('MediaPipe Skeleton Analysis — Tracked Frames', '🦴');
-      const cols = Math.min(4, frameImgs.length);
-      const fW = (CW - (cols-1)*3) / cols;
-      const fH = fW * 0.75;
-      let col = 0, rowStart = y;
-      for(const img of frameImgs) {
-        if(img.complete && img.naturalWidth > 0) {
+      const sectionTitle = document.getElementById('framesSectionTitle')?.textContent || 'Tracked Frames';
+      sectionHead(sectionTitle.replace(/[·—].*/,'').trim());
+
+      if(isDualView) {
+        // Dual-view: render phase groups — each group = one phase card with 2 images side by side
+        const groups = document.querySelectorAll('#framesGallery .phase-group');
+        groups.forEach(group => {
+          const header = group.querySelector('.phase-group-header');
+          const phaseName = header?.firstChild?.textContent?.trim()?.replace(/[▲▼]/g,'').trim() || '';
+          const slots = group.querySelectorAll('.phase-view-slot');
+          const imgs = [...slots].map(s => s.querySelector('img')).filter(Boolean);
+          const viewLabels = [...slots].map(s => s.querySelector('.phase-view-label')?.textContent?.trim() || '');
+
+          if(imgs.length === 0) return;
+          pageGuard(52);
+
+          // Phase label row
+          setFill(C.navy); doc.roundedRect(ML, y, CW, 6.5, 1, 1, 'F');
+          doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.white);
+          doc.text(phaseName, ML+4, y+4.5);
+          y += 8;
+
+          // Images side by side
+          const imgW = (CW - 4) / Math.max(imgs.length, 1);
+          const imgH = imgW * 0.72;
+          imgs.forEach((img, ii) => {
+            if(!img.complete || !img.naturalWidth) return;
+            try {
+              const cv = document.createElement('canvas');
+              cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+              cv.getContext('2d').drawImage(img, 0, 0);
+              const data = cv.toDataURL('image/jpeg', 0.84);
+              const ix = ML + ii*(imgW+4);
+              // Subtle border
+              setDraw(C.border); doc.setLineWidth(0.3);
+              doc.roundedRect(ix, y, imgW, imgH, 1, 1, 'D');
+              doc.addImage(data, 'JPEG', ix, y, imgW, imgH);
+              // View label below
+              doc.setFont('helvetica','bold'); doc.setFontSize(6); setColor(C.teal);
+              doc.text(viewLabels[ii] || '', ix+imgW/2, y+imgH+4, {align:'center'});
+            } catch(e){}
+          });
+          y += imgH + 8;
+        });
+      } else {
+        // Single-view: 4-up grid
+        const cols = Math.min(4, allFrameImgs.length);
+        const fW = (CW - (cols-1)*3) / cols;
+        const fH = fW * 0.75;
+        let col = 0;
+        for(const img of allFrameImgs) {
+          if(!img.complete || !img.naturalWidth) { col++; if(col>=cols){col=0;y+=fH+10;} continue; }
           try {
-            // Draw image to canvas to get JPEG data
+            pageGuard(fH + 14);
             const cv = document.createElement('canvas');
             cv.width = img.naturalWidth; cv.height = img.naturalHeight;
             cv.getContext('2d').drawImage(img, 0, 0);
-            const imgData = cv.toDataURL('image/jpeg', 0.82);
-            const fx = ML + col * (fW + 3);
-            doc.addImage(imgData, 'JPEG', fx, y, fW, fH);
-
-            // Phase label below image
-            const lbl = img.closest('.frame-card')?.querySelector('.frame-label');
-            if(lbl) {
-              doc.setFont('helvetica', 'normal');
-              doc.setFontSize(6.5);
-              doc.setTextColor(107,122,141);
-              doc.text(lbl.textContent?.trim()?.substring(0,30) || '', fx + fW/2, y + fH + 3.5, {align:'center'});
-            }
-          } catch(e) {}
+            const data = cv.toDataURL('image/jpeg', 0.84);
+            const fx = ML + col*(fW+3);
+            setDraw(C.border); doc.setLineWidth(0.3);
+            doc.roundedRect(fx, y, fW, fH, 1, 1, 'D');
+            doc.addImage(data, 'JPEG', fx, y, fW, fH);
+            // Label
+            const lbl = img.closest('.frame-card')?.querySelector('.frame-label')?.textContent?.trim() || '';
+            doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor(C.muted);
+            doc.text(lbl.substring(0,28), fx+fW/2, y+fH+4, {align:'center'});
+          } catch(e){}
+          col++;
+          if(col >= cols) { col=0; y += fH+10; }
         }
-        col++;
-        if(col >= cols) { col = 0; y += fH + 8; rowStart = y; }
+        if(col > 0) y += fH + 10;
       }
-      if(col > 0) y = rowStart + fH + 8;
       y += 4;
     }
 
     // ── JOINT ANGLES TABLE ──
     const anglesSection = document.getElementById('anglesSection');
     if(anglesSection && anglesSection.style.display !== 'none') {
-      pageGuard(40);
-      sectionHead('Measured Joint Angles', '📐');
+      pageGuard(45);
+      sectionHead('Measured Joint Angles');
       const rows = anglesSection.querySelectorAll('tbody tr');
-      const colWidths = [55, 25, 35, CW - 120];
-      const headers = ['Joint', 'Avg Angle', 'Range', 'Reference'];
+      const colW = [58, 24, 36, CW - 122];
+      const headers = ['Joint', 'Avg Angle', 'Range', 'Reference Range'];
 
       // Header row
-      doc.setFillColor(232, 240, 248);
-      doc.rect(ML, y, CW, 7, 'F');
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(7.5);
-      doc.setTextColor(15, 39, 68);
-      let cx = ML + 2;
-      headers.forEach((h, i) => { doc.text(h, cx, y + 5); cx += colWidths[i]; });
-      y += 8;
+      setFill(C.navy); doc.rect(ML, y, CW, 7, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.white);
+      let cx = ML+3;
+      headers.forEach((h,i) => { doc.text(h, cx, y+5); cx += colW[i]; });
+      y += 7;
 
       rows.forEach((row, ri) => {
-        if(y > PH - 20) { doc.addPage(); y = 18; }
-        if(ri % 2 === 0) { doc.setFillColor(248, 250, 252); doc.rect(ML, y, CW, 6.5, 'F'); }
+        if(y > PH-14) { doc.addPage(); drawPageHeader(); y = 18; }
+        setFill(ri%2===0 ? C.surface : C.white);
+        doc.rect(ML, y, CW, 6.5, 'F');
+        // Left color tab on flagged rows
+        const rowCls = row.className || '';
+        if(rowCls.includes('flag')) {
+          setFill(rowCls.includes('high') ? C.red : C.amber);
+          doc.rect(ML, y, 2, 6.5, 'F');
+        }
         const cells = row.querySelectorAll('td');
-        cx = ML + 2;
+        cx = ML+3;
         cells.forEach((cell, ci) => {
           const valEl = cell.querySelector('.val');
-          let txt = valEl ? valEl.textContent.trim() : cell.textContent.trim();
-          txt = txt.substring(0, 40);
+          let txt = (valEl ? valEl.textContent : cell.textContent).trim().substring(0,42);
           const cls = valEl?.className || '';
-          if(cls.includes('flag-high'))     doc.setTextColor(192,57,43);
-          else if(cls.includes('flag-med')) doc.setTextColor(217,119,6);
-          else if(cls.includes('flag-ok'))  doc.setTextColor(14,124,106);
-          else                              doc.setTextColor(26,35,50);
-          doc.setFont('helvetica', ci===1 ? 'bold' : 'normal');
-          doc.setFontSize(7.5);
-          doc.text(txt, cx, y + 4.5, {maxWidth: colWidths[ci] - 2});
-          cx += colWidths[ci];
+          const rgb = cls.includes('flag-high') ? C.red : cls.includes('flag-med') ? C.amber : cls.includes('flag-ok') ? C.teal : C.text;
+          setColor(rgb);
+          doc.setFont('helvetica', ci===1?'bold':'normal'); doc.setFontSize(7.5);
+          doc.text(txt, cx, y+4.5, {maxWidth: colW[ci]-3});
+          cx += colW[ci];
         });
         y += 6.5;
       });
-      y += 6;
+      // Bottom border
+      setDraw(C.border); doc.setLineWidth(0.3); doc.line(ML, y, ML+CW, y);
+      y += 8;
     }
 
     // ── ASYMMETRY INDEX ──
     const asiSection = document.getElementById('asiSection');
     if(asiSection && asiSection.style.display !== 'none') {
-      pageGuard(40);
-      sectionHead('Limb Symmetry Index — Asymmetry Analysis', '⚖️');
+      pageGuard(42);
+      sectionHead('Limb Symmetry Index', C.purple);
       const asiCards = asiSection.querySelectorAll('.asi-card');
-      const asiColW = (CW - (Math.min(asiCards.length,3)-1)*4) / Math.min(asiCards.length,3);
-      let aCol = 0, aRowY = y;
-      asiCards.forEach((card, ci) => {
-        const joint = card.querySelector('.asi-joint')?.textContent?.trim() || '';
-        const vals  = card.querySelector('.asi-values')?.textContent?.trim() || '';
-        const lsi   = card.querySelector('.asi-lsi-val')?.textContent?.trim() || '';
-        const flag  = card.querySelector('.asi-lsi-val')?.className || '';
-        const ax = ML + aCol * (asiColW + 4);
-        doc.setFillColor(255,255,255);
-        doc.setDrawColor(213,220,232);
-        doc.roundedRect(ax, aRowY, asiColW, 28, 2, 2, 'FD');
-        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(107,122,141);
-        doc.text(joint.toUpperCase(), ax+4, aRowY+6);
-        // LSI value coloured
-        if(flag.includes('asi-poor'))      doc.setTextColor(192,57,43);
-        else if(flag.includes('asi-warn')) doc.setTextColor(217,119,6);
-        else                               doc.setTextColor(14,124,106);
-        doc.setFont('helvetica','bold'); doc.setFontSize(14);
-        doc.text(lsi, ax + asiColW/2, aRowY+18, {align:'center'});
-        doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(107,122,141);
-        doc.text(vals.replace(/\s+/g,' '), ax+4, aRowY+25, {maxWidth: asiColW-8});
+      const aCols = Math.min(asiCards.length, 4);
+      const aW = (CW - (aCols-1)*4) / aCols;
+      let aCol=0, aRowY=y;
+      asiCards.forEach(card => {
+        const joint  = card.querySelector('.asi-joint')?.textContent?.trim() || '';
+        const vals   = card.querySelector('.asi-values')?.textContent?.trim() || '';
+        const lsi    = card.querySelector('.asi-lsi-val')?.textContent?.trim() || '';
+        const cls    = card.querySelector('.asi-lsi-val')?.className || '';
+        const rgb    = cls.includes('asi-poor') ? C.red : cls.includes('asi-warn') ? C.amber : C.teal;
+        const ax = ML + aCol*(aW+4);
+        setFill(C.white); setDraw(C.border); doc.setLineWidth(0.25);
+        doc.roundedRect(ax, aRowY, aW, 28, 2, 2, 'FD');
+        setFill(rgb); doc.roundedRect(ax, aRowY, aW, 2, 1, 0, 'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.muted);
+        doc.text(joint.toUpperCase(), ax+aW/2, aRowY+7, {align:'center'});
+        setColor(rgb); doc.setFont('helvetica','bold'); doc.setFontSize(15);
+        doc.text(lsi, ax+aW/2, aRowY+18, {align:'center'});
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor(C.muted);
+        doc.text(vals.replace(/\s+/g,' '), ax+aW/2, aRowY+25, {align:'center', maxWidth:aW-6});
         aCol++;
-        if(aCol >= 3) { aCol=0; aRowY += 32; }
+        if(aCol >= aCols) { aCol=0; aRowY+=32; }
       });
-      y = aRowY + (aCol > 0 ? 32 : 0) + 4;
+      y = aRowY + (aCol>0?32:0) + 4;
     }
 
     // ── PROMS ──
     const promsSection = document.getElementById('promsResultSection');
     if(promsSection && promsSection.style.display !== 'none') {
-      pageGuard(35);
-      sectionHead('Patient Reported Outcomes', '📋');
+      pageGuard(38);
+      sectionHead('Patient Reported Outcomes');
       const promCards = promsSection.querySelectorAll('.prom-result-card');
-      const pcW = (CW - (Math.min(promCards.length,4)-1)*4) / Math.min(promCards.length,4);
-      let pcCol = 0, pcRowY = y;
+      const pCols = Math.min(promCards.length, 4);
+      const pW = (CW - (pCols-1)*4) / pCols;
+      let pCol=0, pRowY=y;
       promCards.forEach(card => {
-        const score = card.querySelector('.prom-result-score')?.textContent?.trim() || '';
-        const name  = card.querySelector('.prom-result-name')?.textContent?.trim()  || '';
-        const interp= card.querySelector('.prom-result-interp')?.textContent?.trim()|| '';
-        const cls   = card.querySelector('.prom-result-score')?.className || '';
-        const px = ML + pcCol * (pcW + 4);
-        doc.setFillColor(255,255,255); doc.setDrawColor(213,220,232);
-        doc.roundedRect(px, pcRowY, pcW, 24, 2, 2, 'FD');
-        if(cls.includes('score-poor'))     doc.setTextColor(192,57,43);
-        else if(cls.includes('score-warn'))doc.setTextColor(217,119,6);
-        else if(cls.includes('score-good'))doc.setTextColor(14,124,106);
-        else                               doc.setTextColor(26,35,50);
-        doc.setFont('helvetica','bold'); doc.setFontSize(12);
-        doc.text(score, px+pcW/2, pcRowY+11, {align:'center'});
-        doc.setFont('helvetica','bold'); doc.setFontSize(6.5); doc.setTextColor(107,122,141);
-        doc.text(name, px+pcW/2, pcRowY+17, {align:'center'});
-        doc.setFont('helvetica','normal'); doc.setFontSize(6.5);
-        doc.text(interp.substring(0,28), px+pcW/2, pcRowY+22, {align:'center'});
-        pcCol++;
-        if(pcCol >= 4) { pcCol=0; pcRowY += 28; }
+        const score  = card.querySelector('.prom-result-score')?.textContent?.trim() || '';
+        const name   = card.querySelector('.prom-result-name')?.textContent?.trim()  || '';
+        const interp = card.querySelector('.prom-result-interp')?.textContent?.trim()|| '';
+        const cls    = card.querySelector('.prom-result-score')?.className || '';
+        const rgb    = cls.includes('score-poor') ? C.red : cls.includes('score-warn') ? C.amber : cls.includes('score-good') ? C.teal : C.navyMid;
+        const px = ML + pCol*(pW+4);
+        setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.25);
+        doc.roundedRect(px, pRowY, pW, 24, 2, 2, 'FD');
+        setColor(rgb); doc.setFont('helvetica','bold'); doc.setFontSize(13);
+        doc.text(score, px+pW/2, pRowY+11, {align:'center'});
+        doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.navy);
+        doc.text(name, px+pW/2, pRowY+17, {align:'center'});
+        doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor(C.muted);
+        doc.text(interp.substring(0,30), px+pW/2, pRowY+22, {align:'center'});
+        pCol++; if(pCol>=4){pCol=0;pRowY+=28;}
       });
-      y = pcRowY + (pcCol > 0 ? 28 : 0) + 4;
+      y = pRowY + (pCol>0?28:0) + 6;
     }
 
     // ── BAR PATH ──
     const barSection = document.getElementById('barPathSection');
     const barImg = document.getElementById('barTraceImg');
-    if(barSection && barSection.style.display !== 'none' && barImg?.src && barImg.src.startsWith('data:')) {
-      pageGuard(70);
-      sectionHead('Barbell Path Analysis', '🎯');
-      // Image left side
-      const bImgW = CW * 0.5;
-      const bImgH = bImgW * 0.75;
-      try { doc.addImage(barImg.src, 'JPEG', ML, y, bImgW, bImgH); } catch(e){}
-
-      // Stats right side
+    if(barSection && barSection.style.display !== 'none' && barImg?.src?.startsWith('data:')) {
+      pageGuard(75);
+      sectionHead('Barbell Path Analysis');
+      const bW = CW * 0.52, bH = bW * 0.72;
+      try { doc.addImage(barImg.src, 'JPEG', ML, y, bW, bH); } catch(e){}
       const statsRows = document.querySelectorAll('#barPathStats table tbody tr');
       let sy = y + 4;
       statsRows.forEach(row => {
         const cells = row.querySelectorAll('td');
-        if(cells.length >= 2) {
-          doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(107,122,141);
-          doc.text(cells[0].textContent.trim(), ML + bImgW + 6, sy);
-          const valEl = cells[1].querySelector('.val');
-          const cls = valEl?.className || '';
-          if(cls.includes('flag-high'))     doc.setTextColor(192,57,43);
-          else if(cls.includes('flag-med')) doc.setTextColor(217,119,6);
-          else                              doc.setTextColor(14,124,106);
-          doc.setFont('helvetica', 'bold');
-          doc.text(valEl?.textContent?.trim() || cells[1].textContent.trim(), ML + bImgW + 6, sy + 4.5);
-          sy += 12;
-        }
+        if(cells.length < 2) return;
+        doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.muted);
+        doc.text(cells[0].textContent.trim(), ML+bW+6, sy);
+        const valEl = cells[1].querySelector('.val');
+        const cls = valEl?.className||'';
+        setColor(cls.includes('flag-high')?C.red:cls.includes('flag-med')?C.amber:C.teal);
+        doc.setFont('helvetica','bold'); doc.setFontSize(9);
+        doc.text(valEl?.textContent?.trim()||cells[1].textContent.trim(), ML+bW+6, sy+5);
+        sy += 14;
       });
-      y += bImgH + 8;
+      y += bH + 8;
     }
 
     // ── KEY FINDINGS ──
     const findings = document.querySelectorAll('.finding');
     if(findings.length > 0) {
-      pageGuard(35);
-      sectionHead('Key Findings', '🔍');
+      pageGuard(40);
+      sectionHead('Key Findings');
       findings.forEach(f => {
-        if(y > PH - 20) { doc.addPage(); y = 18; }
-        const dot = f.querySelector('.finding-dot');
+        pageGuard(18);
+        const dot   = f.querySelector('.finding-dot');
         const title = f.querySelector('.finding-title')?.textContent?.trim() || '';
-        const detail = f.querySelector('.finding-desc')?.textContent?.trim() || '';
-        const dotCls = dot?.className || '';
-        let dotColor = [14,124,106];
-        if(dotCls.includes('dot-high'))    dotColor = [192,57,43];
-        else if(dotCls.includes('dot-med')) dotColor = [217,119,6];
-        doc.setFillColor(...dotColor);
-        doc.circle(ML + 2.5, y + 2, 1.5, 'F');
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(26,35,50);
-        doc.text(title, ML + 6, y + 3.5);
-        y += 5.5;
-        bodyText(detail, [107,122,141], 8);
+        const detail= f.querySelector('.finding-desc')?.textContent?.trim() || '';
+        const dotCls= dot?.className || '';
+        const rgb   = dotCls.includes('dot-high') ? C.red : dotCls.includes('dot-med') ? C.amber : C.teal;
+        const boxH  = Math.max(10, doc.splitTextToSize(detail||' ', CW-14).length * 4.5 + 8);
+        setFill([...rgb.map((v,i)=>Math.min(255, v + [220,230,220][i]))]);
+        setFill(rgb===C.red ? [252,235,232] : rgb===C.amber ? [255,248,232] : C.tealPale);
+        setDraw(rgb); doc.setLineWidth(0.4);
+        doc.roundedRect(ML, y, CW, boxH, 1.5, 1.5, 'FD');
+        setFill(rgb); doc.roundedRect(ML, y, 3, boxH, 1, 0, 'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(8.5); setColor(C.text);
+        doc.text(title, ML+6, y+5.5);
+        if(detail) {
+          doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.muted);
+          const dLines = doc.splitTextToSize(detail, CW-10);
+          dLines.forEach((l,li) => doc.text(l, ML+6, y+10+li*4.5));
+        }
+        y += boxH + 3;
       });
-      y += 2;
+      y += 3;
     }
 
     // ── BIOMECHANICAL ANALYSIS ──
     const bioEl = document.querySelector('.report-section.full .narrative');
-    if(bioEl) {
-      pageGuard(30);
-      sectionHead('Biomechanical Analysis', '🦿');
-      bodyText(bioEl.textContent?.trim(), [26,35,50], 8.5);
+    if(bioEl?.textContent?.trim()) {
+      pageGuard(35);
+      sectionHead('Biomechanical Analysis');
+      bodyText(bioEl.textContent.trim());
     }
 
     // ── CLINICAL IMPRESSIONS ──
     const allNarratives = document.querySelectorAll('.narrative');
-    if(allNarratives.length > 1) {
-      pageGuard(30);
-      sectionHead('Clinical Impressions', '🏥');
-      bodyText(allNarratives[1].textContent?.trim(), [26,35,50], 8.5);
+    if(allNarratives.length > 1 && allNarratives[1]?.textContent?.trim()) {
+      pageGuard(35);
+      sectionHead('Clinical Impressions');
+      bodyText(allNarratives[1].textContent.trim());
     }
 
     // ── RECOMMENDATIONS ──
     const recs = document.querySelectorAll('.rec-item');
     if(recs.length > 0) {
-      pageGuard(35);
-      sectionHead('Clinical Recommendations', '📋');
+      pageGuard(40);
+      sectionHead('Clinical Recommendations');
       recs.forEach((rec, i) => {
-        if(y > PH - 20) { doc.addPage(); y = 18; }
+        pageGuard(18);
         const txt = rec.querySelector('.rec-text')?.textContent?.trim() || '';
-        doc.setFillColor(15,39,68);
-        doc.roundedRect(ML, y, 6, 5.5, 1, 1, 'F');
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(7); doc.setTextColor(255,255,255);
-        doc.text(String(i+1), ML + 3, y + 4, {align:'center'});
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(26,35,50);
-        const lines = doc.splitTextToSize(txt, CW - 10);
-        lines.forEach((line, li) => {
-          if(y > PH - 20) { doc.addPage(); y = 18; }
-          doc.text(line, ML + 9, y + 4 + li * 4.8);
-        });
-        y += Math.max(7, lines.length * 4.8 + 3);
+        const lines = doc.splitTextToSize(txt, CW-14);
+        const boxH = Math.max(9, lines.length*4.8 + 5);
+        setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.25);
+        doc.roundedRect(ML, y, CW, boxH, 1.5, 1.5, 'FD');
+        // Number badge
+        setFill(C.teal); doc.circle(ML+5, y+boxH/2, 3.5, 'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(7.5); setColor(C.white);
+        doc.text(String(i+1), ML+5, y+boxH/2+2.5, {align:'center'});
+        // Text
+        doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(C.text);
+        lines.forEach((l,li) => doc.text(l, ML+12, y+5+li*4.8));
+        y += boxH + 3;
       });
-      y += 2;
+      y += 3;
     }
 
     // ── PATIENT EDUCATION ──
     const eduItems = document.querySelectorAll('.edu-item');
     if(eduItems.length > 0) {
-      pageGuard(30);
-      sectionHead('Patient Education Points', '💬');
-      doc.setFillColor(230, 244, 241);
+      pageGuard(35);
+      sectionHead('Patient Education');
       eduItems.forEach(edu => {
         const txt = edu.querySelector('.edu-text')?.textContent?.trim() || '';
         if(!txt) return;
-        if(y > PH - 20) { doc.addPage(); y = 18; }
-        const lines = doc.splitTextToSize(txt, CW - 8);
-        const boxH = lines.length * 4.8 + 6;
-        doc.roundedRect(ML, y, CW, boxH, 2, 2, 'F');
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(14,100,86);
-        lines.forEach((line, li) => doc.text(line, ML + 4, y + 5 + li * 4.8));
-        y += boxH + 4;
+        pageGuard(16);
+        const lines = doc.splitTextToSize(txt, CW-10);
+        const boxH = lines.length*4.8 + 7;
+        setFill(C.tealPale); setDraw(C.teal); doc.setLineWidth(0.3);
+        doc.roundedRect(ML, y, CW, boxH, 2, 2, 'FD');
+        doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(C.teal);
+        lines.forEach((l,li) => doc.text(l, ML+5, y+5.5+li*4.8));
+        y += boxH + 3;
       });
     }
 
@@ -4673,18 +4760,21 @@ async function exportPDF() {
     const totalPages = doc.getNumberOfPages();
     for(let p = 1; p <= totalPages; p++) {
       doc.setPage(p);
-      doc.setFillColor(15,39,68);
-      doc.rect(0, PH - 10, PW, 10, 'F');
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7);
-      doc.setTextColor(143,165,192);
-      doc.text(brand.practice + (brand.clinician ? '  ·  ' + brand.clinician : ''), ML, PH - 3.5);
-      doc.text(`Page ${p} of ${totalPages}  ·  Generated by MotionRx  ·  ${now}`, PW - MR, PH - 3.5, {align:'right'});
+      // Footer band
+      setFill(C.navy); doc.rect(0, PH-11, PW, 11, 'F');
+      setFill(C.teal); doc.rect(0, PH-11, PW, 1, 'F');
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor([143,165,192]);
+      const footLeft = [brand.practice, brand.clinician].filter(Boolean).join('  ·  ');
+      doc.text(footLeft || 'MotionRx Clinical Report', ML, PH-4);
+      setColor(C.tealMid); doc.setFont('helvetica','bold'); doc.setFontSize(6.5);
+      doc.text(`${p} / ${totalPages}`, PW/2, PH-4, {align:'center'});
+      doc.setFont('helvetica','normal'); setColor([143,165,192]);
+      doc.text(`Generated by MotionRx  ·  ${now}`, PW-MR, PH-4, {align:'right'});
     }
 
     // ── SAVE ──
     const patientName = document.getElementById('patientName').value.trim() || 'Patient';
-    const safeDate = now.replace(/[, ]+/g, '-');
+    const safeDate = now.replace(/[, ]+/g,'-');
     doc.save(`MotionRx_${patientName.replace(/\s+/g,'_')}_${safeDate}.pdf`);
 
   } catch(err) {
@@ -4702,7 +4792,8 @@ let lightboxFrames = [];
 let lightboxIndex = 0;
 
 function openLightbox(idx) {
-  lightboxFrames = [...document.querySelectorAll('#framesGallery .frame-card img')];
+  // Support both single-view (.frame-card img) and dual-view (.phase-view-slot img) layouts
+  lightboxFrames = [...document.querySelectorAll('#framesGallery .frame-card img, #framesGallery .phase-view-slot img')];
   if(!lightboxFrames.length) return;
   lightboxIndex = idx;
   showLightboxFrame();
@@ -4714,10 +4805,22 @@ function showLightboxFrame() {
   const img = lightboxFrames[lightboxIndex];
   if(!img) return;
   document.getElementById('lightboxImg').src = img.src;
+
+  // Caption: support both single-view (.frame-card/.frame-label) and dual-view (.phase-group)
+  let label = `Frame ${lightboxIndex + 1}`;
   const card = img.closest('.frame-card');
-  const label = card?.querySelector('.frame-label')?.textContent?.trim() || `Frame ${lightboxIndex+1}`;
+  const group = img.closest('.phase-group');
+  if(card) {
+    label = card.querySelector('.frame-label')?.textContent?.trim() || label;
+  } else if(group) {
+    const header = group.querySelector('.phase-group-header');
+    const viewLbl = img.closest('.phase-view-slot')?.querySelector('.phase-view-label')?.textContent?.trim() || '';
+    const phaseName = header?.firstChild?.textContent?.trim() || label;
+    label = viewLbl ? `${phaseName} — ${viewLbl}` : phaseName;
+  }
+
   document.getElementById('lightboxLabel').textContent = label;
-  document.getElementById('lightboxCounter').textContent = `${lightboxIndex+1} / ${lightboxFrames.length}`;
+  document.getElementById('lightboxCounter').textContent = `${lightboxIndex + 1} / ${lightboxFrames.length}`;
 }
 
 function lightboxNav(dir) {
