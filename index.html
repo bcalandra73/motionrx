@@ -110,7 +110,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .section-head{padding:12px 18px;background:var(--navy);display:flex;align-items:center;gap:8px}
 .section-head h3{font-size:.78rem;font-weight:600;color:#fff;letter-spacing:.04em;text-transform:uppercase}
 .section-head .sh-icon{font-size:.85rem}
-.section-body{padding:16px 18px}
+.section-body{padding:12px 14px}
 .finding{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--bg)}
 .finding:last-child{border-bottom:none;padding-bottom:0}
 .finding-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;flex-shrink:0}
@@ -131,25 +131,26 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .raw-report{font-size:.83rem;color:var(--ink);line-height:1.75;white-space:pre-wrap}
 
 /* MediaPipe frames gallery */
-.frames-gallery{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
-.frame-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+.frames-gallery{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px}
+.frame-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:var(--shadow);position:relative;cursor:pointer;transition:transform .12s,box-shadow .12s}
+.frame-card:hover{transform:scale(1.03);box-shadow:0 6px 24px rgba(0,0,0,.15)}
 /* Dual-view paired layout */
 .phase-pair{display:contents}
-.frames-gallery.dual-view{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.frames-gallery.dual-view{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .phase-group{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
-.phase-group-header{background:var(--navy);color:#fff;padding:8px 12px;font-size:.70rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.phase-group-header{background:var(--navy);color:#fff;padding:5px 9px;font-size:.65rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;gap:6px;flex-wrap:wrap}
 .phase-group:hover .phase-group-header{background:var(--navyMid,#1a3a5c)}
 .phase-group:hover .phase-view-slot img{opacity:.92;transform:scale(1.01);transition:transform .15s,opacity .15s}
-.phase-group-header .phase-badge{font-size:.63rem}
+.phase-group-header .phase-badge{font-size:.60rem;padding:1px 5px}
 .phase-group-views{display:grid;grid-template-columns:1fr 1fr;gap:0}
 .phase-view-slot{border-right:1px solid var(--border);overflow:hidden}
 .phase-view-slot:last-child{border-right:none}
-.phase-view-label{font-size:.60rem;font-weight:700;color:#fff;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;background:var(--navy);text-align:center;opacity:.75}
+.phase-view-label{font-size:.55rem;font-weight:700;color:#fff;letter-spacing:.06em;text-transform:uppercase;padding:2px 6px;background:var(--navy);text-align:center;opacity:.75}
 .phase-view-slot img{width:100%;height:auto;display:block;cursor:pointer}
 .phase-view-slot.empty{background:#f8f9fa;min-height:80px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.7rem}
 .frame-card-img{position:relative;background:#000}
 .frame-card-img canvas{width:100%;height:auto;display:block}
-.frame-label{padding:6px 10px;font-size:.7rem;font-weight:600;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;border-top:1px solid var(--border)}
+.frame-label{position:absolute;bottom:0;left:0;right:0;padding:3px 7px 4px;font-size:.60rem;font-weight:700;color:#fff;letter-spacing:.04em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(transparent,rgba(10,20,40,.80));pointer-events:none}
 
 /* Joint angles table */
 .angles-table{width:100%;border-collapse:collapse;font-size:.78rem}
@@ -296,11 +297,13 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 @media print{header,.report-header-right{display:none}#inputSection,#loadingState{display:none!important}#resultsSection{display:block!important}}
 @media(max-width:680px){
   header{padding:0 16px}.container{padding:20px 14px 60px}
-  .two-col,.form-grid,.report-grid,.score-strip,.frames-gallery,.frames-gallery.dual-view{grid-template-columns:1fr}
+  .two-col,.form-grid,.report-grid,.score-strip{grid-template-columns:1fr}
+  .frames-gallery{grid-template-columns:repeat(2,1fr)!important}
+  .frames-gallery.dual-view{grid-template-columns:1fr!important}
   .focus-grid{grid-template-columns:1fr 1fr}
   .report-section.full{grid-column:1}
   .report-header{flex-direction:column}
-  .phase-group-views{grid-template-columns:1fr 1fr} /* keep side-by-side on mobile */
+  .phase-group-views{grid-template-columns:1fr 1fr}
 }
 </style>
 </head>
@@ -693,7 +696,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
 
     <!-- Skeleton frames -->
-    <div class="report-section full" id="framesSection" style="margin-bottom:16px;display:none;">
+    <div class="report-section full" id="framesSection" style="margin-bottom:12px;display:none;">
       <div class="section-head"><span class="sh-icon">🦴</span><h3 id="framesSectionTitle">MediaPipe Skeleton Analysis — Tracked Frames</h3></div>
       <div class="section-body" style="padding:12px 10px;">
         <div class="frames-gallery" id="framesGallery"></div>
@@ -4479,90 +4482,101 @@ async function exportPDF() {
       if(isDualView) {
         const groups = [...document.querySelectorAll('#framesGallery .phase-group')];
 
-        // Pre-compute JPEG + aspect for every group so we know exact heights before placing
+        // Pre-compute JPEG + aspect for every group
         const groupData = groups.map(group => {
           const slots     = group.querySelectorAll('.phase-view-slot');
           const imgs      = [...slots].map(s=>s.querySelector('img')).filter(Boolean);
           const viewLabels= [...slots].map(s=>s.querySelector('.phase-view-label')?.textContent?.trim()||'');
           const phaseName = group.querySelector('.phase-group-header')?.firstChild
                               ?.textContent?.replace(/[▲▼]/g,'').trim()||'';
-          const jpegs     = imgs.map(im=>imgToJpeg(im));
+          const jpegs     = imgs.map(im=>imgToJpeg(im, 0.84));
           const aspect    = jpegs.find(j=>j)?.aspect || 0.75;
-          // Each image: half the content width minus gap
-          const imgW      = (CW - 6) / Math.max(imgs.length,1);
-          const imgH      = imgW * aspect;
-          const totalH    = 6.5 + 4 + imgH + 9;  // label bar + gap + image + label + margin
-          return { phaseName, imgs, viewLabels, jpegs, imgW, imgH, totalH };
+          return { phaseName, viewLabels, jpegs, aspect };
         });
 
-        // Section heading — guard for heading + at least first group
-        const firstH = groupData[0]?.totalH || 60;
-        guard(SECTION_HEAD_H + firstH);
+        // Layout: 2 phase-groups per row, each group = label bar + 2 images side by side
+        // Compute consistent sizing: each group gets half the content width
+        const GCOLS   = 2;                          // groups per PDF row
+        const GGAP    = 4;                          // gap between group columns
+        const GW      = (CW - (GCOLS-1)*GGAP) / GCOLS;  // width per group cell
+        const IMGCOLS = 2;                          // images inside each group (side+front)
+        const IGAP    = 2;
+        const imgW    = (GW - (IMGCOLS-1)*IGAP) / IMGCOLS;
+        // Aspect: use median of all groups to keep rows uniform
+        const aspects = groupData.map(g=>g.aspect).filter(Boolean).sort((a,b)=>a-b);
+        const medAspect = aspects[Math.floor(aspects.length/2)] || 0.75;
+        const imgH    = imgW * medAspect;
+        const LBAR    = 5;    // overlay label bar height at bottom of each image
+        const HDR_H   = 5.5;  // phase label header bar height
+        const groupH  = HDR_H + 2 + imgH + 3;  // total height of one group cell
+
+        // Section heading — guard for heading + first full row
+        guard(SECTION_HEAD_H + groupH + 2);
         sectionHead(secTitle);
 
-        groupData.forEach(({phaseName, imgs, viewLabels, jpegs, imgW, imgH, totalH}) => {
-          // Guard for this entire group as a unit — scale down if page is too short
-          const available = PAGE_BODY_BOT - y;
-          let renderImgH = imgH;
-          if(totalH > available) {
-            if(totalH > PAGE_BODY_BOT - PAGE_BODY_TOP) {
-              // Group taller than full page — scale to fit
-              renderImgH = PAGE_BODY_BOT - PAGE_BODY_TOP - 6.5 - 4 - 9;
-            } else {
-              newPage();
-            }
-          }
-          const renderImgW = renderImgH / (imgH / imgW);
+        let gcol = 0, growY = y;
+        groupData.forEach(({phaseName, viewLabels, jpegs}) => {
+          if(gcol === 0) { guard(groupH + 2); growY = y; }
 
-          // Phase label bar
-          setFill(C.navy); doc.roundedRect(ML, y, CW, 6.5, 1, 1, 'F');
-          doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.white);
-          doc.text(phaseName, ML+4, y+4.5);
-          y += 8;
+          const gx = ML + gcol*(GW+GGAP);
 
-          // Images side by side — centered if fewer than 2
-          const totalImgW = jpegs.filter(Boolean).length * renderImgW + (jpegs.filter(Boolean).length-1)*6;
-          let ix = ML + (CW - totalImgW)/2;
+          // Phase header bar (compact, full group width)
+          setFill(C.navy); doc.roundedRect(gx, growY, GW, HDR_H, 1, 1, 'F');
+          doc.setFont('helvetica','bold'); doc.setFontSize(6); setColor(C.white);
+          doc.text(phaseName.substring(0,26), gx+GW/2, growY+HDR_H-1.2, {align:'center'});
+
+          // Images side by side within the group cell
+          let ix = gx;
           jpegs.forEach((jpeg, ii) => {
-            if(!jpeg) return;
-            setDraw(C.border); doc.setLineWidth(0.25);
-            doc.roundedRect(ix, y, renderImgW, renderImgH, 1, 1, 'D');
-            doc.addImage(jpeg.data, 'JPEG', ix, y, renderImgW, renderImgH);
-            doc.setFont('helvetica','bold'); doc.setFontSize(6); setColor(C.teal);
-            doc.text(viewLabels[ii]||'', ix+renderImgW/2, y+renderImgH+4, {align:'center'});
-            ix += renderImgW + 6;
+            if(!jpeg) { ix += imgW+IGAP; return; }
+            doc.addImage(jpeg.data, 'JPEG', ix, growY+HDR_H+2, imgW, imgH);
+            // Overlay view label bar
+            setFill(C.navyMid); doc.setGState(doc.GState({opacity:0.75}));
+            doc.rect(ix, growY+HDR_H+2, imgW, LBAR, 'F');
+            doc.setGState(doc.GState({opacity:1}));
+            doc.setFont('helvetica','bold'); doc.setFontSize(4.8); setColor(C.white);
+            doc.text((viewLabels[ii]||'').substring(0,14), ix+imgW/2, growY+HDR_H+2+LBAR-1, {align:'center'});
+            // Border
+            setDraw(C.border); doc.setLineWidth(0.2); doc.rect(ix, growY+HDR_H+2, imgW, imgH, 'D');
+            ix += imgW+IGAP;
           });
-          y += renderImgH + 10;
+
+          gcol++;
+          if(gcol >= GCOLS) { gcol=0; y = growY + groupH + 3; }
         });
+        if(gcol>0) y = growY + groupH + 3;
 
       } else {
-        // Single-view: up to 3 per row (better use of space, less squishing)
+        // Single-view: 4 columns, label drawn as dark overlay bar on bottom of each image
         const firstImg = allFrameImgs.find(im=>im.complete&&im.naturalWidth>0);
         const aspect   = firstImg ? firstImg.naturalHeight/firstImg.naturalWidth : 0.75;
-        const COLS     = Math.min(3, allFrameImgs.length);
-        const fW       = (CW - (COLS-1)*4) / COLS;
+        const COLS     = Math.min(4, allFrameImgs.length);
+        const GAP      = 3;
+        const fW       = (CW - (COLS-1)*GAP) / COLS;
         const fH       = fW * aspect;
-        const ROW_H    = fH + 9;  // image + label below
+        const ROW_H    = fH + GAP;  // image only, no separate label row
 
         guard(SECTION_HEAD_H + ROW_H);
         sectionHead(secTitle);
 
         let col = 0, rowY = y;
         allFrameImgs.forEach((img, ii) => {
-          if(col === 0) {
-            // Start of a new row — guard for full row
-            guard(ROW_H);
-            rowY = y;
-          }
+          if(col === 0) { guard(ROW_H); rowY = y; }
           const jpeg = imgToJpeg(img, 0.85);
           if(jpeg) {
-            const fx = ML + col*(fW+4);
-            setDraw(C.border); doc.setLineWidth(0.25);
-            doc.roundedRect(fx, rowY, fW, fH, 1, 1, 'D');
+            const fx = ML + col*(fW+GAP);
             doc.addImage(jpeg.data, 'JPEG', fx, rowY, fW, fH);
+            // Overlay label bar — draw semi-opaque navy strip at bottom of image
+            const LBAR = 4.5;
+            setFill(C.navy); doc.setGState(doc.GState({opacity:0.72}));
+            doc.rect(fx, rowY+fH-LBAR, fW, LBAR, 'F');
+            doc.setGState(doc.GState({opacity:1}));
             const lbl = img.closest('.frame-card')?.querySelector('.frame-label')?.textContent?.trim()||'';
-            doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor(C.muted);
-            doc.text(lbl.substring(0,28), fx+fW/2, rowY+fH+4, {align:'center'});
+            const phaseTxt = lbl.replace(/[#\d]+$/, '').trim().substring(0,22);
+            doc.setFont('helvetica','bold'); doc.setFontSize(5.2); setColor(C.white);
+            doc.text(phaseTxt, fx+fW/2, rowY+fH-1.2, {align:'center'});
+            // Thin border
+            setDraw(C.border); doc.setLineWidth(0.2); doc.rect(fx, rowY, fW, fH, 'D');
           }
           col++;
           if(col >= COLS) { col=0; y = rowY + ROW_H; }
