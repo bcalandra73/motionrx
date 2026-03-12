@@ -205,6 +205,15 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .phase-ascent{background:#e6f4f1;color:var(--teal)}
 .phase-ascent1{background:#e6f4f1;color:var(--teal)}
 .phase-ascent2{background:#d4f0ea;color:#0d7a5f}
+.phase-contact{background:#fff3e0;color:#b45309}
+.phase-loading{background:#fce8e8;color:#c0392b}
+.phase-midstance{background:#e8f4f0;color:#0d7a5f}
+.phase-propulsion{background:#e6f4f1;color:var(--teal)}
+.phase-toeoff{background:#f0e8f8;color:#7c3aed}
+.phase-earlyswing{background:#e8f0f8;color:var(--navy)}
+.phase-midswing{background:#e8effe;color:#2563eb}
+.phase-lateswing{background:#f0f4ff;color:#4f46e5}
+.phase-terminal{background:#e6f4f1;color:#0d7a5f}
 .phase-stance{background:#e8f0f8;color:var(--navy)}
 .phase-swing{background:#fff3e0;color:#c27000}
 .phase-frame{background:#f0f0f0;color:var(--muted)}
@@ -848,8 +857,8 @@ async function initMediaPipe() {
       modelComplexity: 2,        // Highest accuracy — better with occlusion
       smoothLandmarks: false,    // Off for multi-frame analysis (no temporal smoothing)
       enableSegmentation: false,
-      minDetectionConfidence: 0.4,
-      minTrackingConfidence: 0.4
+      minDetectionConfidence: 0.35,  // Lower for running — fast limb motion causes false misses
+      minTrackingConfidence: 0.35
     });
     await poseInstance.initialize();
     mpReady = true;
@@ -998,7 +1007,8 @@ function startFrameExtraction(file, vid) {
       // ── Smart phase relabeling: find true bottom/peak using MediaPipe angles ──
       // Only if MediaPipe is ready and movement has a meaningful bottom/peak
       const needsSmartLabel = /squat|lunge|deadlift|hinge|sit/i.test(movement);
-      if(mpReady && poseInstance && needsSmartLabel && frames.length >= 4) {
+      const needsGaitLabel  = /running|gait|walk/i.test(movement);
+      if(mpReady && poseInstance && (needsSmartLabel || needsGaitLabel) && frames.length >= 4) {
         try {
           const quickResults = await runMediaPipeOnFrames(frames);
           // Apply fusion pipeline to smart phase detection frames too
@@ -1084,6 +1094,145 @@ function startFrameExtraction(file, vid) {
               ? {id:'bottom',  label:'Bottom',  desc:`Deepest point — detected via ${method}`}
               : {id:'lockout', label:'Lockout', desc:`Full extension — detected via hip angle`};
             console.log(`[SmartPhase] Relabeled frame ${extremeIdx+1} as ${targetId} via ${method}`);
+          }
+
+          // ── Gait FSM: re-label frames using foot-Y trajectory ──
+          // For running/gait: leading foot ankle Y minima = initial contact,
+          // maxima = mid-swing / float phase.  We track the LOWEST visible ankle
+          // (most anterior foot — the one landing) across frames.
+          if(needsGaitLabel) {
+            const gaitPhases = PHASE_MAPS['Running'] || PHASE_MAPS[movement];
+            // Extract ankle Y and knee angle per frame
+            const footData = quickFused.map((lms, fi) => {
+              if(!lms) return null;
+              const v = (n) => lms[n] && (lms[n].visibility||0) > 0.18 ? lms[n] : null;
+              const lAnk = v(27), rAnk = v(28);
+              // Use whichever ankle is further forward (lower Y in normalised = higher on screen)
+              // For treadmill/side view: leading foot has LOWER y value (closer to top of frame)
+              // For running: use min Y of visible ankles as the "contact" candidate
+              const ankleY = lAnk && rAnk ? Math.min(lAnk.y, rAnk.y)
+                           : lAnk ? lAnk.y : rAnk ? rAnk.y : null;
+              // Knee angle of leading leg (for loading detection)
+              const lH=v(23),lK=v(25),lA=v(27), rH=v(24),rK=v(26),rA=v(28);
+              const lKnee = lH&&lK&&lA ? calcAngle(lH,lK,lA) : null;
+              const rKnee = rH&&rK&&rA ? calcAngle(rH,rK,rA) : null;
+              // Hip angle for propulsion
+              const lS=v(11),rS=v(12);
+              const lHipA = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
+              const rHipA = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
+              // Trunk angle (nose or shoulder midpoint vs hip midpoint vs vertical)
+              const hipMidY = lH && rH ? (lH.y+rH.y)/2 : (lH?.y ?? rH?.y ?? null);
+              const shoulderMidY = v(11) && v(12) ? (v(11).y+v(12).y)/2 : null;
+              return {
+                fi,
+                ankleY,
+                kneeAngle: lKnee!=null&&rKnee!=null ? Math.min(lKnee,rKnee) : (lKnee??rKnee),
+                hipAngle:  lHipA!=null&&rHipA!=null ? (lHipA+rHipA)/2 : (lHipA??rHipA),
+                hipMidY, shoulderMidY,
+                t: phaseTimeProportions[fi] ?? (fi / Math.max(1, frames.length-1)),
+              };
+            }).filter(Boolean);
+
+            if(footData.length >= 4) {
+              // Sort by time for velocity computation
+              footData.sort((a,b) => a.t - b.t);
+              const n = footData.length;
+
+              // Assign each frame a gait phase based on its rank in the sequence
+              // and the biomechanical signature at that frame
+              // Approach: use time proportion directly but map to clinically meaningful phases
+              // The 8 phases are evenly distributed; use foot/knee signatures to validate
+              const phaseOrder = ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
+              const isRunning = /running/i.test(movement);
+
+              // Find frame most likely to be initial contact: lowest ankle Y (foot most forward/grounded)
+              // In normalised coords: y=1.0 is bottom of frame; contact foot is usually at mid-height
+              // Better signal: max kneeAngle (most extended leg) = initial contact frame
+              let contactIdx = 0, maxKneeAngle = -1;
+              footData.forEach((fd, i) => {
+                if(fd.kneeAngle != null && fd.kneeAngle > maxKneeAngle) {
+                  maxKneeAngle = fd.kneeAngle; contactIdx = i;
+                }
+              });
+
+              // Find mid-stance: min knee angle (most loaded) — typically ~22% into cycle
+              let midstanceIdx = 0, minKneeAngle = Infinity;
+              footData.forEach((fd, i) => {
+                if(fd.kneeAngle != null && fd.kneeAngle < minKneeAngle) {
+                  minKneeAngle = fd.kneeAngle; midstanceIdx = i;
+                }
+              });
+
+              // Find toe-off: max hip extension (most posterior hip) — hip angle near max
+              // Hip angle at lockout/push-off is typically lowest (hip extended = small angle at front)
+              let toeoffIdx = 0, minHipAngle = Infinity;
+              footData.forEach((fd, i) => {
+                if(fd.hipAngle != null && fd.hipAngle < minHipAngle) {
+                  minHipAngle = fd.hipAngle; toeoffIdx = i;
+                }
+              });
+
+              // Find mid-swing: max hip flexion (hip angle largest) — usually also ankle highest
+              let midswingIdx = 0, maxHipAngle = -1;
+              footData.forEach((fd, i) => {
+                if(fd.hipAngle != null && fd.hipAngle > maxHipAngle) {
+                  maxHipAngle = fd.hipAngle; midswingIdx = i;
+                }
+              });
+
+              // Build assignment: map detected key frames to canonical phases
+              // Fill remaining frames by time interpolation between key frames
+              const keyMap = {};
+              keyMap[contactIdx]  = 'contact';
+              if(midstanceIdx !== contactIdx) keyMap[midstanceIdx] = 'midstance';
+              if(toeoffIdx !== contactIdx && toeoffIdx !== midstanceIdx) keyMap[toeoffIdx] = 'toeoff';
+              if(midswingIdx !== contactIdx && midswingIdx !== midstanceIdx && midswingIdx !== toeoffIdx) keyMap[midswingIdx] = 'midswing';
+
+              // Assign remaining frames by interpolating through the cycle
+              const sortedKeyFrames = Object.entries(keyMap).map(([i,p]) => ({i:+i, phase:p}))
+                                       .sort((a,b) => a.i - b.i);
+
+              // Map original frame index to a phase
+              const assignedPhases = {};
+              footData.forEach((fd, localIdx) => {
+                if(keyMap[localIdx]) {
+                  assignedPhases[fd.fi] = keyMap[localIdx];
+                } else {
+                  // Find position between key frames and assign intermediate phase
+                  const prev = sortedKeyFrames.filter(k => k.i <= localIdx).at(-1);
+                  const next = sortedKeyFrames.filter(k => k.i > localIdx)[0];
+                  if(prev && next) {
+                    const frac = (localIdx - prev.i) / (next.i - prev.i);
+                    const prevIdx = phaseOrder.indexOf(prev.phase);
+                    const nextIdx = phaseOrder.indexOf(next.phase);
+                    const midIdx  = Math.round(prevIdx + frac * (nextIdx - prevIdx));
+                    assignedPhases[fd.fi] = phaseOrder[Math.max(0, Math.min(phaseOrder.length-1, midIdx))];
+                  } else if(prev) {
+                    const prevIdx = phaseOrder.indexOf(prev.phase);
+                    assignedPhases[fd.fi] = phaseOrder[Math.min(phaseOrder.length-1, prevIdx+1)];
+                  } else if(next) {
+                    const nextIdx = phaseOrder.indexOf(next.phase);
+                    assignedPhases[fd.fi] = phaseOrder[Math.max(0, nextIdx-1)];
+                  } else {
+                    assignedPhases[fd.fi] = phaseOrder[localIdx % phaseOrder.length];
+                  }
+                }
+              });
+
+              // Apply to frames
+              const gaitPhaseMap = Object.fromEntries(
+                (PHASE_MAPS['Running'] || []).map(p => [p.id, p])
+              );
+              let reassigned = 0;
+              frames.forEach((f, fi) => {
+                const newId = assignedPhases[fi];
+                if(newId && gaitPhaseMap[newId]) {
+                  f.phase = {...gaitPhaseMap[newId]};
+                  reassigned++;
+                }
+              });
+              console.log(`[GaitFSM] Reassigned ${reassigned}/${frames.length} frames. Key: contact@${contactIdx}, midstance@${midstanceIdx}, toeoff@${toeoffIdx}, midswing@${midswingIdx}`);
+            }
           }
 
           // ── Store phase-frame hand positions as landmark anchors for dense bar tracking ──
@@ -1790,7 +1939,7 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
 // NEVER suppresses real asymmetry — only fills in when confidence < threshold
 function applyBilateralFallback(lms, movement, view='side') {
   if(!lms) return lms;
-  const isSymmetric = /squat|deadlift|hinge|sit/i.test(movement);
+  const isSymmetric = /squat|deadlift|hinge|sit|walk|gait|running/i.test(movement);
   if(!isSymmetric) return lms;
 
   const pairs = [[23,24],[25,26],[27,28],[11,12],[13,14],[15,16]];
@@ -3355,11 +3504,19 @@ const MOVEMENT_NORMS = {
     'Trunk Lean':         {max:10, warn:15, label:'<10° in gait'},
   },
   'Running': {
-    'Left Hip Flexion':   {ideal:[30,60], warn:25, label:'Running hip: 30-60° at peak'},
-    'Right Hip Flexion':  {ideal:[30,60], warn:25, label:'Running hip: 30-60° at peak'},
-    'Left Knee Flexion':  {ideal:[20,90], warn:15, label:'Running knee: 20-90° swing'},
-    'Right Knee Flexion': {ideal:[20,90], warn:15, label:'Running knee: 20-90° swing'},
-    'Trunk Lean':         {max:12, warn:20, label:'Forward lean: 5-12° optimal'},
+    'Left Hip Flexion':        {ideal:[35,65], warn:28, label:'Running hip flexion: 35-65° at peak swing'},
+    'Right Hip Flexion':       {ideal:[35,65], warn:28, label:'Running hip flexion: 35-65° at peak swing'},
+    'Left Hip Extension':      {ideal:[10,25], warn:8,  label:'Hip extension at toe-off: 10-25°'},
+    'Right Hip Extension':     {ideal:[10,25], warn:8,  label:'Hip extension at toe-off: 10-25°'},
+    'Left Knee Flexion':       {ideal:[90,130],warn:80, label:'Peak knee flexion swing: 90-130°'},
+    'Right Knee Flexion':      {ideal:[90,130],warn:80, label:'Peak knee flexion swing: 90-130°'},
+    'Left Knee Extension':     {ideal:[160,180],warn:150,label:'Knee at initial contact: near full extension'},
+    'Right Knee Extension':    {ideal:[160,180],warn:150,label:'Knee at initial contact: near full extension'},
+    'Left Ankle Dorsiflexion': {ideal:[15,30], warn:10, label:'Ankle dorsiflexion at loading: 15-30°'},
+    'Right Ankle Dorsiflexion':{ideal:[15,30], warn:10, label:'Ankle dorsiflexion at loading: 15-30°'},
+    'Trunk Lean':              {ideal:[5,15],  warn:20, label:'Forward trunk lean: 5-15° from vertical'},
+    'Trunk Lateral Lean':      {max:5, warn:8,          label:'Lateral trunk lean: <5° per step (Trendelenburg)'},
+    'Pelvic Drop':             {max:5, warn:8,          label:'Contralateral pelvic drop: <5° (hip abductor strength)'},
   },
   'Sit to Stand': {
     'Left Hip Flexion':   {ideal:[80,120], warn:70, label:'STS hip at initiation: 80-120°'},
@@ -3444,16 +3601,24 @@ const PHASE_MAPS = {
     {id:'ascent',   label:'Return',    time:0.80, desc:'Returning to start'},
   ],
   'Gait / Walking': [
-    {id:'stance',   label:'Heel Strike',  time:0.05, desc:'Initial contact'},
-    {id:'midpull',  label:'Mid Stance',   time:0.25, desc:'Single limb support'},
-    {id:'liftoff',  label:'Toe Off',      time:0.50, desc:'Terminal stance/toe off'},
-    {id:'swing',    label:'Mid Swing',    time:0.75, desc:'Swing phase'},
+    {id:'contact',   label:'Heel Strike',   time:0.04,  desc:'Initial contact, heel loading'},
+    {id:'loading',   label:'Loading',       time:0.14,  desc:'Weight acceptance, knee flexion'},
+    {id:'midstance', label:'Mid Stance',    time:0.28,  desc:'Single limb support, peak load'},
+    {id:'terminal',  label:'Terminal Stance',time:0.42, desc:'Heel rise, propulsion phase'},
+    {id:'toeoff',    label:'Toe Off',       time:0.54,  desc:'Stance limb leaving ground'},
+    {id:'earlyswing',label:'Early Swing',   time:0.66,  desc:'Limb clearance, hip flexing'},
+    {id:'midswing',  label:'Mid Swing',     time:0.78,  desc:'Max hip flexion, foot clearing'},
+    {id:'lateswing', label:'Late Swing',    time:0.92,  desc:'Deceleration, foot descent'},
   ],
   'Running': [
-    {id:'stance',   label:'Initial Contact', time:0.05, desc:'Foot strike'},
-    {id:'midpull',  label:'Mid Stance',      time:0.25, desc:'Loading response'},
-    {id:'liftoff',  label:'Propulsion',      time:0.50, desc:'Toe off'},
-    {id:'swing',    label:'Float Phase',     time:0.75, desc:'Both feet off ground'},
+    {id:'contact',   label:'Initial Contact', time:0.04,  desc:'Foot strike — loading begins'},
+    {id:'loading',   label:'Loading Response',time:0.12,  desc:'Absorbing impact, knee flexing'},
+    {id:'midstance', label:'Mid Stance',       time:0.22,  desc:'Single limb support, peak load'},
+    {id:'propulsion',label:'Propulsion',       time:0.36,  desc:'Push-off, ankle plantarflexion'},
+    {id:'toeoff',    label:'Toe Off',          time:0.50,  desc:'Terminal stance, toe leaves ground'},
+    {id:'earlyswing',label:'Early Swing',      time:0.62,  desc:'Hip flexion accelerating'},
+    {id:'midswing',  label:'Mid Swing',        time:0.75,  desc:'Max hip flexion, knee extending'},
+    {id:'lateswing', label:'Late Swing',       time:0.90,  desc:'Foot descent, preparing contact'},
   ],
   'Sit to Stand': [
     {id:'setup',    label:'Seated',    time:0.05, desc:'Starting position'},
@@ -3488,24 +3653,29 @@ function getPhaseTimes(movement, videoDuration) {
     };
   }
   // Build expanded frame list targeting exactly 8 frames
-  // Strategy: key phases + interpolated frames, prioritising largest gaps
+  // Strategy: if movement already has 8 phases, use them directly — no interpolation needed
   const expanded = [];
   const expandedLabels = [];
-  phases.forEach((phase, i) => {
-    expanded.push(phase.time);
-    expandedLabels.push(phase);
-    if(i < phases.length - 1) {
-      const gap = phases[i+1].time - phase.time;
-      // Always add one mid-point interpolation
-      expanded.push(phase.time + gap * 0.5);
-      expandedLabels.push({id:'frame', label:`Inter ${i+1}a`, desc:'Between phases'});
-      // Add a second interpolation in larger gaps (>0.25) to fill up to 8
-      if(gap > 0.25) {
-        expanded.push(phase.time + gap * 0.75);
-        expandedLabels.push({id:'frame', label:`Inter ${i+1}b`, desc:'Between phases'});
+  if(phases.length >= 8) {
+    // Full phase map — use as-is, no "Inter" padding needed
+    phases.slice(0, 8).forEach(phase => { expanded.push(phase.time); expandedLabels.push(phase); });
+  } else {
+    phases.forEach((phase, i) => {
+      expanded.push(phase.time);
+      expandedLabels.push(phase);
+      if(i < phases.length - 1) {
+        const gap = phases[i+1].time - phase.time;
+        // Always add one mid-point interpolation
+        expanded.push(phase.time + gap * 0.5);
+        expandedLabels.push({id:'frame', label:`Inter ${i+1}a`, desc:'Between phases'});
+        // Add a second interpolation in larger gaps (>0.25) to fill up to 8
+        if(gap > 0.25) {
+          expanded.push(phase.time + gap * 0.75);
+          expandedLabels.push({id:'frame', label:`Inter ${i+1}b`, desc:'Between phases'});
+        }
       }
-    }
-  });
+    });
+  }
   // Trim or pad to exactly 8
   while(expanded.length > 8) {
     // Remove the last non-phase interpolated frame
@@ -3570,6 +3740,30 @@ const CAMERA_GUIDES = {
       {icon:'🎽', title:'Shorts above the knee', desc:'Knee joint must be visible. Kneecap position and tibial angle are critical for squat assessment.'},
       {icon:'👟', title:'Capture footwear', desc:'Heel lift or flat shoe changes ankle dorsiflexion demands significantly — include feet in frame.'},
       {icon:'📏', title:'Full body in frame', desc:'Ensure head through feet are all visible. Cropping changes landmark confidence.'},
+    ]
+  },
+  'Gait / Walking': {
+    title: 'Gait Analysis Camera Setup',
+    sub: '3-4 metres of walking in frame gives the best full cycle capture.',
+    tips: [
+      {icon:'📐', title:'True lateral view, camera stationary', desc:'Do not pan with the patient. Camera should be still and capture 3-4 full steps in frame.'},
+      {icon:'📏', title:'Camera at greater trochanter height', desc:'Hip-level camera minimises perspective distortion of knee and ankle angles.'},
+      {icon:'👣', title:'Capture at least 3 full gait cycles', desc:'Upload 3-4 seconds of continuous walking. More cycles = better phase detection.'},
+      {icon:'🎽', title:'Shorts and close-fitting top', desc:'Belt line, greater trochanter, knee centre, and lateral malleolus should all be clearly visible.'},
+      {icon:'📏', title:'Even surface, no incline', desc:'Inclined surfaces alter all joint angles systematically and confound the norms.'},
+    ]
+  },
+  'Running': {
+    title: 'Running Analysis Camera Setup',
+    sub: 'Treadmill side view gives the most consistent running gait data.',
+    tips: [
+      {icon:'🏃', title:'Capture a full gait cycle (min 2 seconds)', desc:'Running cycle = ~0.5–0.7s at typical pace. Capture at least 3 full cycles so phase detection can find initial contact and toe-off reliably.'},
+      {icon:'📐', title:'Strict lateral view — 90° perpendicular to treadmill', desc:'Even 10° of rotation significantly distorts hip and knee flexion angles. Position camera at treadmill midpoint.'},
+      {icon:'📏', title:'Camera at hip height (~1m from ground)', desc:'Aligns lens with the centre of mass. Too high distorts ankle angles; too low misses hip extension.'},
+      {icon:'📱', title:'60fps strongly recommended', desc:'Running limb velocity is 3-5× walking. At 30fps, foot-strike frames are often missed entirely. 60fps or 120fps captures contact and toe-off accurately.'},
+      {icon:'💡', title:'Bright, even lighting — avoid treadmill backlighting', desc:'Fluorescent gym lighting can cause flicker artefacts. Position camera so the runner is lit from the front or side, not silhouetted against a window.'},
+      {icon:'🎽', title:'Fitted clothing, no loose shorts', desc:'Knee joint must be visible throughout swing. Bright shoes help ankle tracking. Consider kinesiology tape on lateral knee and malleolus.'},
+      {icon:'➕', title:'Add posterior view for pelvic drop & crossover', desc:'A second video from directly behind captures contralateral pelvic drop (Trendelenburg), foot crossover, and arm swing asymmetry that side view cannot assess.'},
     ]
   },
   'Gait / Walking': {
