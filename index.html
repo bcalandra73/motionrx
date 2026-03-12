@@ -881,8 +881,8 @@ async function initMoveNet() {
     }
     moveNetDetector = await poseDetection.createDetector(
       poseDetection.SupportedModels.MoveNet,
-      { modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
-        enableSmoothing: false }
+      { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER,
+        enableSmoothing: false }  // Thunder: higher accuracy, still >30fps on desktop
     );
     moveNetReady = true;
     console.log('MoveNet Thunder ready');
@@ -899,8 +899,8 @@ async function initMoveNet() {
     }
     moveNetDetector = await poseDetection.createDetector(
       poseDetection.SupportedModels.MoveNet,
-      { modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
-        enableSmoothing: false }
+      { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER,
+        enableSmoothing: false }  // Thunder: higher accuracy, still >30fps on desktop
     );
     moveNetReady = true;
     console.log('MoveNet ready — dual-model fusion active');
@@ -990,18 +990,72 @@ function startFrameExtraction(file, vid) {
     // Smart phase-based frame extraction
     const movement = document.getElementById('movementType').value || '';
     const {times: phaseTimeProportions, labels: phaseLabels} = getPhaseTimes(movement, dur);
-    const times = phaseTimeProportions.map(t => t * dur);
-    statusText.textContent = `Extracting ${times.length} phase-targeted frames...`;
+    // For running/gait: extract 16 densely-spaced frames across the clip,
+    // then the GaitFSM will re-assign the best 8 to canonical phases.
+    // This gives the FSM more raw material to work with for event detection.
+    const isGaitMovement = /running|gait|walk/i.test(movement);
+    let times, effectiveLabels, effectiveProportions;
+    if(isGaitMovement && dur >= 1.0) {
+      // 16 evenly-spaced frames from 4% to 96% of video
+      const denseCount = 16;
+      effectiveProportions = Array.from({length:denseCount}, (_,i) => 0.04 + (i/(denseCount-1))*0.92);
+      times = effectiveProportions.map(t => t * dur);
+      // Placeholder labels — GaitFSM will overwrite these
+      effectiveLabels = effectiveProportions.map((_,i) => ({
+        id:'frame', label:`Frame ${i+1}`, desc:'Gait analysis frame'
+      }));
+    } else {
+      times = phaseTimeProportions.map(t => t * dur);
+      effectiveLabels = phaseLabels;
+      effectiveProportions = phaseTimeProportions;
+    }
+    statusText.textContent = `Extracting ${times.length} ${isGaitMovement?'dense gait':'phase-targeted'} frames...`;
     const frames = [];
     for(let i = 0; i < times.length; i++) {
       const b64 = await seekCapture(vid, Math.max(0.05, times[i]));
-      if(b64) frames.push({imageData: b64, phase: phaseLabels[i]});
+      if(b64) frames.push({imageData: b64, phase: effectiveLabels[i]});
       barFill.style.width = `${Math.round(((i+1)/times.length)*90)}%`;
     }
     if(frames.length > 0) {
       extractedFrames = frames;
       barFill.style.width = '100%';
-      const phaseNames = frames.filter(f=>f.phase?.id !== 'frame').map(f=>f.phase?.label).filter(Boolean);
+      // ── Post-extraction: for gait movements, deduplicate to 8 best frames ──
+    // The GaitFSM assigned phases to all 16 dense frames.
+    // Trim down to at most 8 frames — one representative per phase,
+    // preferring frames closest to the ideal time proportion for that phase.
+    if(isGaitMovement && frames.length > 8) {
+      const phaseOrder8 = ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
+      const dedupedFrames = [];
+      for(const pid of phaseOrder8) {
+        // Find all frames assigned to this phase; pick the one closest to its ideal time
+        const phaseMap = PHASE_MAPS['Running'] || [];
+        const ideal = phaseMap.find(p=>p.id===pid)?.time ?? 0.5;
+        const candidates = frames
+          .map((f,i) => ({f,i}))
+          .filter(({f}) => f.phase?.id === pid);
+        if(candidates.length === 0) continue;
+        // Pick candidate with time closest to ideal
+        const best = candidates.reduce((acc,cur) => {
+          const at = (effectiveProportions||phaseTimeProportions)[cur.i] ?? (cur.i/Math.max(1,frames.length-1));
+          const bt = (effectiveProportions||phaseTimeProportions)[acc.i] ?? (acc.i/Math.max(1,frames.length-1));
+          return Math.abs(at-ideal) < Math.abs(bt-ideal) ? cur : acc;
+        });
+        dedupedFrames.push(best.f);
+      }
+      // If dedup found fewer than 8, pad with remaining unselected frames
+      if(dedupedFrames.length < 8) {
+        const usedIndices = new Set(dedupedFrames.map(f=>frames.indexOf(f)));
+        for(const f of frames) {
+          if(dedupedFrames.length >= 8) break;
+          if(!usedIndices.has(frames.indexOf(f))) dedupedFrames.push(f);
+        }
+      }
+      frames.length = 0;
+      dedupedFrames.slice(0,8).forEach(f=>frames.push(f));
+      console.log(`[GaitDedup] Trimmed to ${frames.length} unique-phase frames`);
+    }
+
+    const phaseNames = frames.filter(f=>f.phase?.id !== 'frame').map(f=>f.phase?.label).filter(Boolean);
       statusText.textContent = `✓ ${frames.length} frames extracted${phaseNames.length ? ' — phases: ' + phaseNames.slice(0,4).join(', ') : ''} — refining phase labels...`;
 
       // ── Smart phase relabeling: find true bottom/peak using MediaPipe angles ──
@@ -1101,137 +1155,169 @@ function startFrameExtraction(file, vid) {
           // maxima = mid-swing / float phase.  We track the LOWEST visible ankle
           // (most anterior foot — the one landing) across frames.
           if(needsGaitLabel) {
-            const gaitPhases = PHASE_MAPS['Running'] || PHASE_MAPS[movement];
-            // Extract ankle Y and knee angle per frame
-            const footData = quickFused.map((lms, fi) => {
+            // ── Per-leg independent gait cycle detection ──
+            // Running has two interleaved half-cycles. Averaging both legs' angles is wrong —
+            // at any frame the right leg may be at initial contact while left is at mid-swing.
+            // We track each ankle's Y trajectory independently to find each leg's events.
+            //
+            // Biomechanical approach (side view):
+            //   Ankle Y local MINIMUM  = foot lowest/most-grounded  → Initial Contact
+            //   Ankle Y local MAXIMUM  = foot highest in swing       → Mid Swing
+            //   Left knee MINIMUM angle = most-loaded left leg       → Left Mid Stance
+            //   Right knee MINIMUM      = most-loaded right leg      → Right Mid Stance
+            //   Hip angle MINIMUM (most extended) per leg            → Toe Off
+
+            const perFrame = quickFused.map((lms, fi) => {
               if(!lms) return null;
-              const v = (n) => lms[n] && (lms[n].visibility||0) > 0.18 ? lms[n] : null;
-              const lAnk = v(27), rAnk = v(28);
-              // Use whichever ankle is further forward (lower Y in normalised = higher on screen)
-              // For treadmill/side view: leading foot has LOWER y value (closer to top of frame)
-              // For running: use min Y of visible ankles as the "contact" candidate
-              const ankleY = lAnk && rAnk ? Math.min(lAnk.y, rAnk.y)
-                           : lAnk ? lAnk.y : rAnk ? rAnk.y : null;
-              // Knee angle of leading leg (for loading detection)
-              const lH=v(23),lK=v(25),lA=v(27), rH=v(24),rK=v(26),rA=v(28);
-              const lKnee = lH&&lK&&lA ? calcAngle(lH,lK,lA) : null;
-              const rKnee = rH&&rK&&rA ? calcAngle(rH,rK,rA) : null;
-              // Hip angle for propulsion
-              const lS=v(11),rS=v(12);
-              const lHipA = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
-              const rHipA = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
-              // Trunk angle (nose or shoulder midpoint vs hip midpoint vs vertical)
-              const hipMidY = lH && rH ? (lH.y+rH.y)/2 : (lH?.y ?? rH?.y ?? null);
-              const shoulderMidY = v(11) && v(12) ? (v(11).y+v(12).y)/2 : null;
+              const v = (n) => lms[n] && (lms[n].visibility||0) > 0.20 ? lms[n] : null;
+              const lAnk=v(27), rAnk=v(28);
+              const lH=v(23), lK=v(25), lA=v(27);
+              const rH=v(24), rK=v(26), rA=v(28);
+              const lS=v(11), rS=v(12);
+              // Left leg metrics
+              const lKneeA = lH&&lK&&lA ? calcAngle(lH,lK,lA) : null;
+              const lHipA  = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
+              const lAnkleY = lAnk ? lAnk.y : null;
+              // Right leg metrics
+              const rKneeA = rH&&rK&&rA ? calcAngle(rH,rK,rA) : null;
+              const rHipA  = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
+              const rAnkleY = rAnk ? rAnk.y : null;
               return {
                 fi,
-                ankleY,
-                kneeAngle: lKnee!=null&&rKnee!=null ? Math.min(lKnee,rKnee) : (lKnee??rKnee),
-                hipAngle:  lHipA!=null&&rHipA!=null ? (lHipA+rHipA)/2 : (lHipA??rHipA),
-                hipMidY, shoulderMidY,
-                t: phaseTimeProportions[fi] ?? (fi / Math.max(1, frames.length-1)),
+                t: (effectiveProportions||phaseTimeProportions)[fi] ?? (fi / Math.max(1, frames.length-1)),
+                lAnkleY, rAnkleY,
+                lKneeA, rKneeA,
+                lHipA,  rHipA,
               };
             }).filter(Boolean);
 
-            if(footData.length >= 4) {
-              // Sort by time for velocity computation
-              footData.sort((a,b) => a.t - b.t);
-              const n = footData.length;
+            if(perFrame.length >= 4) {
+              perFrame.sort((a,b) => a.t - b.t);
+              const n = perFrame.length;
 
-              // Assign each frame a gait phase based on its rank in the sequence
-              // and the biomechanical signature at that frame
-              // Approach: use time proportion directly but map to clinically meaningful phases
-              // The 8 phases are evenly distributed; use foot/knee signatures to validate
+              // ── Per-leg event detection ──
+              // For each leg: find the frame where it is most clearly in each phase.
+              // These are not averaged — each leg has its OWN event series.
+
+              // LEFT leg events
+              const lAnkYs  = perFrame.map(f => f.lAnkleY);
+              const lKneeAs = perFrame.map(f => f.lKneeA);
+              const lHipAs  = perFrame.map(f => f.lHipA);
+
+              // RIGHT leg events
+              const rAnkYs  = perFrame.map(f => f.rAnkleY);
+              const rKneeAs = perFrame.map(f => f.rKneeA);
+              const rHipAs  = perFrame.map(f => f.rHipA);
+
+              // Helper: find index of valid min/max in array (ignoring nulls)
+              const idxOfMin = (arr) => {
+                let best = Infinity, idx = 0;
+                arr.forEach((v,i) => { if(v!=null && v<best){ best=v; idx=i; }});
+                return idx;
+              };
+              const idxOfMax = (arr) => {
+                let best = -Infinity, idx = 0;
+                arr.forEach((v,i) => { if(v!=null && v>best){ best=v; idx=i; }});
+                return idx;
+              };
+
+              // In normalised coords y=0 is TOP of frame, y=1 is bottom.
+              // Ankle at ground contact → y is LARGER (lower in frame) = ankle Y MAX
+              // Ankle at peak swing    → y is SMALLER (higher in frame) = ankle Y MIN
+              const lContactIdx   = idxOfMax(lAnkYs);    // L foot grounded → ankle Y highest value
+              const lMidswingIdx  = idxOfMin(lAnkYs);    // L foot in air   → ankle Y lowest value
+              const lMidstanceIdx = idxOfMin(lKneeAs);   // L leg most loaded → knee most bent
+              const lToeoffIdx    = idxOfMin(lHipAs);    // L hip most extended → toe-off
+
+              const rContactIdx   = idxOfMax(rAnkYs);
+              const rMidswingIdx  = idxOfMin(rAnkYs);
+              const rMidstanceIdx = idxOfMin(rKneeAs);
+              const rToeoffIdx    = idxOfMin(rHipAs);
+
+              // ── Determine which leg is the "reference" leg for canonical phase labels ──
+              // For a clinical side-view capture, we pick whichever leg has cleaner data
+              // (more non-null ankle readings = more visible in this view).
+              const lVisible = lAnkYs.filter(y=>y!=null).length;
+              const rVisible = rAnkYs.filter(y=>y!=null).length;
+              const usePrimary = lVisible >= rVisible ? 'L' : 'R';
+
+              const contactIdx   = usePrimary==='L' ? lContactIdx   : rContactIdx;
+              const midstanceIdx = usePrimary==='L' ? lMidstanceIdx : rMidstanceIdx;
+              const toeoffIdx    = usePrimary==='L' ? lToeoffIdx    : rToeoffIdx;
+              const midswingIdx  = usePrimary==='L' ? lMidswingIdx  : rMidswingIdx;
+
+              // ── Assign phases to all frames by cycling through gait phases ──
+              // Running gait phases in temporal order:
               const phaseOrder = ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
-              const isRunning = /running/i.test(movement);
 
-              // Find frame most likely to be initial contact: lowest ankle Y (foot most forward/grounded)
-              // In normalised coords: y=1.0 is bottom of frame; contact foot is usually at mid-height
-              // Better signal: max kneeAngle (most extended leg) = initial contact frame
-              let contactIdx = 0, maxKneeAngle = -1;
-              footData.forEach((fd, i) => {
-                if(fd.kneeAngle != null && fd.kneeAngle > maxKneeAngle) {
-                  maxKneeAngle = fd.kneeAngle; contactIdx = i;
+              // Build a sparse event → phase map ordered by frame index
+              // Deduplicate: if two events map to same frame, keep the one with higher priority
+              const priority = {'contact':0,'midstance':1,'toeoff':2,'midswing':3};
+              const framePhase = {}; // frameLocalIdx → phaseId
+              const assign = (idx, phase) => {
+                if(framePhase[idx] === undefined || priority[phase] < priority[framePhase[idx]]) {
+                  framePhase[idx] = phase;
                 }
-              });
+              };
+              assign(contactIdx,   'contact');
+              assign(midstanceIdx, 'midstance');
+              assign(toeoffIdx,    'toeoff');
+              assign(midswingIdx,  'midswing');
 
-              // Find mid-stance: min knee angle (most loaded) — typically ~22% into cycle
-              let midstanceIdx = 0, minKneeAngle = Infinity;
-              footData.forEach((fd, i) => {
-                if(fd.kneeAngle != null && fd.kneeAngle < minKneeAngle) {
-                  minKneeAngle = fd.kneeAngle; midstanceIdx = i;
-                }
-              });
+              // Sort key events chronologically and fill gaps with intervening phase names
+              const keyEvents = Object.entries(framePhase)
+                .map(([i,p]) => ({i:+i, p}))
+                .sort((a,b) => a.i - b.i);
 
-              // Find toe-off: max hip extension (most posterior hip) — hip angle near max
-              // Hip angle at lockout/push-off is typically lowest (hip extended = small angle at front)
-              let toeoffIdx = 0, minHipAngle = Infinity;
-              footData.forEach((fd, i) => {
-                if(fd.hipAngle != null && fd.hipAngle < minHipAngle) {
-                  minHipAngle = fd.hipAngle; toeoffIdx = i;
-                }
-              });
-
-              // Find mid-swing: max hip flexion (hip angle largest) — usually also ankle highest
-              let midswingIdx = 0, maxHipAngle = -1;
-              footData.forEach((fd, i) => {
-                if(fd.hipAngle != null && fd.hipAngle > maxHipAngle) {
-                  maxHipAngle = fd.hipAngle; midswingIdx = i;
-                }
-              });
-
-              // Build assignment: map detected key frames to canonical phases
-              // Fill remaining frames by time interpolation between key frames
-              const keyMap = {};
-              keyMap[contactIdx]  = 'contact';
-              if(midstanceIdx !== contactIdx) keyMap[midstanceIdx] = 'midstance';
-              if(toeoffIdx !== contactIdx && toeoffIdx !== midstanceIdx) keyMap[toeoffIdx] = 'toeoff';
-              if(midswingIdx !== contactIdx && midswingIdx !== midstanceIdx && midswingIdx !== toeoffIdx) keyMap[midswingIdx] = 'midswing';
-
-              // Assign remaining frames by interpolating through the cycle
-              const sortedKeyFrames = Object.entries(keyMap).map(([i,p]) => ({i:+i, phase:p}))
-                                       .sort((a,b) => a.i - b.i);
-
-              // Map original frame index to a phase
+              // Fill all frames not in keyEvents by interpolating within phaseOrder
               const assignedPhases = {};
-              footData.forEach((fd, localIdx) => {
-                if(keyMap[localIdx]) {
-                  assignedPhases[fd.fi] = keyMap[localIdx];
-                } else {
-                  // Find position between key frames and assign intermediate phase
-                  const prev = sortedKeyFrames.filter(k => k.i <= localIdx).at(-1);
-                  const next = sortedKeyFrames.filter(k => k.i > localIdx)[0];
-                  if(prev && next) {
-                    const frac = (localIdx - prev.i) / (next.i - prev.i);
-                    const prevIdx = phaseOrder.indexOf(prev.phase);
-                    const nextIdx = phaseOrder.indexOf(next.phase);
-                    const midIdx  = Math.round(prevIdx + frac * (nextIdx - prevIdx));
-                    assignedPhases[fd.fi] = phaseOrder[Math.max(0, Math.min(phaseOrder.length-1, midIdx))];
-                  } else if(prev) {
-                    const prevIdx = phaseOrder.indexOf(prev.phase);
-                    assignedPhases[fd.fi] = phaseOrder[Math.min(phaseOrder.length-1, prevIdx+1)];
-                  } else if(next) {
-                    const nextIdx = phaseOrder.indexOf(next.phase);
-                    assignedPhases[fd.fi] = phaseOrder[Math.max(0, nextIdx-1)];
-                  } else {
-                    assignedPhases[fd.fi] = phaseOrder[localIdx % phaseOrder.length];
-                  }
+              keyEvents.forEach((ke, ki) => {
+                assignedPhases[ke.i] = ke.p;
+                const nextKe = keyEvents[ki+1];
+                if(!nextKe) return;
+                const pIdx  = phaseOrder.indexOf(ke.p);
+                const nIdx  = phaseOrder.indexOf(nextKe.p);
+                const span  = nextKe.i - ke.i;
+                for(let fi2 = ke.i+1; fi2 < nextKe.i; fi2++) {
+                  if(span <= 1) { assignedPhases[fi2] = ke.p; continue; }
+                  const frac = (fi2 - ke.i) / span;
+                  const interp = Math.round(pIdx + frac * (nIdx - pIdx));
+                  assignedPhases[fi2] = phaseOrder[Math.max(0, Math.min(phaseOrder.length-1, interp))];
                 }
               });
+              // Fill any frames before first key event or after last
+              for(let fi2 = 0; fi2 < n; fi2++) {
+                if(assignedPhases[fi2] !== undefined) continue;
+                const first = keyEvents[0];
+                const last  = keyEvents[keyEvents.length-1];
+                if(first && fi2 < first.i) {
+                  // Before first key — assume late swing wrapping from previous cycle
+                  const pIdx = phaseOrder.indexOf(first.p);
+                  const backSteps = first.i - fi2;
+                  const wrapIdx = ((pIdx - backSteps) % phaseOrder.length + phaseOrder.length) % phaseOrder.length;
+                  assignedPhases[fi2] = phaseOrder[wrapIdx];
+                } else if(last && fi2 > last.i) {
+                  const pIdx = phaseOrder.indexOf(last.p);
+                  const fwdSteps = fi2 - last.i;
+                  assignedPhases[fi2] = phaseOrder[(pIdx + fwdSteps) % phaseOrder.length];
+                } else {
+                  assignedPhases[fi2] = phaseOrder[fi2 % phaseOrder.length];
+                }
+              }
 
               // Apply to frames
               const gaitPhaseMap = Object.fromEntries(
                 (PHASE_MAPS['Running'] || []).map(p => [p.id, p])
               );
               let reassigned = 0;
-              frames.forEach((f, fi) => {
-                const newId = assignedPhases[fi];
+              perFrame.forEach((fd, localIdx) => {
+                const newId = assignedPhases[localIdx];
                 if(newId && gaitPhaseMap[newId]) {
-                  f.phase = {...gaitPhaseMap[newId]};
+                  frames[fd.fi].phase = {...gaitPhaseMap[newId]};
                   reassigned++;
                 }
               });
-              console.log(`[GaitFSM] Reassigned ${reassigned}/${frames.length} frames. Key: contact@${contactIdx}, midstance@${midstanceIdx}, toeoff@${toeoffIdx}, midswing@${midswingIdx}`);
+              console.log(`[GaitFSM v2] primary=${usePrimary} leg (${usePrimary==='L'?lVisible:rVisible} visible), reassigned ${reassigned}/${frames.length}. contact@${contactIdx} midstance@${midstanceIdx} toeoff@${toeoffIdx} midswing@${midswingIdx}`);
             }
           }
 
@@ -3003,7 +3089,9 @@ function calcAngle(a, b, c) {
 
 function extractAngles(lm) {
   if(!lm) return {};
-  const v = (i) => lm[i] && lm[i].visibility > 0.4 ? lm[i] : null;
+  // 0.30 threshold (down from 0.40) — fast-moving distal landmarks (ankles, toes) in
+  // running often land between 0.30–0.40 confidence; too-strict threshold drops them all.
+  const v = (i) => lm[i] && lm[i].visibility > 0.30 ? lm[i] : null;
   const angles = {};
 
   // Knee angles
@@ -3025,11 +3113,14 @@ function extractAngles(lm) {
     angles['Trunk Lean'] = Math.round(Math.abs(Math.atan2(dx,Math.abs(dy)) * 180/Math.PI));
   }
 
-  // Ankle dorsiflexion
-  const lKneeP=v(25),lAnkleP=v(27),lToe=v(31);
-  const rKneeP=v(26),rAnkleP=v(28),rToe=v(32);
-  if(lKneeP&&lAnkleP&&lToe) angles['Left Ankle Dorsiflexion'] = calcAngle(lKneeP,lAnkleP,lToe);
-  if(rKneeP&&rAnkleP&&rToe) angles['Right Ankle Dorsiflexion'] = calcAngle(rKneeP,rAnkleP,rToe);
+  // Ankle dorsiflexion — knee → ankle → toe (landmark 31/32)
+  // Fallback: if toe landmark is missing, use heel (29/30) as distal point instead
+  const lKneeP=v(25),lAnkleP=v(27),lToe=v(31),lHeel=v(29);
+  const rKneeP=v(26),rAnkleP=v(28),rToe=v(32),rHeel=v(30);
+  const lDistal = lToe || lHeel;   // prefer toe; heel is a reasonable proxy for dorsiflexion angle
+  const rDistal = rToe || rHeel;
+  if(lKneeP&&lAnkleP&&lDistal) angles['Left Ankle Dorsiflexion'] = calcAngle(lKneeP,lAnkleP,lDistal);
+  if(rKneeP&&rAnkleP&&rDistal) angles['Right Ankle Dorsiflexion'] = calcAngle(rKneeP,rAnkleP,rDistal);
 
   // Shoulder angles
   const lElbow=v(13),rElbow=v(14);
