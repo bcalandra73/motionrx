@@ -252,6 +252,26 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 /* ── Asymmetry Index ── */
 .asi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:4px}
 .asi-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;box-shadow:var(--shadow)}
+/* Stride metrics */
+.stride-kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:18px}
+.stride-kpi{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:2px}
+.stride-kpi-label{font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+.stride-kpi-value{font-size:1.55rem;font-weight:700;font-family:'Source Serif 4',serif;color:var(--navy);line-height:1}
+.stride-kpi-sub{font-size:.68rem;color:var(--muted)}
+.stride-kpi-flag-ok .stride-kpi-value{color:var(--green)}
+.stride-kpi-flag-warn .stride-kpi-value{color:var(--amber)}
+.stride-kpi-flag-poor .stride-kpi-value{color:var(--red)}
+.stride-asym-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.stride-asym-label{font-size:.74rem;font-weight:600;width:160px;flex-shrink:0}
+.stride-asym-bar-wrap{flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative}
+.stride-asym-bar-fill{height:100%;border-radius:4px;transition:width .4s}
+.stride-asym-val{font-size:.74rem;font-weight:700;width:44px;text-align:right;flex-shrink:0}
+.stride-section-head{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--border);padding-bottom:5px}
+.stride-disclaimer{font-size:.68rem;color:var(--muted);margin-top:12px;padding:8px;background:var(--bg);border-radius:6px;border-left:3px solid var(--border)}
+.foot-strike-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:12px;font-size:.75rem;font-weight:700;letter-spacing:.03em}
+.fs-heel{background:#fce8e8;color:#c0392b}
+.fs-mid{background:#e6f4f1;color:#0d7a5f}
+.fs-fore{background:#e8effe;color:#2563eb}
 .asi-joint{font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px}
 .asi-bar-wrap{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-bottom:6px;position:relative}
 .asi-bar-fill{height:100%;border-radius:4px;transition:width .4s}
@@ -703,8 +723,17 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       </div>
     </div>
 
+    <!-- Running Stride Metrics — shown only for gait/running -->
+    <div class="report-section full" id="strideMetricsSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head">
+        <span class="sh-icon">🏃</span>
+        <h3>Running Stride Metrics</h3>
+        <span id="strideMetricsBadge" style="margin-left:auto;font-size:.70rem;background:rgba(255,255,255,.15);color:#fff;padding:2px 8px;border-radius:10px;font-weight:500;"></span>
+      </div>
+      <div class="section-body" id="strideMetricsBody" style="padding:16px;"></div>
+    </div>
 
-    <!-- Skeleton frames -->
+
     <div class="report-section full" id="framesSection" style="margin-bottom:12px;display:none;">
       <div class="section-head"><span class="sh-icon">🦴</span><h3 id="framesSectionTitle">MediaPipe Skeleton Analysis — Tracked Frames</h3></div>
       <div class="section-body" style="padding:12px 10px;">
@@ -808,6 +837,7 @@ let aggregated = {};  // module-level so always in scope
 let cameraView = 'side'; // 'side' | 'front' | 'posterior'
 let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
+let window_strideMetrics = null; // populated by stride detection pass for gait movements
 
 // ── Second video state ──
 let uploadedFile2 = null, fileType2 = null;
@@ -979,6 +1009,7 @@ function startFrameExtraction(file, vid) {
   barFill.style.width = '5%';
 
   let started = false;
+  window_strideMetrics = null; // reset for each new analysis
 
   async function doExtract() {
     if(started) return; started = true;
@@ -997,8 +1028,10 @@ function startFrameExtraction(file, vid) {
     let times, effectiveLabels, effectiveProportions;
     if(isGaitMovement && dur >= 1.0) {
       // 16 evenly-spaced frames from 4% to 96% of video
-      const denseCount = 16;
-      effectiveProportions = Array.from({length:denseCount}, (_,i) => 0.04 + (i/(denseCount-1))*0.92);
+      // 48 frames gives ~8 frames/stride at typical running pace (6-7 strides in 4.7s clip)
+      // This is enough to reliably detect peak ankle-Y events for each contact
+      const denseCount = 48;
+      effectiveProportions = Array.from({length:denseCount}, (_,i) => 0.03 + (i/(denseCount-1))*0.94);
       times = effectiveProportions.map(t => t * dur);
       // Placeholder labels — GaitFSM will overwrite these
       effectiveLabels = effectiveProportions.map((_,i) => ({
@@ -1019,42 +1052,7 @@ function startFrameExtraction(file, vid) {
     if(frames.length > 0) {
       extractedFrames = frames;
       barFill.style.width = '100%';
-      // ── Post-extraction: for gait movements, deduplicate to 8 best frames ──
-    // The GaitFSM assigned phases to all 16 dense frames.
-    // Trim down to at most 8 frames — one representative per phase,
-    // preferring frames closest to the ideal time proportion for that phase.
-    if(isGaitMovement && frames.length > 8) {
-      const phaseOrder8 = ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
-      const dedupedFrames = [];
-      for(const pid of phaseOrder8) {
-        // Find all frames assigned to this phase; pick the one closest to its ideal time
-        const phaseMap = PHASE_MAPS['Running'] || [];
-        const ideal = phaseMap.find(p=>p.id===pid)?.time ?? 0.5;
-        const candidates = frames
-          .map((f,i) => ({f,i}))
-          .filter(({f}) => f.phase?.id === pid);
-        if(candidates.length === 0) continue;
-        // Pick candidate with time closest to ideal
-        const best = candidates.reduce((acc,cur) => {
-          const at = (effectiveProportions||phaseTimeProportions)[cur.i] ?? (cur.i/Math.max(1,frames.length-1));
-          const bt = (effectiveProportions||phaseTimeProportions)[acc.i] ?? (acc.i/Math.max(1,frames.length-1));
-          return Math.abs(at-ideal) < Math.abs(bt-ideal) ? cur : acc;
-        });
-        dedupedFrames.push(best.f);
-      }
-      // If dedup found fewer than 8, pad with remaining unselected frames
-      if(dedupedFrames.length < 8) {
-        const usedIndices = new Set(dedupedFrames.map(f=>frames.indexOf(f)));
-        for(const f of frames) {
-          if(dedupedFrames.length >= 8) break;
-          if(!usedIndices.has(frames.indexOf(f))) dedupedFrames.push(f);
-        }
-      }
-      frames.length = 0;
-      dedupedFrames.slice(0,8).forEach(f=>frames.push(f));
-      console.log(`[GaitDedup] Trimmed to ${frames.length} unique-phase frames`);
-    }
-
+  
     const phaseNames = frames.filter(f=>f.phase?.id !== 'frame').map(f=>f.phase?.label).filter(Boolean);
       statusText.textContent = `✓ ${frames.length} frames extracted${phaseNames.length ? ' — phases: ' + phaseNames.slice(0,4).join(', ') : ''} — refining phase labels...`;
 
@@ -1155,169 +1153,265 @@ function startFrameExtraction(file, vid) {
           // maxima = mid-swing / float phase.  We track the LOWEST visible ankle
           // (most anterior foot — the one landing) across frames.
           if(needsGaitLabel) {
-            // ── Per-leg independent gait cycle detection ──
-            // Running has two interleaved half-cycles. Averaging both legs' angles is wrong —
-            // at any frame the right leg may be at initial contact while left is at mid-swing.
-            // We track each ankle's Y trajectory independently to find each leg's events.
-            //
-            // Biomechanical approach (side view):
-            //   Ankle Y local MINIMUM  = foot lowest/most-grounded  → Initial Contact
-            //   Ankle Y local MAXIMUM  = foot highest in swing       → Mid Swing
-            //   Left knee MINIMUM angle = most-loaded left leg       → Left Mid Stance
-            //   Right knee MINIMUM      = most-loaded right leg      → Right Mid Stance
-            //   Hip angle MINIMUM (most extended) per leg            → Toe Off
+            // ══════════════════════════════════════════════════════════════
+            // GAIT FSM v4 — Cycle-anchored, per-leg, duplicate-free
+            // ══════════════════════════════════════════════════════════════
 
+            const gaitPhaseMap = Object.fromEntries(
+              (PHASE_MAPS['Running'] || []).map(p => [p.id, p])
+            );
+
+            // a) Extract per-leg kinematics from all dense frames
             const perFrame = quickFused.map((lms, fi) => {
               if(!lms) return null;
-              const v = (n) => lms[n] && (lms[n].visibility||0) > 0.20 ? lms[n] : null;
-              const lAnk=v(27), rAnk=v(28);
-              const lH=v(23), lK=v(25), lA=v(27);
-              const rH=v(24), rK=v(26), rA=v(28);
+              const v = (n) => lms[n] && (lms[n].visibility||0) > 0.18 ? lms[n] : null;
+              const lH=v(23),lK=v(25),lA=v(27), rH=v(24),rK=v(26),rA=v(28);
               const lS=v(11), rS=v(12);
-              // Left leg metrics
-              const lKneeA = lH&&lK&&lA ? calcAngle(lH,lK,lA) : null;
-              const lHipA  = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
-              const lAnkleY = lAnk ? lAnk.y : null;
-              // Right leg metrics
-              const rKneeA = rH&&rK&&rA ? calcAngle(rH,rK,rA) : null;
-              const rHipA  = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
-              const rAnkleY = rAnk ? rAnk.y : null;
               return {
                 fi,
-                t: (effectiveProportions||phaseTimeProportions)[fi] ?? (fi / Math.max(1, frames.length-1)),
-                lAnkleY, rAnkleY,
-                lKneeA, rKneeA,
-                lHipA,  rHipA,
+                t: (effectiveProportions||phaseTimeProportions)[fi] ?? (fi/Math.max(1,frames.length-1)),
+                lAnkY: lA?.y ?? null,
+                rAnkY: rA?.y ?? null,
+                lAnkX: lA?.x ?? null,   // horizontal position for step length asymmetry
+                rAnkX: rA?.x ?? null,
+                lKnee: lH&&lK&&lA ? calcAngle(lH,lK,lA) : null,
+                rKnee: rH&&rK&&rA ? calcAngle(rH,rK,rA) : null,
+                lHip:  lS&&lH&&lK ? calcAngle(lS,lH,lK) : null,
+                rHip:  rS&&rH&&rK ? calcAngle(rS,rH,rK) : null,
               };
             }).filter(Boolean);
 
+            // ── Run stride detection engine on ALL dense frames ──
+            // Do this before the cycle selection / dedup so we have full multi-stride data
+            if(perFrame.length >= 8) {
+              try {
+                const vidDur = quickFused.length > 0 ? (frames.length > 0 ? frames[frames.length-1]?.t || 1 : 1) : 1;
+                // Use the actual video duration from the outer scope
+                const actualDur = typeof dur !== 'undefined' ? dur : 1;
+                window_strideMetrics = detectStridesAndComputeMetrics(
+                  perFrame, actualDur, 30, cameraView
+                );
+                if(window_strideMetrics) {
+                  console.log(`[StrideEngine] ${window_strideMetrics.stridesDetected} strides, cadence=${window_strideMetrics.cadenceSpm}spm, GCT=${window_strideMetrics.gcPct}%, float=${window_strideMetrics.floatPct}%`);
+                  // If we have a best stride, restrict the cycle to those frames for gallery
+                  // (override cycleStart/cycleEnd later in GaitFSM v4)
+                }
+              } catch(se) {
+                console.warn('[StrideEngine] Failed:', se.message);
+                window_strideMetrics = null;
+              }
+            }
+
             if(perFrame.length >= 4) {
               perFrame.sort((a,b) => a.t - b.t);
-              const n = perFrame.length;
+              const N = perFrame.length;
 
-              // ── Per-leg event detection ──
-              // For each leg: find the frame where it is most clearly in each phase.
-              // These are not averaged — each leg has its OWN event series.
-
-              // LEFT leg events
-              const lAnkYs  = perFrame.map(f => f.lAnkleY);
-              const lKneeAs = perFrame.map(f => f.lKneeA);
-              const lHipAs  = perFrame.map(f => f.lHipA);
-
-              // RIGHT leg events
-              const rAnkYs  = perFrame.map(f => f.rAnkleY);
-              const rKneeAs = perFrame.map(f => f.rKneeA);
-              const rHipAs  = perFrame.map(f => f.rHipA);
-
-              // Helper: find index of valid min/max in array (ignoring nulls)
-              const idxOfMin = (arr) => {
-                let best = Infinity, idx = 0;
-                arr.forEach((v,i) => { if(v!=null && v<best){ best=v; idx=i; }});
-                return idx;
-              };
-              const idxOfMax = (arr) => {
-                let best = -Infinity, idx = 0;
-                arr.forEach((v,i) => { if(v!=null && v>best){ best=v; idx=i; }});
-                return idx;
-              };
-
-              // In normalised coords y=0 is TOP of frame, y=1 is bottom.
-              // Ankle at ground contact → y is LARGER (lower in frame) = ankle Y MAX
-              // Ankle at peak swing    → y is SMALLER (higher in frame) = ankle Y MIN
-              const lContactIdx   = idxOfMax(lAnkYs);    // L foot grounded → ankle Y highest value
-              const lMidswingIdx  = idxOfMin(lAnkYs);    // L foot in air   → ankle Y lowest value
-              const lMidstanceIdx = idxOfMin(lKneeAs);   // L leg most loaded → knee most bent
-              const lToeoffIdx    = idxOfMin(lHipAs);    // L hip most extended → toe-off
-
-              const rContactIdx   = idxOfMax(rAnkYs);
-              const rMidswingIdx  = idxOfMin(rAnkYs);
-              const rMidstanceIdx = idxOfMin(rKneeAs);
-              const rToeoffIdx    = idxOfMin(rHipAs);
-
-              // ── Determine which leg is the "reference" leg for canonical phase labels ──
-              // For a clinical side-view capture, we pick whichever leg has cleaner data
-              // (more non-null ankle readings = more visible in this view).
-              const lVisible = lAnkYs.filter(y=>y!=null).length;
-              const rVisible = rAnkYs.filter(y=>y!=null).length;
-              const usePrimary = lVisible >= rVisible ? 'L' : 'R';
-
-              const contactIdx   = usePrimary==='L' ? lContactIdx   : rContactIdx;
-              const midstanceIdx = usePrimary==='L' ? lMidstanceIdx : rMidstanceIdx;
-              const toeoffIdx    = usePrimary==='L' ? lToeoffIdx    : rToeoffIdx;
-              const midswingIdx  = usePrimary==='L' ? lMidswingIdx  : rMidswingIdx;
-
-              // ── Assign phases to all frames by cycling through gait phases ──
-              // Running gait phases in temporal order:
-              const phaseOrder = ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
-
-              // Build a sparse event → phase map ordered by frame index
-              // Deduplicate: if two events map to same frame, keep the one with higher priority
-              const priority = {'contact':0,'midstance':1,'toeoff':2,'midswing':3};
-              const framePhase = {}; // frameLocalIdx → phaseId
-              const assign = (idx, phase) => {
-                if(framePhase[idx] === undefined || priority[phase] < priority[framePhase[idx]]) {
-                  framePhase[idx] = phase;
-                }
-              };
-              assign(contactIdx,   'contact');
-              assign(midstanceIdx, 'midstance');
-              assign(toeoffIdx,    'toeoff');
-              assign(midswingIdx,  'midswing');
-
-              // Sort key events chronologically and fill gaps with intervening phase names
-              const keyEvents = Object.entries(framePhase)
-                .map(([i,p]) => ({i:+i, p}))
-                .sort((a,b) => a.i - b.i);
-
-              // Fill all frames not in keyEvents by interpolating within phaseOrder
-              const assignedPhases = {};
-              keyEvents.forEach((ke, ki) => {
-                assignedPhases[ke.i] = ke.p;
-                const nextKe = keyEvents[ki+1];
-                if(!nextKe) return;
-                const pIdx  = phaseOrder.indexOf(ke.p);
-                const nIdx  = phaseOrder.indexOf(nextKe.p);
-                const span  = nextKe.i - ke.i;
-                for(let fi2 = ke.i+1; fi2 < nextKe.i; fi2++) {
-                  if(span <= 1) { assignedPhases[fi2] = ke.p; continue; }
-                  const frac = (fi2 - ke.i) / span;
-                  const interp = Math.round(pIdx + frac * (nIdx - pIdx));
-                  assignedPhases[fi2] = phaseOrder[Math.max(0, Math.min(phaseOrder.length-1, interp))];
-                }
+              // b) Smooth signals
+              const smooth = (arr) => arr.map((v,i) => {
+                if(v==null) return null;
+                const p=(i>0&&arr[i-1]!=null)?arr[i-1]:v;
+                const n=(i<arr.length-1&&arr[i+1]!=null)?arr[i+1]:v;
+                return (p+v+n)/3;
               });
-              // Fill any frames before first key event or after last
-              for(let fi2 = 0; fi2 < n; fi2++) {
-                if(assignedPhases[fi2] !== undefined) continue;
-                const first = keyEvents[0];
-                const last  = keyEvents[keyEvents.length-1];
-                if(first && fi2 < first.i) {
-                  // Before first key — assume late swing wrapping from previous cycle
-                  const pIdx = phaseOrder.indexOf(first.p);
-                  const backSteps = first.i - fi2;
-                  const wrapIdx = ((pIdx - backSteps) % phaseOrder.length + phaseOrder.length) % phaseOrder.length;
-                  assignedPhases[fi2] = phaseOrder[wrapIdx];
-                } else if(last && fi2 > last.i) {
-                  const pIdx = phaseOrder.indexOf(last.p);
-                  const fwdSteps = fi2 - last.i;
-                  assignedPhases[fi2] = phaseOrder[(pIdx + fwdSteps) % phaseOrder.length];
+              const lAnkS=smooth(perFrame.map(f=>f.lAnkY));
+              const rAnkS=smooth(perFrame.map(f=>f.rAnkY));
+              const lKneeS=smooth(perFrame.map(f=>f.lKnee));
+              const rKneeS=smooth(perFrame.map(f=>f.rKnee));
+              const lHipS=smooth(perFrame.map(f=>f.lHip));
+              const rHipS=smooth(perFrame.map(f=>f.rHip));
+
+              // c) Local maxima detection for ankle Y (contact events)
+              const localMaxima = (arr, minProm=0.015) => {
+                const peaks=[];
+                for(let i=1;i<arr.length-1;i++){
+                  if(arr[i]==null) continue;
+                  const prev=arr.slice(Math.max(0,i-2),i).filter(x=>x!=null);
+                  const next=arr.slice(i+1,Math.min(arr.length,i+3)).filter(x=>x!=null);
+                  if(!prev.length||!next.length) continue;
+                  if(arr[i]>Math.max(...prev)&&arr[i]>Math.max(...next)){
+                    const surrounding=[...prev,...next];
+                    if(arr[i]-Math.min(...surrounding)>=minProm) peaks.push(i);
+                  }
+                }
+                if(!peaks.length){
+                  let b=-Infinity,bi=0;
+                  arr.forEach((v,i)=>{if(v!=null&&v>b){b=v;bi=i;}});
+                  peaks.push(bi);
+                }
+                return peaks;
+              };
+
+              const lContacts=localMaxima(lAnkS);
+              const rContacts=localMaxima(rAnkS);
+
+              // d) Choose reference leg (more visible ankle data)
+              const lVis=lAnkS.filter(v=>v!=null).length;
+              const rVis=rAnkS.filter(v=>v!=null).length;
+              const REF=lVis>=rVis?'L':'R';
+              const OPP=REF==='L'?'R':'L';
+              const refAnkS  =REF==='L'?lAnkS:rAnkS;
+              const refKneeS =REF==='L'?lKneeS:rKneeS;
+              const refHipS  =REF==='L'?lHipS:rHipS;
+              const oppAnkS  =REF==='L'?rAnkS:lAnkS;
+              const oppKneeS =REF==='L'?rKneeS:lKneeS;
+              const oppHipS  =REF==='L'?rHipS:lHipS;
+              const refC     =REF==='L'?lContacts:rContacts;
+              const oppC     =REF==='L'?rContacts:lContacts;
+
+              console.log(`[GaitFSM v4] REF=${REF} vis=${lVis}L/${rVis}R contacts: ref=[${refC}] opp=[${oppC}]`);
+
+              // e) Determine cycle bounds
+              // Prefer the best-representative stride from the stride engine if available
+              let cycleStart, cycleEnd;
+              if(window_strideMetrics?.bestStrideFrameRange) {
+                [cycleStart, cycleEnd] = window_strideMetrics.bestStrideFrameRange;
+                // Clamp to valid range
+                cycleStart = Math.max(0, Math.min(cycleStart, N-2));
+                cycleEnd   = Math.max(cycleStart+1, Math.min(cycleEnd, N-1));
+                console.log(`[GaitFSM v4] Using best stride from engine: frames ${cycleStart}–${cycleEnd}`);
+              } else if(refC.length>=2){ cycleStart=refC[0]; cycleEnd=refC[1]; }
+              else if(refC.length===1){
+                cycleStart=Math.max(0,refC[0]-1);
+                cycleEnd=Math.min(N-1,refC[0]+Math.round(N*0.7));
+              } else { cycleStart=0; cycleEnd=N-1; }
+              const cycleLen=Math.max(2,cycleEnd-cycleStart);
+
+              // f) Key event detection within cycle windows
+              const argMinR=(arr,from,to)=>{let b=Infinity,bi=from;for(let i=from;i<=to&&i<arr.length;i++){if(arr[i]!=null&&arr[i]<b){b=arr[i];bi=i;}}return bi;};
+              const argMaxR=(arr,from,to)=>{let b=-Infinity,bi=from;for(let i=from;i<=to&&i<arr.length;i++){if(arr[i]!=null&&arr[i]>b){b=arr[i];bi=i;}}return bi;};
+
+              const r0=cycleStart, r1=cycleEnd;
+              // REF leg: contact(0%) → midstance(0-35%) → toeoff(25-55%) → midswing(55-100%)
+              const refContactIdx  =r0;
+              const refMidstIdx    =argMinR(refKneeS, r0, r0+Math.round(cycleLen*.35));
+              const refToeoffIdx   =argMinR(refHipS,  r0+Math.round(cycleLen*.20), r0+Math.round(cycleLen*.55));
+              const refMidswingIdx =argMinR(refAnkS,  r0+Math.round(cycleLen*.50), r1);
+
+              // OPP leg events: offset ~50% into cycle
+              const oppMidRaw=r0+Math.round(cycleLen*.5);
+              const oppContactIdx = oppC.length>0
+                ? oppC.reduce((b,c)=>Math.abs(c-oppMidRaw)<Math.abs(b-oppMidRaw)?c:b, oppC[0])
+                : argMaxR(oppAnkS, r0+Math.round(cycleLen*.40), r0+Math.round(cycleLen*.65));
+              const oppMidstIdx   =argMinR(oppKneeS, oppContactIdx, Math.min(r1,oppContactIdx+Math.round(cycleLen*.25)));
+              const oppToeoffIdx  =argMinR(oppHipS,  oppContactIdx, Math.min(r1,oppContactIdx+Math.round(cycleLen*.35)));
+              const oppMidswingIdx=argMaxR(refAnkS,  r0+Math.round(cycleLen*.65), r1); // OPP swing = REF ankle rises
+
+              // g) Build timeline — deduplicate by (side+phaseId) first, then by frameIndex
+              const rawEv=[
+                {i:refContactIdx,  side:REF,phaseId:'contact',  pri:0},
+                {i:refMidstIdx,    side:REF,phaseId:'midstance',pri:1},
+                {i:refToeoffIdx,   side:REF,phaseId:'toeoff',   pri:2},
+                {i:refMidswingIdx, side:REF,phaseId:'midswing', pri:3},
+                {i:oppContactIdx,  side:OPP,phaseId:'contact',  pri:4},
+                {i:oppMidstIdx,    side:OPP,phaseId:'midstance',pri:5},
+                {i:oppToeoffIdx,   side:OPP,phaseId:'toeoff',   pri:6},
+                {i:oppMidswingIdx, side:OPP,phaseId:'midswing', pri:7},
+              ].filter(e=>e.i>=0&&e.i<N);
+
+              // Deduplicate by frame index (keep lowest priority)
+              const frameEvMap={};
+              for(const ev of rawEv){
+                if(frameEvMap[ev.i]===undefined||ev.pri<frameEvMap[ev.i].pri) frameEvMap[ev.i]=ev;
+              }
+              // Deduplicate by (side+phaseId) — keep only one per pair
+              const seenPair=new Set();
+              const timeline=Object.values(frameEvMap)
+                .filter(ev=>{
+                  const k=`${ev.side}-${ev.phaseId}`;
+                  if(seenPair.has(k)) return false;
+                  seenPair.add(k); return true;
+                })
+                .sort((a,b)=>a.i-b.i);
+
+              console.log('[GaitFSM v4] Timeline:',timeline.map(e=>`${e.i}:${e.side}${e.phaseId}`).join(' | '));
+
+              // h) Build phase label objects with leg side
+              const makeLabel=(side,phaseId)=>{
+                const base=gaitPhaseMap[phaseId];
+                if(!base) return null;
+                const sideStr=side==='L'?'Left':'Right';
+                return{...base,label:`${sideStr} ${base.label}`,
+                  desc:`${sideStr} leg — ${base.desc}`,_side:side,_baseId:phaseId};
+              };
+
+              // i) Assign labels to all N frames by interpolating between key events
+              const phaseOrder=['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
+              const asgn=new Array(N).fill(null);
+              for(const ev of timeline) asgn[ev.i]=makeLabel(ev.side,ev.phaseId);
+
+              for(let ti=0;ti<timeline.length-1;ti++){
+                const cur=timeline[ti], nxt=timeline[ti+1], span=nxt.i-cur.i;
+                if(span<=1) continue;
+                const pS=phaseOrder.indexOf(cur.phaseId), pE=phaseOrder.indexOf(nxt.phaseId);
+                for(let fi2=cur.i+1;fi2<nxt.i;fi2++){
+                  if(asgn[fi2]) continue;
+                  const frac=(fi2-cur.i)/span;
+                  const interp=Math.max(0,Math.min(phaseOrder.length-1,Math.round(pS+frac*(pE-pS))));
+                  asgn[fi2]=makeLabel(frac<0.5?cur.side:nxt.side, phaseOrder[interp]);
+                }
+              }
+              for(let fi2=0;fi2<N;fi2++){
+                if(asgn[fi2]) continue;
+                const first=timeline[0],last=timeline[timeline.length-1];
+                if(!first){asgn[fi2]=makeLabel(REF,'contact');continue;}
+                if(fi2<first.i){
+                  const pIdx=phaseOrder.indexOf(first.phaseId),back=first.i-fi2;
+                  const wrap=((pIdx-back)%phaseOrder.length+phaseOrder.length)%phaseOrder.length;
+                  asgn[fi2]=makeLabel(first.side,phaseOrder[wrap]);
                 } else {
-                  assignedPhases[fi2] = phaseOrder[fi2 % phaseOrder.length];
+                  const pIdx=phaseOrder.indexOf(last.phaseId),fwd=fi2-last.i;
+                  asgn[fi2]=makeLabel(last.side,phaseOrder[(pIdx+fwd)%phaseOrder.length]);
                 }
               }
 
-              // Apply to frames
-              const gaitPhaseMap = Object.fromEntries(
-                (PHASE_MAPS['Running'] || []).map(p => [p.id, p])
-              );
-              let reassigned = 0;
-              perFrame.forEach((fd, localIdx) => {
-                const newId = assignedPhases[localIdx];
-                if(newId && gaitPhaseMap[newId]) {
-                  frames[fd.fi].phase = {...gaitPhaseMap[newId]};
-                  reassigned++;
+              // j) Select 8 best frames — one per canonical phase, no duplicate source frames
+              const keySet=new Set(timeline.map(e=>e.i));
+              const usedFis=new Set();
+              const dedupedFrames=[];
+              const cycleStartT=perFrame[Math.min(cycleStart,N-1)]?.t??0;
+              const cycleEndT  =perFrame[Math.min(cycleEnd,N-1)]?.t??1;
+              const cycleDur   =Math.max(0.001,cycleEndT-cycleStartT);
+
+              for(const pid of phaseOrder){
+                if(dedupedFrames.length>=8) break;
+                const cands=perFrame
+                  .map((fd,li)=>({fd,li,lbl:asgn[li]}))
+                  .filter(c=>c.lbl?._baseId===pid&&!usedFis.has(c.fd.fi));
+                if(!cands.length) continue;
+                const keyCands=cands.filter(c=>keySet.has(c.li));
+                const pool=keyCands.length>0?keyCands:cands;
+                const idealFrac=gaitPhaseMap[pid]?.time??0.5;
+                const best=pool.reduce((acc,cur)=>{
+                  const acyc=((perFrame[cur.li]?.t??0)-cycleStartT)/cycleDur;
+                  const bcyc=((perFrame[acc.li]?.t??0)-cycleStartT)/cycleDur;
+                  return Math.abs(acyc-idealFrac)<Math.abs(bcyc-idealFrac)?cur:acc;
+                });
+                usedFis.add(best.fd.fi);
+                dedupedFrames.push({...frames[best.fd.fi],phase:best.lbl});
+              }
+
+              // Pad if needed
+              if(dedupedFrames.length<8){
+                for(const fd of perFrame){
+                  if(dedupedFrames.length>=8) break;
+                  const li=perFrame.indexOf(fd);
+                  if(!usedFis.has(fd.fi)&&asgn[li]){
+                    usedFis.add(fd.fi);
+                    dedupedFrames.push({...frames[fd.fi],phase:asgn[li]});
+                  }
                 }
+              }
+
+              // Sort by source time then replace frames array
+              dedupedFrames.sort((a,b)=>{
+                const at=perFrame.find(f=>frames.indexOf(a)===f.fi)?.t??0;
+                const bt=perFrame.find(f=>frames.indexOf(b)===f.fi)?.t??0;
+                return at-bt;
               });
-              console.log(`[GaitFSM v2] primary=${usePrimary} leg (${usePrimary==='L'?lVisible:rVisible} visible), reassigned ${reassigned}/${frames.length}. contact@${contactIdx} midstance@${midstanceIdx} toeoff@${toeoffIdx} midswing@${midswingIdx}`);
+              frames.length=0;
+              dedupedFrames.slice(0,8).forEach(f=>frames.push(f));
+
+              console.log(`[GaitFSM v4] Final ${frames.length}: ${frames.map(f=>f.phase?.label||'?').join(' | ')}`);
             }
           }
 
@@ -3725,6 +3819,435 @@ const PHASE_MAPS = {
   ],
 };
 
+// ── Stride Detection & Running Metrics Engine ──────────────────────────────
+// Analyzes all detected strides across a multi-stride clip.
+// Called during gait analysis after pose detection on dense frames.
+//
+// Input: perFrameData — array of {t, fi, lAnkY, rAnkY, lKnee, rKnee, lHip, rHip, lAnkX, rAnkX}
+//        videoDuration — in seconds
+//        fps — video frame rate (used for timing calculations)
+//        cameraViewLocal — 'side' | 'front' | 'posterior'
+//
+// Returns: strideMetrics object with cadence, GCT, float time, asymmetry, etc.
+
+function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, cameraViewLocal) {
+  if(!perFrameData || perFrameData.length < 8) return null;
+
+  const smooth3 = (arr) => arr.map((v,i) => {
+    if(v==null) return null;
+    const p=(i>0&&arr[i-1]!=null)?arr[i-1]:v;
+    const n=(i<arr.length-1&&arr[i+1]!=null)?arr[i+1]:v;
+    return (p+v+n)/3;
+  });
+
+  const lAnkSmooth = smooth3(perFrameData.map(f=>f.lAnkY));
+  const rAnkSmooth = smooth3(perFrameData.map(f=>f.rAnkY));
+  const lKneeSmooth = smooth3(perFrameData.map(f=>f.lKnee));
+  const rKneeSmooth = smooth3(perFrameData.map(f=>f.rKnee));
+  const lHipSmooth  = smooth3(perFrameData.map(f=>f.lHip));
+  const rHipSmooth  = smooth3(perFrameData.map(f=>f.rHip));
+  const N = perFrameData.length;
+
+  // ── 1. Contact event detection (local maxima of ankle Y) ──
+  // In normalised coords y=1 = bottom of frame. Foot at ground = maximum Y.
+  // minProm: require peak to rise at least this much above surrounding valley.
+  const findContacts = (ankArr, minProm=0.018) => {
+    const peaks = [];
+    for(let i=1; i<ankArr.length-1; i++) {
+      if(ankArr[i]==null) continue;
+      // Look at a wider window for running (fast peaks)
+      const prev = ankArr.slice(Math.max(0,i-3),i).filter(x=>x!=null);
+      const next = ankArr.slice(i+1,Math.min(ankArr.length,i+4)).filter(x=>x!=null);
+      if(!prev.length||!next.length) continue;
+      const isLocalMax = ankArr[i] > Math.max(...prev) && ankArr[i] >= Math.max(...next);
+      if(isLocalMax) {
+        const minSurround = Math.min(...prev,...next);
+        if(ankArr[i] - minSurround >= minProm) peaks.push(i);
+      }
+    }
+    return peaks;
+  };
+
+  const lContactIdxs = findContacts(lAnkSmooth);
+  const rContactIdxs = findContacts(rAnkSmooth);
+
+  // ── 2. Float phase detection (both ankles near top of frame simultaneously) ──
+  // Float = both feet off ground. Detect as frames where both ankle Y values
+  // are simultaneously low (both feet elevated).
+  const floatFrames = perFrameData.map((_,i) => {
+    const ly = lAnkSmooth[i], ry = rAnkSmooth[i];
+    if(ly==null||ry==null) return false;
+    // "Low" = smaller Y value = higher in frame = foot in air
+    // Use median ankle Y across all frames as the "ground level" reference
+    const allYs = [...lAnkSmooth,...rAnkSmooth].filter(v=>v!=null);
+    const sorted = [...allYs].sort((a,b)=>a-b);
+    const medY = sorted[Math.floor(sorted.length/2)];
+    const groundThresh = medY - 0.04; // ankle must be 4% of frame height above median
+    return ly < groundThresh && ry < groundThresh;
+  });
+
+  // ── 3. Compute stride-level timing metrics ──
+  // Use the leg with more detected contacts as the reference leg
+  const REF = lContactIdxs.length >= rContactIdxs.length ? 'L' : 'R';
+  const refContacts = REF==='L' ? lContactIdxs : rContactIdxs;
+  const oppContacts = REF==='L' ? rContactIdxs : lContactIdxs;
+
+  // Convert frame indices to timestamps
+  const idxToTime = (idx) => perFrameData[Math.min(idx,N-1)]?.t * videoDuration;
+
+  // Compute stride cycles from consecutive same-leg contacts
+  const strideCycles = []; // {startIdx, endIdx, startT, endT, durationS}
+  for(let i=0; i<refContacts.length-1; i++) {
+    const startIdx = refContacts[i];
+    const endIdx   = refContacts[i+1];
+    const startT   = idxToTime(startIdx);
+    const endT     = idxToTime(endIdx);
+    const dur      = endT - startT;
+    // Sanity check: running stride at 120-240 spm = 0.25-0.5s/step, 0.5-1.0s/stride
+    if(dur >= 0.35 && dur <= 1.5) {
+      strideCycles.push({startIdx, endIdx, startT, endT, durationS: dur, refSide: REF});
+    }
+  }
+
+  if(strideCycles.length === 0) return null; // couldn't detect reliable strides
+
+  // ── 4. Per-stride biomechanics ──
+  const strideDetails = strideCycles.map(sc => {
+    const {startIdx, endIdx, durationS, refSide} = sc;
+    const oppAnkSmooth = REF==='L' ? rAnkSmooth : lAnkSmooth;
+    const refKSm = REF==='L' ? lKneeSmooth : rKneeSmooth;
+    const oppKSm = REF==='L' ? rKneeSmooth : lKneeSmooth;
+    const refHSm = REF==='L' ? lHipSmooth  : rHipSmooth;
+
+    // Frames within this stride
+    const strideIdxs = [];
+    for(let i=startIdx; i<=endIdx && i<N; i++) strideIdxs.push(i);
+    if(!strideIdxs.length) return null;
+
+    // Ground contact time for REF leg:
+    // Stance phase = from contact (startIdx) to toe-off
+    // Toe-off = first local minimum of ref ankle Y after contact (foot lifts)
+    // Approximation: ankle Y drops significantly after stance peak
+    const refAnkArr = REF==='L' ? lAnkSmooth : rAnkSmooth;
+    let toeoffIdx = endIdx; // default: contact of opposite leg ≈ toe-off
+    // Find first point where ref ankle drops below 70% of its contact peak
+    const contactPeak = refAnkArr[startIdx] ?? 0;
+    for(let i=startIdx+1; i<=endIdx && i<N; i++) {
+      const v = refAnkArr[i];
+      if(v!=null && v < contactPeak * 0.85) {
+        toeoffIdx = i;
+        break;
+      }
+    }
+    const stanceFrames = toeoffIdx - startIdx;
+    const gcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
+
+    // Float phase within this stride: count frames where both feet elevated
+    const floatCount = strideIdxs.filter(i=>floatFrames[i]).length;
+    const floatPct   = Math.round((floatCount / (endIdx - startIdx)) * 100);
+
+    // Peak knee flexion (swing phase = after toe-off)
+    const swingIdxs = strideIdxs.filter(i=>i>toeoffIdx);
+    const peakKneeFlex = swingIdxs.length > 0
+      ? Math.min(...swingIdxs.map(i=>refKSm[i]).filter(v=>v!=null))
+      : null;
+
+    // Hip extension at toe-off
+    const hipAtToeoff = refHSm[Math.min(toeoffIdx, N-1)];
+
+    // Contralateral knee at contact (opp leg knee angle at REF foot strike)
+    const oppKAtContact = oppKSm[startIdx] ?? null;
+
+    // Step length asymmetry proxy: horizontal ankle distance at contact
+    const lAnkXAtContact = perFrameData[startIdx]?.lAnkX ?? null;
+    const rAnkXAtContact = perFrameData[startIdx]?.rAnkX ?? null;
+    const stepAsymProxy  = (lAnkXAtContact!=null && rAnkXAtContact!=null)
+      ? Math.abs(lAnkXAtContact - rAnkXAtContact)
+      : null;
+
+    // Foot strike pattern: ankle angle at contact
+    // From ankle (27/28), knee (25/26), toe (31/32) angle
+    // Small angle (plantarflexed) = forefoot; ~90° = midfoot; >90° = heel
+    // We approximate using the ankle Y relative to the knee Y at contact
+    const refAnkLM = perFrameData[startIdx];
+    let footStrike = 'unknown';
+    if(refAnkLM) {
+      // Use hip-knee-ankle sagittal angle as proxy for foot strike if toe not available
+      // High hip angle at contact (hip flexed forward) usually correlates with forefoot
+      const hipAtContact = refHSm[startIdx];
+      if(hipAtContact != null) {
+        if(hipAtContact > 155)      footStrike = 'heel';
+        else if(hipAtContact > 140) footStrike = 'midfoot';
+        else                        footStrike = 'forefoot';
+      }
+    }
+
+    return {
+      durationS, gcPct, floatPct, peakKneeFlex, hipAtToeoff, footStrike,
+      stepAsymProxy, startIdx, endIdx, toeoffIdx
+    };
+  }).filter(Boolean);
+
+  if(!strideDetails.length) return null;
+
+  // ── 5. Aggregate across all strides ──
+  const mean  = arr => arr.reduce((s,v)=>s+v,0)/arr.length;
+  const stdev = arr => { const m=mean(arr); return Math.sqrt(arr.map(v=>(v-m)**2).reduce((s,v)=>s+v,0)/arr.length); };
+  const median = arr => { const s=[...arr].sort((a,b)=>a-b); return s[Math.floor(s.length/2)]; };
+
+  const durations     = strideDetails.map(s=>s.durationS);
+  const gcPcts        = strideDetails.map(s=>s.gcPct).filter(v=>v>0);
+  const floatPcts     = strideDetails.map(s=>s.floatPct);
+  const kneePeaks     = strideDetails.map(s=>s.peakKneeFlex).filter(v=>v!=null);
+  const hipExtensions = strideDetails.map(s=>s.hipAtToeoff).filter(v=>v!=null);
+
+  const avgDuration   = mean(durations);
+  const cadenceSpm    = Math.round(60 / avgDuration * 2); // steps per minute (each stride = 2 steps)
+  const cadenceStride = Math.round(60 / avgDuration);     // strides per minute
+  const cvDuration    = durations.length > 1 ? Math.round(stdev(durations) / mean(durations) * 100) : null;
+
+  // GCT as % of cycle (more reliable than absolute ms at 30fps)
+  const avgGcPct   = gcPcts.length > 0 ? Math.round(mean(gcPcts)) : null;
+  const avgFloatPct= Math.round(mean(floatPcts));
+  const hasFloat   = avgFloatPct > 5; // float phase present if >5% of cycle
+
+  // Foot strike consensus
+  const fsCounts = {heel:0, midfoot:0, forefoot:0, unknown:0};
+  strideDetails.forEach(s => fsCounts[s.footStrike]++);
+  const fsConsensus = ['heel','midfoot','forefoot'].reduce((a,b) => fsCounts[a]>=fsCounts[b]?a:b);
+
+  // Peak knee flexion average
+  const avgPeakKnee = kneePeaks.length > 0 ? Math.round(mean(kneePeaks)) : null;
+  const avgHipExt   = hipExtensions.length > 0 ? Math.round(mean(hipExtensions)) : null;
+
+  // Step length asymmetry (from horizontal ankle offset at contact, average across strides)
+  // Find opposite leg contacts within each stride for step symmetry
+  const stepLengthAsym = (() => {
+    const stepsL = [], stepsR = [];
+    // Use detected contacts for both legs
+    lContactIdxs.forEach(ci => {
+      const x = perFrameData[ci]?.lAnkX;
+      if(x!=null) stepsL.push(x);
+    });
+    rContactIdxs.forEach(ci => {
+      const x = perFrameData[ci]?.rAnkX;
+      if(x!=null) stepsR.push(x);
+    });
+    if(!stepsL.length || !stepsR.length) return null;
+    const lm = mean(stepsL), rm = mean(stepsR);
+    return Math.round(Math.abs(lm - rm) / ((lm + rm) / 2) * 100);
+  })();
+
+  // ── 6. Find best representative stride (median duration) ──
+  const medianDur    = median(durations);
+  const bestStrideIdx = strideDetails.reduce((bi, s, i) =>
+    Math.abs(s.durationS - medianDur) < Math.abs(strideDetails[bi].durationS - medianDur) ? i : bi, 0);
+  const bestStride    = strideDetails[bestStrideIdx];
+
+  // ── 7. Clinical flags ──
+  const flags = {};
+  // Cadence norms for recreational running: 160-180 spm optimal
+  if(cadenceSpm < 155)       flags.cadence = {level:'warn', msg:'Cadence below 160 spm — consider shorter, quicker steps to reduce impact loading'};
+  else if(cadenceSpm > 185)  flags.cadence = {level:'ok',   msg:'Cadence in optimal range (>160 spm)'};
+  else                       flags.cadence = {level:'ok',   msg:`Cadence ${cadenceSpm} spm — within optimal running range (160–180)`};
+
+  if(avgGcPct != null) {
+    if(avgGcPct > 45)        flags.gct = {level:'warn', msg:'Ground contact time >45% of cycle — may indicate overstriding or reduced push-off'};
+    else if(avgGcPct < 30)   flags.gct = {level:'ok',   msg:'Short ground contact time — indicates good elastic energy return'};
+    else                     flags.gct = {level:'ok',   msg:'Ground contact time within normal range (30–45% of cycle)'};
+  }
+
+  if(stepLengthAsym != null) {
+    if(stepLengthAsym > 15)  flags.asym = {level:'poor', msg:'Step length asymmetry >15% — clinically significant, warrants further assessment'};
+    else if(stepLengthAsym > 8) flags.asym = {level:'warn', msg:'Mild step length asymmetry — monitor across sessions'};
+    else                     flags.asym = {level:'ok',   msg:'Step length symmetry within acceptable range (<8%)'};
+  }
+
+  if(cvDuration != null) {
+    if(cvDuration > 5)       flags.consistency = {level:'warn', msg:'Stride duration variability >5% — inconsistent stride timing'};
+    else                     flags.consistency = {level:'ok',   msg:'Stride timing consistent across strides'};
+  }
+
+  if(fsConsensus === 'heel')     flags.footStrike = {level:'warn', msg:'Heel strike pattern detected — higher impact loading, consider forefoot strike cues'};
+  else if(fsConsensus==='midfoot') flags.footStrike = {level:'ok', msg:'Midfoot strike pattern — optimal for most runners'};
+  else if(fsConsensus==='forefoot') flags.footStrike = {level:'ok', msg:'Forefoot strike pattern detected'};
+
+  return {
+    // Timing
+    strideDurationS:  +avgDuration.toFixed(3),
+    cadenceSpm,
+    cadenceStride,
+    cvStridePct:      cvDuration,
+    gcPct:            avgGcPct,
+    floatPct:         avgFloatPct,
+    hasFloat,
+    // Kinematics
+    peakKneeFlex:     avgPeakKnee,
+    hipExtAtToeoff:   avgHipExt,
+    fsConsensus,
+    stepLengthAsymPct: stepLengthAsym,
+    // Meta
+    stridesDetected:  strideCycles.length,
+    refSide:          REF,
+    bestStrideFrameRange: bestStride ? [bestStride.startIdx, bestStride.endIdx] : null,
+    bestStrideDetails: bestStride,
+    allStrideDetails:  strideDetails,
+    flags,
+    videoDurationS:   videoDuration,
+    fps,
+    // Raw contact indices for downstream use
+    lContactIdxs,
+    rContactIdxs,
+  };
+}
+
+// Render stride metrics section in the report
+function renderStrideMetrics(metrics) {
+  const section = document.getElementById('strideMetricsSection');
+  const body    = document.getElementById('strideMetricsBody');
+  const badge   = document.getElementById('strideMetricsBadge');
+  if(!section||!body||!metrics) return;
+
+  badge.textContent = `${metrics.stridesDetected} strides detected · ${metrics.videoDurationS.toFixed(1)}s clip`;
+  section.style.display = 'block';
+
+  const flagColor = (level) =>
+    level==='ok' ? 'var(--green)' : level==='warn' ? 'var(--amber)' : 'var(--red)';
+  const kpiClass = (level) =>
+    level==='ok' ? 'stride-kpi-flag-ok' : level==='warn' ? 'stride-kpi-flag-warn' : 'stride-kpi-flag-poor';
+
+  // ── KPI tiles ──
+  const kpis = [
+    {
+      label:'Cadence',
+      value: metrics.cadenceSpm,
+      unit:'spm',
+      sub:`${metrics.cadenceStride} strides/min`,
+      flag: metrics.flags.cadence?.level ?? 'ok',
+    },
+    {
+      label:'Stride Duration',
+      value: (metrics.strideDurationS*1000).toFixed(0),
+      unit:'ms',
+      sub: metrics.cvStridePct != null ? `CV ${metrics.cvStridePct}% variability` : `avg across ${metrics.stridesDetected} strides`,
+      flag: metrics.cvStridePct!=null&&metrics.cvStridePct>5 ? 'warn' : 'ok',
+    },
+    {
+      label:'Ground Contact',
+      value: metrics.gcPct != null ? metrics.gcPct+'%' : '—',
+      unit:'of cycle',
+      sub: metrics.gcPct != null
+        ? `~${Math.round(metrics.strideDurationS*metrics.gcPct/100*1000)}ms est.`
+        : 'insufficient data',
+      flag: metrics.flags.gct?.level ?? 'ok',
+    },
+    {
+      label:'Float Time',
+      value: metrics.hasFloat ? metrics.floatPct+'%' : 'None',
+      unit: metrics.hasFloat ? 'of cycle' : 'detected',
+      sub: metrics.hasFloat
+        ? `~${Math.round(metrics.strideDurationS*metrics.floatPct/100*1000)}ms est.`
+        : 'No bilateral float phase',
+      flag: 'ok',
+    },
+    ...(metrics.peakKneeFlex != null ? [{
+      label:'Peak Knee Flex',
+      value: metrics.peakKneeFlex+'°',
+      unit:'swing phase',
+      sub:'Optimal: 90–130° for running',
+      flag: metrics.peakKneeFlex<80||metrics.peakKneeFlex>140 ? 'warn' : 'ok',
+    }] : []),
+    ...(metrics.hipExtAtToeoff != null ? [{
+      label:'Hip Ext at Toe-off',
+      value: metrics.hipExtAtToeoff+'°',
+      unit:'at push-off',
+      sub:'Optimal hip angle <160° (10°+ ext)',
+      flag: metrics.hipExtAtToeoff>170 ? 'warn' : 'ok',
+    }] : []),
+  ];
+
+  let html = '<div class="stride-kpi-grid">';
+  kpis.forEach(k => {
+    html += `<div class="stride-kpi ${kpiClass(k.flag)}">
+      <div class="stride-kpi-label">${k.label}</div>
+      <div class="stride-kpi-value">${k.value}</div>
+      <div class="stride-kpi-sub">${k.unit}</div>
+      <div class="stride-kpi-sub" style="margin-top:2px;opacity:.8">${k.sub}</div>
+    </div>`;
+  });
+  html += '</div>';
+
+  // ── Foot strike pattern ──
+  const fsMap = {
+    heel:     {class:'fs-heel',  icon:'👟', text:'Heel Strike'},
+    midfoot:  {class:'fs-mid',   icon:'⚡', text:'Midfoot Strike'},
+    forefoot: {class:'fs-fore',  icon:'🔵', text:'Forefoot Strike'},
+    unknown:  {class:'',         icon:'❓', text:'Unknown'},
+  };
+  const fs = fsMap[metrics.fsConsensus] || fsMap.unknown;
+  html += `<div class="stride-section-head">Foot Strike Pattern</div>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+    <span class="foot-strike-badge ${fs.class}">${fs.icon} ${fs.text}</span>
+    ${metrics.flags.footStrike ? `<span style="font-size:.74rem;color:${flagColor(metrics.flags.footStrike.level)}">${metrics.flags.footStrike.msg}</span>` : ''}
+  </div>`;
+
+  // ── Symmetry ──
+  if(metrics.stepLengthAsymPct != null) {
+    const asymFlag = metrics.flags.asym?.level ?? 'ok';
+    const asymColor = flagColor(asymFlag);
+    const barW = Math.min(100, metrics.stepLengthAsymPct * 3);
+    html += `<div class="stride-section-head">Step Length Asymmetry</div>
+    <div class="stride-asym-row">
+      <div class="stride-asym-label">Horizontal step offset</div>
+      <div class="stride-asym-bar-wrap">
+        <div class="stride-asym-bar-fill" style="width:${barW}%;background:${asymColor}"></div>
+      </div>
+      <div class="stride-asym-val" style="color:${asymColor}">${metrics.stepLengthAsymPct}%</div>
+    </div>
+    <div style="font-size:.73rem;color:${asymColor};margin-bottom:8px">${metrics.flags.asym?.msg||''}</div>`;
+  }
+
+  // ── Stride consistency ──
+  if(metrics.cvStridePct != null && metrics.stridesDetected >= 3) {
+    const conFlag = metrics.flags.consistency?.level ?? 'ok';
+    html += `<div class="stride-section-head">Stride-to-Stride Consistency</div>
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;flex-wrap:wrap;">
+      <span style="font-size:.85rem;font-weight:700;color:${flagColor(conFlag)}">${metrics.cvStridePct}% CV</span>
+      <span style="font-size:.74rem;color:var(--muted)">${metrics.flags.consistency?.msg||''}</span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
+      ${metrics.allStrideDetails.map((s,i)=>`
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:.70rem;">
+          <span style="color:var(--muted)">Stride ${i+1}</span><br>
+          <strong>${(s.durationS*1000).toFixed(0)}ms</strong>
+        </div>`).join('')}
+    </div>`;
+  }
+
+  // ── Clinical flags summary ──
+  const flagEntries = Object.entries(metrics.flags).filter(([,v])=>v.level!=='ok');
+  if(flagEntries.length > 0) {
+    html += `<div class="stride-section-head">Clinical Flags</div>`;
+    flagEntries.forEach(([key,v]) => {
+      const icon = v.level==='poor' ? '🔴' : '🟡';
+      html += `<div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;font-size:.75rem;">
+        <span>${icon}</span><span>${v.msg}</span></div>`;
+    });
+  }
+
+  // ── Disclaimer ──
+  html += `<div class="stride-disclaimer">
+    ⚠️ <strong>Measurement accuracy note:</strong> Ground contact time and float time are estimated from video at ${metrics.fps}fps.
+    At 30fps, timing resolution is ±33ms (~12–20% error on individual events). Values are reported as % of cycle to reduce
+    absolute error. For clinical-grade GCT measurement, 120fps+ video is recommended. Cadence and stride duration accuracy
+    are not affected by frame rate limitations.
+  </div>`;
+
+  body.innerHTML = html;
+}
+
+// ── End Stride Metrics Engine ──────────────────────────────────────────────
+
 // Get phase times for a movement (returns array of 0-1 proportions)
 function getPhaseTimes(movement, videoDuration) {
   let phases = MOVEMENT_NORMS[movement] ? PHASE_MAPS[movement] : null;
@@ -4263,7 +4786,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const phase = f1?.phase || f2?.phase;
           const phaseId = phase?.id || 'frame';
           const phaseLabel = phase?.label || ('Frame ' + (i+1));
-          const phaseDesc = phase?.desc || '';
+          const phaseDesc  = phase?.desc  || '';
+          // _side is set by GaitFSM v4 ('L' or 'R') to indicate which leg is in the named phase
+          const phaseSide  = phase?._side || null;
+          const sideColor  = phaseSide === 'L' ? '#0ea5e9' : phaseSide === 'R' ? '#f97316' : null;
+          // Show a colored dot instead of full "LEFT/RIGHT" text — label already contains the side name
+          const sideBadge  = phaseSide
+            ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${sideColor};margin-left:4px;flex-shrink:0;vertical-align:middle;" title="${phaseSide==='L'?'Left':'Right'} leg"></span>`
+            : '';
 
           const group = document.createElement('div');
           group.className = 'phase-group';
@@ -4273,12 +4803,20 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const header = document.createElement('div');
           header.className = 'phase-group-header';
           // Direction indicator based on phase id
+                    // Direction/phase-type icons for gait vs lift movements
+          const gaitContactPhase = ['contact','loading'].includes(phaseId);
+          const gaitStancePhase  = ['midstance','propulsion'].includes(phaseId);
+          const gaitSwingPhase   = ['toeoff','earlyswing','midswing','lateswing'].includes(phaseId);
           const concentric = ['liftoff','midpull','lockout','ascent','ascent1','ascent2','stance'].includes(phaseId);
-          const eccentric   = ['descent','descent1','descent2'].includes(phaseId);
-          const dirIcon = concentric ? ' <span style="color:var(--teal);font-size:.75rem;">▲</span>'
-                        : eccentric  ? ' <span style="color:#a78bfa;font-size:.75rem;">▼</span>' : '';
-          header.innerHTML = '<span>' + phaseLabel + dirIcon
-            + (phaseDesc ? '<span style="font-weight:400;opacity:.7;font-size:.63rem;display:block;margin-top:1px;text-transform:none;letter-spacing:0;">' + phaseDesc + '</span>' : '')
+          const eccentric  = ['descent','descent1','descent2'].includes(phaseId);
+          const dirIcon = gaitContactPhase ? ' <span style="color:#f97316;font-size:.75rem;">↓</span>'
+                        : gaitStancePhase  ? ' <span style="color:var(--teal);font-size:.75rem;">⊙</span>'
+                        : gaitSwingPhase   ? ' <span style="color:#818cf8;font-size:.75rem;">↑</span>'
+                        : concentric       ? ' <span style="color:var(--teal);font-size:.75rem;">▲</span>'
+                        : eccentric        ? ' <span style="color:#a78bfa;font-size:.75rem;">▼</span>' : '';
+          header.innerHTML = '<span style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">'
+            + phaseLabel + dirIcon + sideBadge
+            + (phaseDesc ? '<span style="font-weight:400;opacity:.7;font-size:.63rem;display:block;width:100%;margin-top:1px;text-transform:none;letter-spacing:0;">' + phaseDesc + '</span>' : '')
             + '</span><span class="phase-badge phase-' + phaseId + '" style="flex-shrink:0;">#' + (i+1) + '</span>';
           group.appendChild(header);
 
@@ -4342,7 +4880,12 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const phase = f.phase;
           const phaseId = phase?.id || 'frame';
           const phaseLabel = phase?.label || ('Frame ' + (i+1));
-          lbl.innerHTML = '<span>' + phaseLabel + '</span><span class="phase-badge phase-' + phaseId + '">' + (phaseId === 'frame' ? '#'+(i+1) : phase?.desc || '') + '</span>';
+          const phaseSideS = phase?._side || null;
+          const sideBadgeS = phaseSideS
+            ? `<span style="background:${phaseSideS==='L'?'#0ea5e9':'#f97316'};color:#fff;font-size:.50rem;font-weight:800;padding:0 4px;border-radius:2px;margin-left:3px;">${phaseSideS==='L'?'L':'R'}</span>`
+            : '';
+          lbl.innerHTML = '<span style="display:flex;align-items:center;gap:2px;">' + phaseLabel + sideBadgeS + '</span>'
+            + '<span class="phase-badge phase-' + phaseId + '">' + (phaseId === 'frame' ? '#'+(i+1) : phase?.desc || '') + '</span>';
           card.appendChild(imgWrap);
           card.appendChild(lbl);
           gallery.appendChild(card);
@@ -4370,21 +4913,70 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     // Render angle table
     if(Object.keys(aggregated).length > 0) {
       const movNorm = movement;
+      const isGait  = /running|gait|walk/i.test(movNorm);
+
       let tableHtml = `<div style="font-size:.73rem;color:var(--muted);margin-bottom:10px;">📐 Norms calibrated for: <strong style="color:var(--navy);">${movNorm || 'General movement'}</strong></div>`;
-      tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
-      Object.entries(aggregated).forEach(([k,v]) => {
-        const flag = flagAngleForMovement(k, v.avg, movNorm);
-        const ref = getNormLabel(k, movNorm);
-        tableHtml += `<tr>
-          <td>${k}</td>
-          <td><span class="val ${flag}">${v.avg}°</span></td>
-          <td class="ref">${v.min}° – ${v.max}°</td>
-          <td class="ref">${ref}</td>
-        </tr>`;
-      });
-      tableHtml += '</tbody></table>';
+
+      if(isGait) {
+        // Gait table: group L/R pairs in one row for side-by-side comparison
+        const gaitPairs = [
+          {label:'Hip Flexion',         L:'Left Hip Flexion',          R:'Right Hip Flexion'},
+          {label:'Hip Extension',        L:'Left Hip Extension',        R:'Right Hip Extension'},
+          {label:'Knee Flexion',         L:'Left Knee Flexion',         R:'Right Knee Flexion'},
+          {label:'Knee Extension',       L:'Left Knee Extension',       R:'Right Knee Extension'},
+          {label:'Ankle Dorsiflexion',   L:'Left Ankle Dorsiflexion',   R:'Right Ankle Dorsiflexion'},
+          {label:'Trunk Lean',           L:'Trunk Lean',                R:null},
+          {label:'Trunk Lateral Lean',   L:'Trunk Lateral Lean',        R:null},
+          {label:'Pelvic Drop',          L:'Pelvic Drop',               R:null},
+        ];
+        tableHtml += `<table class="angles-table"><thead><tr>
+          <th>Joint</th>
+          <th style="color:#0ea5e9">Left Leg</th>
+          <th style="color:#f97316">Right Leg</th>
+          <th>Reference (${movNorm})</th>
+        </tr></thead><tbody>`;
+
+        gaitPairs.forEach(({label, L, R}) => {
+          const lv = aggregated[L], rv = R ? aggregated[R] : null;
+          if(!lv && !rv) return;
+          const lFlag = lv ? flagAngleForMovement(L, lv.avg, movNorm) : '';
+          const rFlag = rv ? flagAngleForMovement(R, rv.avg, movNorm) : '';
+          const ref   = getNormLabel(L, movNorm);
+          const lCell = lv ? `<span class="val ${lFlag}">${lv.avg}°</span><br><span class="ref">${lv.min}–${lv.max}°</span>` : '—';
+          const rCell = rv ? `<span class="val ${rFlag}">${rv.avg}°</span><br><span class="ref">${rv.min}–${rv.max}°</span>` : (R ? '—' : '<span class="ref">bilateral</span>');
+          tableHtml += `<tr>
+            <td style="font-weight:600">${label}</td>
+            <td>${lCell}</td>
+            <td>${rCell}</td>
+            <td class="ref">${ref}</td>
+          </tr>`;
+        });
+        tableHtml += '</tbody></table>';
+      } else {
+        tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
+        Object.entries(aggregated).forEach(([k,v]) => {
+          const flag = flagAngleForMovement(k, v.avg, movNorm);
+          const ref = getNormLabel(k, movNorm);
+          tableHtml += `<tr>
+            <td>${k}</td>
+            <td><span class="val ${flag}">${v.avg}°</span></td>
+            <td class="ref">${v.min}° – ${v.max}°</td>
+            <td class="ref">${ref}</td>
+          </tr>`;
+        });
+        tableHtml += '</tbody></table>';
+      }
+
       document.getElementById('anglesBody').innerHTML = tableHtml;
       document.getElementById('anglesSection').style.display='block';
+    }
+
+    // Render stride metrics for gait/running
+    if(/running|gait|walk/i.test(movement) && window_strideMetrics) {
+      renderStrideMetrics(window_strideMetrics);
+    } else {
+      const sm = document.getElementById('strideMetricsSection');
+      if(sm) sm.style.display = 'none';
     }
 
     // Render PROMs if entered
