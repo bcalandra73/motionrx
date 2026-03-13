@@ -408,9 +408,10 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <div class="form-group">
             <label class="form-label">Height <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
             <div style="display:flex;gap:6px;">
-              <input type="number" id="patientHeight" placeholder="e.g. 175" min="100" max="220" step="1" style="flex:1">
+              <input type="number" id="patientHeight" placeholder="e.g. 175" min="30" max="220" step="1" style="flex:1">
               <select id="heightUnit" style="width:72px;flex-shrink:0;"><option value="cm">cm</option><option value="in">in</option></select>
             </div>
+            <div id="heightWarn" style="display:none;font-size:.7rem;color:#f59e0b;margin-top:3px;padding:3px 8px;background:rgba(245,158,11,.12);border-radius:4px;border-left:3px solid #f59e0b;"></div>
           </div>
           <div class="form-group">
             <label class="form-label">Symptomatic Side <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
@@ -1317,10 +1318,24 @@ function startFrameExtraction(file, vid) {
                   else if(speedUnit==='kph') speedMps = speedRaw / 3.6;
                   else                       speedMps = speedRaw;
                 }
-                // Convert height to cm
+                // Convert height to cm, with sanity check
                 let heightCm = null;
                 if(!isNaN(heightRaw) && heightRaw > 0) {
                   heightCm = heightUnit === 'in' ? heightRaw * 2.54 : heightRaw;
+                  // Sanity check: adult height should be 100-220cm.
+                  // If cm is selected but value < 100, user likely typed inches — auto-convert.
+                  if(heightUnit === 'cm' && heightCm < 100 && heightCm > 30) {
+                    heightCm = Math.round(heightRaw * 2.54);
+                    const htEl = document.getElementById('patientHeight');
+                    if(htEl) htEl.value = heightCm;
+                    const htWarn = document.getElementById('heightWarn');
+                    if(htWarn) {
+                      htWarn.textContent = `Looks like inches — converted to ${heightCm} cm`;
+                      htWarn.style.display = 'block';
+                      setTimeout(() => { htWarn.style.display='none'; }, 5000);
+                    }
+                    console.warn('[Height] Auto-converted from apparent inches to', heightCm, 'cm');
+                  }
                 }
                 window_strideMetrics = detectStridesAndComputeMetrics(
                   perFrame, actualDur, userFpsInput, cameraView,
@@ -4392,15 +4407,16 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 
 // Render stride metrics section in the report
 // ── Gait angle display value helper ──
-// For running/gait, flexion angles should use PEAK (max) not average
-// Norms (35-65° hip, 90-130° knee) reference peak swing phase values
-const GAIT_PEAK_JOINTS = new Set([
-  'Left Hip Flexion','Right Hip Flexion',
-  'Left Knee Flexion','Right Knee Flexion',
-]);
+// For running/gait, flexion angles should use PEAK, not average, because norms reference peak swing values.
+// Hip Flexion: stored as degrees-from-upright → bigger = more flexed → use .max
+// Knee Flexion: stored as included angle → smaller = more flexed → use .min
+// All others (trunk lean, ankle DF, pelvic drop): use .avg (contextual averages)
+const GAIT_USE_MAX = new Set(['Left Hip Flexion','Right Hip Flexion','Left Ankle Dorsiflexion','Right Ankle Dorsiflexion']);
+const GAIT_USE_MIN = new Set(['Left Knee Flexion','Right Knee Flexion']);
 function gaitDisplayVal(jointName, agg, movement) {
   const isGait = /running|gait|walk/i.test(movement || '');
-  if(isGait && GAIT_PEAK_JOINTS.has(jointName)) return agg.max;
+  if(isGait && GAIT_USE_MAX.has(jointName)) return agg.max;
+  if(isGait && GAIT_USE_MIN.has(jointName)) return agg.min;
   return agg.avg;
 }
 
@@ -4983,7 +4999,7 @@ async function runAnalysis() {
   const mergedAngleLines = Object.entries(aggregated).map(([k,v]) => {
     // For running/gait: report peak (max) for flexion joints, avg for others
     const dispVal = gaitDisplayVal(k, v, movement);
-    const peakNote = (dispVal === v.max && dispVal !== v.avg) ? ' [peak]' : '';
+    const peakNote = ((dispVal === v.max || dispVal === v.min) && dispVal !== v.avg) ? ' [peak]' : '';
     const viewNote = hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : '';
     return `${k}: ${dispVal}°${peakNote} (range ${v.min}°–${v.max}°)${viewNote}`;
   }).join('\n');
