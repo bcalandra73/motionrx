@@ -405,11 +405,98 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
               </optgroup>
             </select>
           </div>
+          <div class="form-group">
+            <label class="form-label">Height <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <div style="display:flex;gap:6px;">
+              <input type="number" id="patientHeight" placeholder="e.g. 175" min="100" max="220" step="1" style="flex:1">
+              <select id="heightUnit" style="width:72px;flex-shrink:0;"><option value="cm">cm</option><option value="in">in</option></select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Symptomatic Side <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <select id="injuredSide">
+              <option value="">Unknown</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="bilateral">Bilateral</option>
+              <option value="none">No injury</option>
+            </select>
+          </div>
           <div class="form-group full">
             <label class="form-label">Clinical Notes</label>
             <textarea id="clinicalNotes" placeholder="Relevant history, surgical dates, prior findings, areas of concern..."></textarea>
           </div>
         </div>
+      </div>
+
+      <!-- Running/Gait specific parameters — shown only for running/gait -->
+      <div class="card no-mb" id="runningInputsCard" style="display:none;margin-top:12px;">
+        <div class="card-header">
+          <div class="card-header-icon">🏃</div>
+          <div><h2>Running Parameters</h2><p>Unlocks stride length, GCT, and context-aware norms</p></div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Treadmill Speed <span style="font-weight:400;color:var(--muted)">(unlocks stride length)</span></label>
+            <div style="display:flex;gap:6px;">
+              <input type="number" id="treadmillSpeed" placeholder="e.g. 6.0" min="0.5" max="30" step="0.1" style="flex:1">
+              <select id="speedUnit" style="width:72px;flex-shrink:0;">
+                <option value="mph">mph</option>
+                <option value="kph">km/h</option>
+                <option value="mps">m/s</option>
+              </select>
+            </div>
+            <div style="font-size:.68rem;color:var(--muted);margin-top:3px;">Leave blank for overground running</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Treadmill Incline</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="number" id="treadmillIncline" placeholder="0" min="-5" max="15" step="0.5" style="flex:1">
+              <span style="font-size:.85rem;color:var(--muted);padding-right:4px;flex-shrink:0;">%</span>
+            </div>
+            <div style="font-size:.68rem;color:var(--muted);margin-top:3px;">Affects hip extension norms</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Running Surface</label>
+            <select id="runningSurface">
+              <option value="treadmill">Treadmill</option>
+              <option value="track">Track</option>
+              <option value="road">Road / Pavement</option>
+              <option value="trail">Trail</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Video Frame Rate <span style="font-weight:400;color:var(--muted)">(60fps+ enables GCT)</span></label>
+            <select id="videoFps">
+              <option value="30">30 fps — standard</option>
+              <option value="60">60 fps — slo-mo</option>
+              <option value="120">120 fps — high slo-mo</option>
+              <option value="240">240 fps — super slo-mo</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Shoe Type</label>
+            <select id="shoeType">
+              <option value="">Not specified</option>
+              <option value="standard">Standard / Neutral</option>
+              <option value="stability">Motion Control / Stability</option>
+              <option value="minimalist">Minimalist / Zero-drop</option>
+              <option value="carbon">Carbon Plate Racing</option>
+              <option value="maximalist">Maximalist (Hoka-style)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Running Experience</label>
+            <select id="runningExperience">
+              <option value="">Not specified</option>
+              <option value="beginner">Beginner (&lt;1 yr)</option>
+              <option value="recreational">Recreational</option>
+              <option value="competitive">Competitive</option>
+              <option value="elite">Elite</option>
+            </select>
+          </div>
+        </div>
+        <div id="videoDurationFeedback" style="display:none;margin-top:8px;padding:9px 14px;border-radius:8px;font-size:.78rem;font-weight:500;"></div>
       </div>
 
       <!-- Upload + Focus -->
@@ -1025,12 +1112,36 @@ function startFrameExtraction(file, vid) {
     // then the GaitFSM will re-assign the best 8 to canonical phases.
     // This gives the FSM more raw material to work with for event detection.
     const isGaitMovement = /running|gait|walk/i.test(movement);
+
+    // ── Video duration feedback (shown in running card) ──
+    if(isGaitMovement) {
+      const fb = document.getElementById('videoDurationFeedback');
+      if(fb) {
+        fb.style.display = 'block';
+        if(dur < 5) {
+          Object.assign(fb.style, {background:'#fde8e8',color:'#c0392b',border:'1px solid #f5c6c6'});
+          fb.textContent = `⚠️ Video too short (${dur.toFixed(1)}s) — minimum 5s for reliable stride detection.`;
+        } else if(dur < 8) {
+          Object.assign(fb.style, {background:'#fef9e7',color:'#7d5a00',border:'1px solid #f9e08a'});
+          fb.textContent = `⚡ Marginal length (${dur.toFixed(1)}s) — 8–12s preferred for multi-stride averaging.`;
+        } else if(dur <= 15) {
+          const est = Math.round(dur * 1.47);
+          Object.assign(fb.style, {background:'#e8f5e9',color:'#1b5e20',border:'1px solid #a5d6a7'});
+          fb.textContent = `✓ Good length (${dur.toFixed(1)}s, ~${est} strides) — multi-stride averaging enabled.`;
+        } else {
+          Object.assign(fb.style, {background:'#fef9e7',color:'#7d5a00',border:'1px solid #f9e08a'});
+          fb.textContent = `⚡ Long clip (${dur.toFixed(1)}s) — will use most representative strides. Processing may be slow.`;
+        }
+      }
+    }
+
     let times, effectiveLabels, effectiveProportions;
     if(isGaitMovement && dur >= 1.0) {
-      // 16 evenly-spaced frames from 4% to 96% of video
-      // 48 frames gives ~8 frames/stride at typical running pace (6-7 strides in 4.7s clip)
-      // This is enough to reliably detect peak ankle-Y events for each contact
-      const denseCount = 48;
+      // Scale dense frame count with clip duration: ~10 frames/stride target
+      // cap at 96 (browser memory); floor at 48 (minimum for peak detection)
+      const estStrideRate = 88 / 60; // strides/sec at typical 176spm
+      const estStrides = dur * estStrideRate;
+      const denseCount = Math.min(96, Math.max(48, Math.ceil(estStrides * 10)));
       effectiveProportions = Array.from({length:denseCount}, (_,i) => 0.03 + (i/(denseCount-1))*0.94);
       times = effectiveProportions.map(t => t * dur);
       // Placeholder labels — GaitFSM will overwrite these
@@ -1188,8 +1299,31 @@ function startFrameExtraction(file, vid) {
                 const vidDur = quickFused.length > 0 ? (frames.length > 0 ? frames[frames.length-1]?.t || 1 : 1) : 1;
                 // Use the actual video duration from the outer scope
                 const actualDur = typeof dur !== 'undefined' ? dur : 1;
+                const userFpsInput = parseInt(document.getElementById('videoFps')?.value || '30');
+                const speedRaw    = parseFloat(document.getElementById('treadmillSpeed')?.value || '');
+                const speedUnit   = document.getElementById('speedUnit')?.value || 'mph';
+                const inclineRaw  = parseFloat(document.getElementById('treadmillIncline')?.value || '0') || 0;
+                const surfaceVal  = document.getElementById('runningSurface')?.value || 'treadmill';
+                const shoeVal     = document.getElementById('shoeType')?.value || '';
+                const expVal      = document.getElementById('runningExperience')?.value || '';
+                const heightRaw   = parseFloat(document.getElementById('patientHeight')?.value || '');
+                const heightUnit  = document.getElementById('heightUnit')?.value || 'cm';
+                // Convert speed to m/s
+                let speedMps = null;
+                if(!isNaN(speedRaw) && speedRaw > 0) {
+                  if(speedUnit==='mph')      speedMps = speedRaw * 0.44704;
+                  else if(speedUnit==='kph') speedMps = speedRaw / 3.6;
+                  else                       speedMps = speedRaw;
+                }
+                // Convert height to cm
+                let heightCm = null;
+                if(!isNaN(heightRaw) && heightRaw > 0) {
+                  heightCm = heightUnit === 'in' ? heightRaw * 2.54 : heightRaw;
+                }
                 window_strideMetrics = detectStridesAndComputeMetrics(
-                  perFrame, actualDur, 30, cameraView
+                  perFrame, actualDur, userFpsInput, cameraView,
+                  {speedMps, inclinePct: inclineRaw, surface: surfaceVal,
+                   shoe: shoeVal, experience: expVal, heightCm}
                 );
                 if(window_strideMetrics) {
                   console.log(`[StrideEngine] ${window_strideMetrics.stridesDetected} strides, cadence=${window_strideMetrics.cadenceSpm}spm, GCT=${window_strideMetrics.gcPct}%, float=${window_strideMetrics.floatPct}%`);
@@ -1919,6 +2053,33 @@ document.addEventListener('DOMContentLoaded', () => {
       if(cb) cb.checked = this.classList.contains('on');
     });
   });
+
+  // Show/hide running parameters card based on movement type
+  const movSel = document.getElementById('movementType');
+  const runCard = document.getElementById('runningInputsCard');
+  function updateRunningCard() {
+    const isGait = /running|gait|walk/i.test(movSel?.value || '');
+    if(runCard) runCard.style.display = isGait ? 'block' : 'none';
+  }
+  if(movSel) movSel.addEventListener('change', updateRunningCard);
+  updateRunningCard();
+
+  // Height unit conversion helper
+  const heightIn = document.getElementById('patientHeight');
+  const heightUnitSel = document.getElementById('heightUnit');
+  if(heightUnitSel && heightIn) {
+    heightUnitSel.addEventListener('change', () => {
+      const v = parseFloat(heightIn.value);
+      if(!v) return;
+      if(heightUnitSel.value === 'in') {
+        heightIn.value = Math.round(v / 2.54);
+        heightIn.min = 39; heightIn.max = 87;
+      } else {
+        heightIn.value = Math.round(v * 2.54);
+        heightIn.min = 100; heightIn.max = 220;
+      }
+    });
+  }
 });
 
 function resetAll() {
@@ -3586,30 +3747,39 @@ function applyPromsToReport() {
 }
 
 // ── Asymmetry / LSI Calculation ──
-function calcLSI(leftVal, rightVal) {
+function calcLSI(leftVal, rightVal, minMagnitude) {
   if(leftVal == null || rightVal == null) return null;
-  // Use absolute magnitudes — LSI is meaningless for signed/near-zero values
   const L = Math.abs(leftVal), R = Math.abs(rightVal);
+  // Suppress if both values are within measurement noise floor
+  // (e.g. ankle DF at 30fps has ±5° noise — values <5° are not meaningful)
+  const noiseFloor = minMagnitude ?? 1;
+  if(L < noiseFloor && R < noiseFloor) return null;
   const denom = Math.max(L, R);
-  if(denom < 1) return null; // both near-zero, LSI undefined
+  if(denom < 1) return null;
   return Math.round((Math.min(L, R) / denom) * 100);
 }
 
-function calcAsymmetryPct(leftVal, rightVal) {
+function calcAsymmetryPct(leftVal, rightVal, minMagnitude) {
   if(leftVal == null || rightVal == null) return null;
   const L = Math.abs(leftVal), R = Math.abs(rightVal);
-  const denom = (L + R) / 2;
-  if(denom < 1) return null; // near-zero denominator — asymmetry undefined
-  return Math.round(Math.abs(L - R) / denom * 100);
+  const noiseFloor = minMagnitude ?? 1;
+  // Suppress when the mean magnitude is too small to yield meaningful asymmetry
+  const meanMag = (L + R) / 2;
+  if(meanMag < noiseFloor) return null;
+  if(meanMag < 1) return null;
+  return Math.round(Math.abs(L - R) / meanMag * 100);
 }
 
 function renderASI(aggregated) {
   const pairs = [
-    {label:'Knee Flexion',     left:'Left Knee Flexion',    right:'Right Knee Flexion'},
-    {label:'Hip Flexion',      left:'Left Hip Flexion',     right:'Right Hip Flexion'},
-    {label:'Ankle Dorsiflexion', left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion'},
-    {label:'Shoulder Flexion', left:'Left Shoulder Flexion', right:'Right Shoulder Flexion'},
+    {label:'Knee Flexion',       left:'Left Knee Flexion',         right:'Right Knee Flexion',         minMag: 10},
+    {label:'Hip Flexion',        left:'Left Hip Flexion',          right:'Right Hip Flexion',           minMag: 5},
+    {label:'Ankle Dorsiflexion', left:'Left Ankle Dorsiflexion',   right:'Right Ankle Dorsiflexion',    minMag: 5},
+    {label:'Shoulder Flexion',   left:'Left Shoulder Flexion',     right:'Right Shoulder Flexion',      minMag: 5},
   ];
+  // minMag: minimum mean absolute value (degrees) before asymmetry is meaningful.
+  // Ankle DF values near 0° (e.g. -4° vs +1°) are within 30fps noise (±5°)
+  // and produce astronomically high asymmetry percentages from tiny absolute differences.
 
   const cards = [];
   pairs.forEach(pair => {
@@ -3617,9 +3787,9 @@ function renderASI(aggregated) {
     const R = aggregated[pair.right];
     if(!L || !R) return;
     const lAvg = L.avg, rAvg = R.avg;
-    const lsi = calcLSI(lAvg, rAvg);
-    const asymPct = calcAsymmetryPct(lAvg, rAvg);
-    if(lsi === null || asymPct === null) return;
+    const lsi = calcLSI(lAvg, rAvg, pair.minMag);
+    const asymPct = calcAsymmetryPct(lAvg, rAvg, pair.minMag);
+    if(lsi === null || asymPct === null) return; // suppressed — values within noise floor
 
     const flag = asymPct < 10 ? 'ok' : asymPct < 15 ? 'warn' : 'poor';
     const flagClass = `asi-${flag}`;
@@ -3864,7 +4034,7 @@ const PHASE_MAPS = {
 //
 // Returns: strideMetrics object with cadence, GCT, float time, asymmetry, etc.
 
-function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, cameraViewLocal) {
+function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, cameraViewLocal, runParams={}) {
   if(!perFrameData || perFrameData.length < 8) return null;
 
   const smooth3 = (arr) => arr.map((v,i) => {
@@ -3905,20 +4075,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const lContactIdxs = findContacts(lAnkSmooth);
   const rContactIdxs = findContacts(rAnkSmooth);
 
-  // ── 2. Float phase detection (both ankles near top of frame simultaneously) ──
-  // Float = both feet off ground. Detect as frames where both ankle Y values
-  // are simultaneously low (both feet elevated).
-  const floatFrames = perFrameData.map((_,i) => {
-    const ly = lAnkSmooth[i], ry = rAnkSmooth[i];
-    if(ly==null||ry==null) return false;
-    // "Low" = smaller Y value = higher in frame = foot in air
-    // Use median ankle Y across all frames as the "ground level" reference
-    const allYs = [...lAnkSmooth,...rAnkSmooth].filter(v=>v!=null);
-    const sorted = [...allYs].sort((a,b)=>a-b);
-    const medY = sorted[Math.floor(sorted.length/2)];
-    const groundThresh = medY - 0.04; // ankle must be 4% of frame height above median
-    return ly < groundThresh && ry < groundThresh;
-  });
+  // Float phase detection is now done per-stride inside the strideDetails loop (signal reliability check)
 
   // ── 3. Compute stride-level timing metrics ──
   // Use the leg with more detected contacts as the reference leg
@@ -3959,26 +4116,52 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     if(!strideIdxs.length) return null;
 
     // Ground contact time for REF leg:
-    // Stance phase = from contact (startIdx) to toe-off
-    // Toe-off = first local minimum of ref ankle Y after contact (foot lifts)
-    // Approximation: ankle Y drops significantly after stance peak
+    // Toe-off = first point where ref ankle Y drops meaningfully below contact peak.
+    // RELIABILITY CHECK: At 30fps, ankle Y signal on a treadmill is often too flat
+    // (person stays centered; only the belt moves). If the ankle Y range across the
+    // stride is < 3% of frame height, the signal is within noise and GCT is unreliable.
     const refAnkArr = REF==='L' ? lAnkSmooth : rAnkSmooth;
-    let toeoffIdx = endIdx; // default: contact of opposite leg ≈ toe-off
-    // Find first point where ref ankle drops below 70% of its contact peak
-    const contactPeak = refAnkArr[startIdx] ?? 0;
-    for(let i=startIdx+1; i<=endIdx && i<N; i++) {
-      const v = refAnkArr[i];
-      if(v!=null && v < contactPeak * 0.85) {
-        toeoffIdx = i;
-        break;
+    const strideAnkVals = strideIdxs.map(i=>refAnkArr[i]).filter(v=>v!=null);
+    const ankRange = strideAnkVals.length > 1
+      ? Math.max(...strideAnkVals) - Math.min(...strideAnkVals) : 0;
+    const gctReliable = ankRange >= 0.03; // need at least 3% frame-height variation
+
+    let toeoffIdx = endIdx;
+    let gcPct = null; // null = unreliable, not 100%
+    if(gctReliable) {
+      const contactPeak = refAnkArr[startIdx] ?? 0;
+      for(let i=startIdx+1; i<=endIdx && i<N; i++) {
+        const v = refAnkArr[i];
+        if(v!=null && v < contactPeak * 0.85) { toeoffIdx = i; break; }
+      }
+      // Only trust GCT if toe-off was actually detected (not just defaulted to endIdx)
+      if(toeoffIdx < endIdx) {
+        const stanceFrames = toeoffIdx - startIdx;
+        const rawGcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
+        // Sanity check: GCT 25-75% is physiologically plausible for running
+        if(rawGcPct >= 20 && rawGcPct <= 80) gcPct = rawGcPct;
       }
     }
-    const stanceFrames = toeoffIdx - startIdx;
-    const gcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
 
-    // Float phase within this stride: count frames where both feet elevated
-    const floatCount = strideIdxs.filter(i=>floatFrames[i]).length;
-    const floatPct   = Math.round((floatCount / (endIdx - startIdx)) * 100);
+    // Float phase: both ankles below groundThresh simultaneously.
+    // Only reliable if ankle Y signal has sufficient range.
+    const allYs = [...lAnkSmooth,...rAnkSmooth].filter(v=>v!=null);
+    const sortedYs = [...allYs].sort((a,b)=>a-b);
+    const medY = sortedYs[Math.floor(sortedYs.length/2)];
+    const yRange = sortedYs[sortedYs.length-1] - sortedYs[0];
+    const floatReliable = yRange >= 0.05; // need 5% frame-height total ankle Y variation
+
+    let floatPct = null; // null = unreliable
+    if(floatReliable) {
+      const groundThresh = medY - 0.04;
+      const bothElevated = perFrameData.map((_,i) => {
+        const ly = lAnkSmooth[i], ry = rAnkSmooth[i];
+        return (ly!=null && ry!=null && ly < groundThresh && ry < groundThresh);
+      });
+      const floatCount = strideIdxs.filter(i=>bothElevated[i]).length;
+      const rawFloatPct = Math.round((floatCount / (endIdx - startIdx)) * 100);
+      floatPct = rawFloatPct; // 0% is a valid result if reliable signal exists
+    }
 
     // Peak knee flexion (swing phase = after toe-off)
     const swingIdxs = strideIdxs.filter(i=>i>toeoffIdx);
@@ -4030,20 +4213,28 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const median = arr => { const s=[...arr].sort((a,b)=>a-b); return s[Math.floor(s.length/2)]; };
 
   const durations     = strideDetails.map(s=>s.durationS);
-  const gcPcts        = strideDetails.map(s=>s.gcPct).filter(v=>v>0);
-  const floatPcts     = strideDetails.map(s=>s.floatPct);
+  const gcPcts        = strideDetails.map(s=>s.gcPct).filter(v=>v!=null); // null = unreliable
+  const floatPcts     = strideDetails.map(s=>s.floatPct).filter(v=>v!=null); // null = unreliable
   const kneePeaks     = strideDetails.map(s=>s.peakKneeFlex).filter(v=>v!=null);
   const hipExtensions = strideDetails.map(s=>s.hipAtToeoff).filter(v=>v!=null);
 
   const avgDuration   = mean(durations);
-  const cadenceSpm    = Math.round(60 / avgDuration * 2); // steps per minute (each stride = 2 steps)
-  const cadenceStride = Math.round(60 / avgDuration);     // strides per minute
+  const cadenceSpm    = Math.round(60 / avgDuration * 2);
+  const cadenceStride = Math.round(60 / avgDuration);
   const cvDuration    = durations.length > 1 ? Math.round(stdev(durations) / mean(durations) * 100) : null;
 
-  // GCT as % of cycle (more reliable than absolute ms at 30fps)
-  const avgGcPct   = gcPcts.length > 0 ? Math.round(mean(gcPcts)) : null;
-  const avgFloatPct= Math.round(mean(floatPcts));
-  const hasFloat   = avgFloatPct > 5; // float phase present if >5% of cycle
+  // GCT and float: null when signal is too flat (treadmill at 30fps)
+  // Only report if we got reliable readings from at least half the strides
+  const gcpReliableCount = strideDetails.filter(s=>s.gcPct!=null).length;
+  const floatReliableCount = strideDetails.filter(s=>s.floatPct!=null).length;
+  // Additional fps gate: GCT/float not reliable below 60fps on treadmill
+  const isTreadmill = (runParams.surface || 'treadmill') === 'treadmill';
+  const fpsGate     = fps >= 60;
+  const gcpReliable   = fpsGate && gcpReliableCount >= Math.ceil(strideDetails.length / 2);
+  const floatReliable = fpsGate && floatReliableCount >= Math.ceil(strideDetails.length / 2);
+  const avgGcPct   = (gcpReliable && gcPcts.length > 0) ? Math.round(mean(gcPcts)) : null;
+  const avgFloatPct= (floatReliable && floatPcts.length > 0) ? Math.round(mean(floatPcts)) : null;
+  const hasFloat   = avgFloatPct != null && avgFloatPct > 5;
 
   // Foot strike consensus
   const fsCounts = {heel:0, midfoot:0, forefoot:0, unknown:0};
@@ -4078,7 +4269,34 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     Math.abs(s.durationS - medianDur) < Math.abs(strideDetails[bi].durationS - medianDur) ? i : bi, 0);
   const bestStride    = strideDetails[bestStrideIdx];
 
-  // ── 7. Clinical flags ──
+  // ── 7. Stride & step length from speed ──
+  const {speedMps=null, inclinePct=0, surface='treadmill', shoe='', experience='', heightCm=null} = runParams;
+  let strideLengthM = null, stepLengthM = null, legLengthM = null;
+  let strideLengthNorm = null; // stride length / leg length (dimensionless)
+  let overstrideFlag = null;
+
+  if(speedMps && avgDuration) {
+    strideLengthM   = +(speedMps * avgDuration).toFixed(2);
+    stepLengthM     = +(strideLengthM / 2).toFixed(2);
+  }
+  if(heightCm) {
+    legLengthM = +(heightCm * 0.0053).toFixed(3); // height * 0.53 / 100
+  }
+  if(strideLengthM && legLengthM) {
+    strideLengthNorm = +(strideLengthM / legLengthM).toFixed(2);
+    // Normative: ideal stride length ≈ 2.0–2.5× leg length for recreational running
+    if(strideLengthNorm > 2.6)       overstrideFlag = 'overstride';
+    else if(strideLengthNorm < 1.6)  overstrideFlag = 'understride';
+    else                              overstrideFlag = 'optimal';
+  }
+
+  // Fps-aware GCT/float reliability thresholds
+  // At 60fps: ±16ms resolution — GCT detection viable
+  // At 120fps+: ±8ms — clinically acceptable
+  const gctFpsOk    = fps >= 60;
+  const floatFpsOk  = fps >= 60;
+
+  // ── 8. Clinical flags ──
   const flags = {};
   // Cadence norms for recreational running: 160-180 spm optimal
   if(cadenceSpm < 155)       flags.cadence = {level:'warn', msg:'Cadence below 160 spm — consider shorter, quicker steps to reduce impact loading'};
@@ -4086,9 +4304,12 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   else                       flags.cadence = {level:'ok',   msg:`Cadence ${cadenceSpm} spm — within optimal running range (160–180)`};
 
   if(avgGcPct != null) {
-    if(avgGcPct > 45)        flags.gct = {level:'warn', msg:'Ground contact time >45% of cycle — may indicate overstriding or reduced push-off'};
-    else if(avgGcPct < 30)   flags.gct = {level:'ok',   msg:'Short ground contact time — indicates good elastic energy return'};
-    else                     flags.gct = {level:'ok',   msg:'Ground contact time within normal range (30–45% of cycle)'};
+    if(avgGcPct > 45)       flags.gct = {level:'warn', msg:'Ground contact time >45% of cycle — may indicate overstriding or reduced push-off'};
+    else if(avgGcPct < 30)  flags.gct = {level:'ok',   msg:'Short ground contact time — good elastic energy return'};
+    else                    flags.gct = {level:'ok',   msg:'Ground contact time within normal range (30–45% of cycle)'};
+  } else {
+    // Signal too flat to detect toe-off — common on treadmills at 30fps
+    flags.gct = {level:'info', msg:'Ground contact time: insufficient signal quality at 30fps. Use 60fps+ video for reliable GCT measurement.'};
   }
 
   if(stepLengthAsym != null) {
@@ -4106,23 +4327,44 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   else if(fsConsensus==='midfoot') flags.footStrike = {level:'ok', msg:'Midfoot strike pattern — optimal for most runners'};
   else if(fsConsensus==='forefoot') flags.footStrike = {level:'ok', msg:'Forefoot strike pattern detected'};
 
+  // Stride length flags (only when speed + height both provided)
+  if(overstrideFlag === 'overstride') {
+    flags.strideLength = {level:'warn', msg:`Overstriding detected (${strideLengthNorm}× leg length, norm 2.0–2.5×) — longer stride at same cadence increases braking impulse and knee loading`};
+  } else if(overstrideFlag === 'understride') {
+    flags.strideLength = {level:'warn', msg:`Understriding (${strideLengthNorm}× leg length, norm 2.0–2.5×) — short stride at this cadence suggests reduced push-off power`};
+  } else if(overstrideFlag === 'optimal' && strideLengthNorm) {
+    flags.strideLength = {level:'ok', msg:`Stride length optimal (${strideLengthNorm}× leg length)`};
+  }
+
+  // Shoe / incline context flags
+  if(shoe === 'carbon') flags.shoe = {level:'ok', msg:'Carbon plate shoe: forefoot strike bias expected — consistent with findings'};
+  if(shoe === 'minimalist') flags.shoe = {level:'ok', msg:'Minimalist shoe: midfoot/forefoot strike expected — compare to heel strike findings'};
+  if(inclinePct > 5) flags.incline = {level:'ok', msg:`Incline ${inclinePct}% — hip extension norms are elevated; reduced extension at high grade is expected`};
+
   return {
     // Timing
     strideDurationS:  +avgDuration.toFixed(3),
     cadenceSpm,
     cadenceStride,
     cvStridePct:      cvDuration,
-    gcPct:            avgGcPct,
-    floatPct:         avgFloatPct,
+    gcPct:            avgGcPct,    // null = unreliable at this fps
+    floatPct:         avgFloatPct, // null = unreliable at this fps
     hasFloat,
+    gcpReliable, floatReliable,
     // Kinematics
     peakKneeFlex:     avgPeakKnee,
     hipExtAtToeoff:   avgHipExt,
     fsConsensus,
     stepLengthAsymPct: stepLengthAsym,
+    // Stride length (requires speed input)
+    strideLengthM, stepLengthM, legLengthM, strideLengthNorm, overstrideFlag,
+    // Running context
+    speedMps, inclinePct, surface, shoe, experience, heightCm,
+    gctFpsOk, floatFpsOk,
     // Meta
     stridesDetected:  strideCycles.length,
     refSide:          REF,
+    fps:              fps,
     bestStrideFrameRange: bestStride ? [bestStride.startIdx, bestStride.endIdx] : null,
     bestStrideDetails: bestStride,
     allStrideDetails:  strideDetails,
@@ -4148,7 +4390,8 @@ function renderStrideMetrics(metrics) {
   const flagColor = (level) =>
     level==='ok' ? 'var(--green)' : level==='warn' ? 'var(--amber)' : 'var(--red)';
   const kpiClass = (level) =>
-    level==='ok' ? 'stride-kpi-flag-ok' : level==='warn' ? 'stride-kpi-flag-warn' : 'stride-kpi-flag-poor';
+    level==='ok' ? 'stride-kpi-flag-ok' : level==='warn' ? 'stride-kpi-flag-warn'
+    : level==='info' ? '' : 'stride-kpi-flag-poor';
 
   // ── KPI tiles ──
   const kpis = [
@@ -4198,6 +4441,17 @@ function renderStrideMetrics(metrics) {
       sub:'Optimal hip angle <160° (10°+ ext)',
       flag: metrics.hipExtAtToeoff>170 ? 'warn' : 'ok',
     }] : []),
+    ...(metrics.strideLengthM != null ? [{
+      label:'Stride Length',
+      value: metrics.strideLengthM+'m',
+      unit: metrics.stepLengthM ? `Step: ${metrics.stepLengthM}m` : 'per full cycle',
+      sub: metrics.strideLengthNorm
+        ? `${metrics.strideLengthNorm}× leg length — ${
+            metrics.overstrideFlag==='overstride' ? '⚠️ overstriding' :
+            metrics.overstrideFlag==='understride' ? '⚠️ understriding' : '✓ optimal range'}`
+        : `at ${(metrics.speedMps*3.6).toFixed(1)} km/h`,
+      flag: metrics.overstrideFlag==='overstride'||metrics.overstrideFlag==='understride' ? 'warn' : 'ok',
+    }] : []),
   ];
 
   let html = '<div class="stride-kpi-grid">';
@@ -4205,8 +4459,8 @@ function renderStrideMetrics(metrics) {
     html += `<div class="stride-kpi ${kpiClass(k.flag)}">
       <div class="stride-kpi-label">${k.label}</div>
       <div class="stride-kpi-value">${k.value}</div>
-      <div class="stride-kpi-sub">${k.unit}</div>
-      <div class="stride-kpi-sub" style="margin-top:2px;opacity:.8">${k.sub}</div>
+      ${k.unit!=null ? `<div class="stride-kpi-sub">${k.unit}</div>` : ''}
+      ${k.sub!=null  ? `<div class="stride-kpi-sub" style="margin-top:2px;opacity:.8">${k.sub}</div>` : ''}
     </div>`;
   });
   html += '</div>';
@@ -4704,9 +4958,10 @@ async function runAnalysis() {
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}°)${hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : ''}`
   ).join('\n');
 
+  const injuredSideVal = document.getElementById('injuredSide')?.value || '';
   const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay: cyan joints/lines = high confidence, orange joints = estimated position (body was partially occluded, e.g. by a barbell), dashed lines = low confidence segment. A red dot labeled BAR marks the detected barbell position where applicable.
 
-PATIENT: ${patientName}${age ? `, Age ${age}` : ''}
+PATIENT: ${patientName}${age ? `, Age ${age}` : ''}${injuredSideVal ? `, Symptomatic side: ${injuredSideVal}` : ''}
 DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
 MOVEMENT ASSESSED: ${movement}
 ${dualViewNote}
@@ -4721,14 +4976,39 @@ ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. -20° = significant plantarflexion (toe-off).
 - Trunk Lean: degrees from vertical (0° = perfectly upright). Running norm = 5-15° forward.
 - Shoulder Flexion: arm forward from body. 0° = arm at side; 90° = arm horizontal forward.
+${(() => {
+  // Running context from manual inputs
+  const sp = parseFloat(document.getElementById('treadmillSpeed')?.value||'');
+  const su = document.getElementById('speedUnit')?.value||'mph';
+  const inc = parseFloat(document.getElementById('treadmillIncline')?.value||'0')||0;
+  const surf = document.getElementById('runningSurface')?.value||'';
+  const shoe = document.getElementById('shoeType')?.value||'';
+  const exp  = document.getElementById('runningExperience')?.value||'';
+  const injS = document.getElementById('injuredSide')?.value||'';
+  const htRaw= parseFloat(document.getElementById('patientHeight')?.value||'');
+  const htU  = document.getElementById('heightUnit')?.value||'cm';
+  const htCm = htRaw ? (htU==='in' ? htRaw*2.54 : htRaw) : null;
+  const fps  = parseInt(document.getElementById('videoFps')?.value||'30');
+  const lines = [];
+  if(surf)   lines.push(`Running surface: ${surf}`);
+  if(sp)     lines.push(`Treadmill speed: ${sp} ${su}`);
+  if(inc)    lines.push(`Treadmill incline: ${inc}%`);
+  if(shoe)   lines.push(`Shoe type: ${shoe}`);
+  if(exp)    lines.push(`Running experience: ${exp}`);
+  if(htCm)   lines.push(`Patient height: ${Math.round(htCm)}cm (leg length est. ${(htCm*0.53/100).toFixed(2)}m)`);
+  if(injS)   lines.push(`Symptomatic/injured side: ${injS} — use this to interpret which side is compensating`);
+  lines.push(`Video frame rate: ${fps}fps${fps<60?' (GCT/float unreliable at this fps)':' (GCT measurement viable)'}`);
+  return lines.length ? '\nRUNNING CONTEXT:\n' + lines.map(l=>'- '+l).join('\n') : '';
+})()}
 ${window_strideMetrics ? `
 RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete strides detected):
 - Cadence: ${window_strideMetrics.cadenceSpm} steps/min (optimal range: 160-180 spm)
 - Stride duration: ${Math.round(window_strideMetrics.strideDurationS*1000)}ms avg${window_strideMetrics.cvStridePct!=null ? `, CV=${window_strideMetrics.cvStridePct}% stride-to-stride variability` : ''}
-- Ground contact: ${window_strideMetrics.gcPct!=null ? window_strideMetrics.gcPct+'% of cycle' : 'not detected'} (norm: 30-45%)
-- Float time: ${window_strideMetrics.hasFloat ? window_strideMetrics.floatPct+'% of cycle (bilateral float present)' : 'No bilateral float phase detected'}
+- Ground contact: ${window_strideMetrics.gcPct!=null ? window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
+- Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics.hasFloat ? window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' : '0% detected (may indicate shuffle-run or 30fps limitation)') : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
 - Foot strike pattern: ${window_strideMetrics.fsConsensus} (${window_strideMetrics.fsConsensus==='heel'?'higher impact, consider midfoot cues':window_strideMetrics.fsConsensus==='midfoot'?'optimal pattern':'forefoot strike'})
 ${window_strideMetrics.stepLengthAsymPct!=null ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)` : ''}
+${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
 ${hasDualView && angleLines2 ? `\nSECOND VIEW ANGLES (${view2Label}):\n${angleLines2}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
@@ -5595,13 +5875,31 @@ async function exportPDF() {
       const kpiDefs = [
         {label:'Cadence',          value:`${sm.cadenceSpm} spm`,   sub:`${sm.cadenceStride} strides/min`},
         {label:'Stride Duration',  value:`${Math.round(sm.strideDurationS*1000)} ms`, sub: sm.cvStridePct!=null ? `CV ${sm.cvStridePct}%` : `avg of ${sm.stridesDetected} strides`},
-        {label:'Ground Contact',   value: sm.gcPct!=null ? `${sm.gcPct}%` : '—',    sub:'of gait cycle'},
-        {label:'Float Time',       value: sm.hasFloat ? `${sm.floatPct}%` : 'None', sub: sm.hasFloat ? 'bilateral float' : 'no float detected'},
+        {
+          label:'Ground Contact',
+          value: sm.gcPct!=null ? `${sm.gcPct}%` : '60fps+',
+          unit: sm.gcPct!=null ? 'of gait cycle' : 'required',
+          sub: sm.gcPct!=null
+            ? `~${Math.round(sm.strideDurationS*sm.gcPct/100*1000)}ms est.`
+            : 'Signal insufficient at 30fps',
+          flag: sm.gcPct==null ? 'info' : (sm.flags.gct?.level ?? 'ok'),
+        },
+        {
+          label:'Float Time',
+          value: sm.floatPct!=null ? (sm.hasFloat ? `${sm.floatPct}%` : '0%') : '60fps+',
+          unit: sm.floatPct!=null ? 'of cycle' : 'required',
+          sub: sm.floatPct!=null
+            ? (sm.hasFloat ? `~${Math.round(sm.strideDurationS*sm.floatPct/100*1000)}ms est.` : 'No bilateral float phase detected')
+            : 'Signal insufficient at 30fps',
+          flag: sm.floatPct==null ? 'info' : 'ok',
+        },
         {label:'Strides Detected', value: `${sm.stridesDetected}`,                  sub:`in ${sm.videoDurationS.toFixed(1)}s clip`},
         {label:'Foot Strike',      value: sm.fsConsensus.charAt(0).toUpperCase()+sm.fsConsensus.slice(1), sub:'consensus pattern'},
       ];
       if(sm.peakKneeFlex!=null)    kpiDefs.push({label:'Peak Knee Flex', value:`${sm.peakKneeFlex}°`, sub:'swing phase'});
       if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step length'});
+      if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
+      if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'⚠ overstriding':sm.overstrideFlag==='understride'?'⚠ understriding':'optimal range'});
 
       const KPI_COLS = 3;
       const kW = (CW - (KPI_COLS-1)*4) / KPI_COLS;
@@ -5637,11 +5935,21 @@ async function exportPDF() {
         });
       }
 
-      // Accuracy disclaimer
-      guard(10);
+      // Accuracy disclaimer + running context
+      guard(12);
       setFill(C.bg); doc.rect(ML, y+2, CW, 9, 'F');
       doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
-      doc.text(`Timing metrics estimated from video at ${sm.fps}fps (±33ms resolution). Values reported as % of cycle to minimize frame-rate error. Cadence and stride duration are accurate.`, ML+3, y+7, {maxWidth:CW-6});
+      const fpsVal = sm.fps || 30;
+      const fpsNote = fpsVal < 60 ? `GCT/float require 60fps+ for reliability.` : `GCT detection viable at ${fpsVal}fps.`;
+      const ctxParts = [
+        sm.surface ? `Surface: ${sm.surface}` : null,
+        sm.speedMps ? `Speed: ${(sm.speedMps*2.237).toFixed(1)}mph` : null,
+        sm.inclinePct ? `Incline: ${sm.inclinePct}%` : null,
+        sm.shoe ? `Shoe: ${sm.shoe}` : null,
+        sm.heightCm ? `Height: ${Math.round(sm.heightCm)}cm` : null,
+      ].filter(Boolean);
+      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(500/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '');
+      doc.text(disclaimerText, ML+3, y+7, {maxWidth:CW-6});
       y += 13;
     }
 
