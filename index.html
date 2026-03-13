@@ -1287,8 +1287,10 @@ function startFrameExtraction(file, vid) {
                 rAnkX: rA?.x ?? null,
                 lKnee: lH&&lK&&lA ? calcAngle(lH,lK,lA) : null,
                 rKnee: rH&&rK&&rA ? calcAngle(rH,rK,rA) : null,
-                lHip:  lS&&lH&&lK ? calcAngle(lS,lH,lK) : null,
-                rHip:  rS&&rH&&rK ? calcAngle(rS,rH,rK) : null,
+                // Store hip as degrees-from-upright (0°=standing, positive=flexion)
+                // Raw calcAngle gives included angle (~180° standing); correct to clinical convention
+                lHip:  lS&&lH&&lK ? Math.abs(180 - calcAngle(lS,lH,lK)) : null,
+                rHip:  rS&&rH&&rK ? Math.abs(180 - calcAngle(rS,rH,rK)) : null,
               };
             }).filter(Boolean);
 
@@ -3830,19 +3832,19 @@ function renderASI(aggregated) {
 // Build ASI summary text for Claude prompt
 function asiToPromptText(aggregated) {
   const pairs = [
-    {label:'Knee Flexion',       left:'Left Knee Flexion',      right:'Right Knee Flexion'},
-    {label:'Hip Flexion',        left:'Left Hip Flexion',       right:'Right Hip Flexion'},
-    {label:'Ankle DF',           left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion'},
-    {label:'Shoulder Flexion',   left:'Left Shoulder Flexion',   right:'Right Shoulder Flexion'},
+    {label:'Knee Flexion',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
+    {label:'Hip Flexion',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
+    {label:'Ankle DF',         left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion',  minMag:5},
+    {label:'Shoulder Flexion', left:'Left Shoulder Flexion',   right:'Right Shoulder Flexion',    minMag:5},
   ];
   const lines = [];
   pairs.forEach(p => {
     const L = aggregated[p.left];
     const R = aggregated[p.right];
     if(!L || !R) return;
-    const lsi = calcLSI(L.avg, R.avg);
-    const asym = calcAsymmetryPct(L.avg, R.avg);
-    if(lsi === null) return;
+    const lsi = calcLSI(L.avg, R.avg, p.minMag);
+    const asym = calcAsymmetryPct(L.avg, R.avg, p.minMag);
+    if(lsi === null || asym === null) return; // suppressed — values within noise floor
     const flag = asym < 10 ? 'symmetric' : asym < 15 ? 'monitor' : 'SIGNIFICANT ASYMMETRY';
     lines.push(`  ${p.label}: L=${L.avg}° R=${R.avg}° → LSI ${lsi}% (${asym}% asymmetry — ${flag})`);
   });
@@ -4191,11 +4193,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     if(refAnkLM) {
       // Use hip-knee-ankle sagittal angle as proxy for foot strike if toe not available
       // High hip angle at contact (hip flexed forward) usually correlates with forefoot
+      // Hip angle at contact (degrees-from-upright: 0°=standing, positive=flexion)
+      // High hip flexion at contact → foot landing ahead of COG → heel strike
+      // Low hip flexion at contact → foot landing near COG → forefoot/midfoot
       const hipAtContact = refHSm[startIdx];
       if(hipAtContact != null) {
-        if(hipAtContact > 155)      footStrike = 'heel';
-        else if(hipAtContact > 140) footStrike = 'midfoot';
-        else                        footStrike = 'forefoot';
+        if(hipAtContact > 35)       footStrike = 'heel';     // hip flexed forward — overstriding
+        else if(hipAtContact > 20)  footStrike = 'midfoot';  // moderate — midfoot landing
+        else                        footStrike = 'forefoot'; // hip near upright — forefoot strike
       }
     }
 
@@ -4438,8 +4443,8 @@ function renderStrideMetrics(metrics) {
       label:'Hip Ext at Toe-off',
       value: metrics.hipExtAtToeoff+'°',
       unit:'at push-off',
-      sub:'Optimal hip angle <160° (10°+ ext)',
-      flag: metrics.hipExtAtToeoff>170 ? 'warn' : 'ok',
+      sub:'Hip flexion at toe-off: 10–25° optimal (higher = limited extension)',
+      flag: metrics.hipExtAtToeoff > 30 ? 'warn' : metrics.hipExtAtToeoff < 5 ? 'warn' : 'ok',
     }] : []),
     ...(metrics.strideLengthM != null ? [{
       label:'Stride Length',
@@ -5384,15 +5389,15 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   // Build ASI summary tile — find worst asymmetry pair
   let worstAsymPct = 0, worstAsymLabel = '';
   const asiPairsForTile = [
-    {label:'Knee',    left:'Left Knee Flexion',       right:'Right Knee Flexion'},
-    {label:'Hip',     left:'Left Hip Flexion',        right:'Right Hip Flexion'},
-    {label:'Ankle',   left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion'},
-    {label:'Shoulder',left:'Left Shoulder Flexion',   right:'Right Shoulder Flexion'},
+    {label:'Knee',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
+    {label:'Hip',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
+    {label:'Ankle',    left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion',  minMag:5},
+    {label:'Shoulder', left:'Left Shoulder Flexion',   right:'Right Shoulder Flexion',    minMag:5},
   ];
   asiPairsForTile.forEach(p => {
     const L = aggregated[p.left], R = aggregated[p.right];
     if(!L || !R) return;
-    const a = calcAsymmetryPct(L.avg, R.avg);
+    const a = calcAsymmetryPct(L.avg, R.avg, p.minMag); // minMag suppresses near-zero noise
     if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; }
   });
   const asiTileFlag = worstAsymPct < 10 ? 'score-good' : worstAsymPct < 15 ? 'score-warn' : 'score-poor';
