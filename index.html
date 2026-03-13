@@ -408,8 +408,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <div class="form-group">
             <label class="form-label">Height <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
             <div style="display:flex;gap:6px;">
-              <input type="number" id="patientHeight" placeholder="e.g. 175" min="30" max="220" step="1" style="flex:1">
-              <select id="heightUnit" style="width:72px;flex-shrink:0;"><option value="cm">cm</option><option value="in">in</option></select>
+              <input type="number" id="patientHeight" placeholder="e.g. 66" min="48" max="84" step="1" style="flex:1">
+              <select id="heightUnit" style="width:72px;flex-shrink:0;"><option value="in" selected>in</option><option value="cm">cm</option></select>
             </div>
             <div id="heightWarn" style="display:none;font-size:.7rem;color:#f59e0b;margin-top:3px;padding:3px 8px;background:rgba(245,158,11,.12);border-radius:4px;border-left:3px solid #f59e0b;"></div>
           </div>
@@ -534,6 +534,16 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
                 <button type="button" class="view-btn" id="viewPost" onclick="setCameraView('posterior',this)" title="Posterior view">
                   <span class="view-btn-icon">↩</span><span>Post.</span>
                 </button>
+              </div>
+              <div id="facingRow" style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:.72rem;color:var(--muted);">
+                <span style="font-weight:600;white-space:nowrap;">Patient faces:</span>
+                <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                  <input type="radio" name="facingDir" id="facingLeft" value="left" checked style="accent-color:var(--teal)"> Left ◀
+                </label>
+                <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                  <input type="radio" name="facingDir" id="facingRight" value="right" style="accent-color:var(--teal)"> Right ▶
+                </label>
+                <span id="facingHint" style="color:var(--teal);font-size:.66rem;margin-left:4px;">Camera on patient's right side</span>
               </div>
               <div id="viewHint" style="font-size:.68rem;color:var(--teal);margin-top:4px;line-height:1.4;">
                 📐 Side: sagittal plane — hip hinge, squat depth, bar path
@@ -1322,9 +1332,9 @@ function startFrameExtraction(file, vid) {
                 let heightCm = null;
                 if(!isNaN(heightRaw) && heightRaw > 0) {
                   heightCm = heightUnit === 'in' ? heightRaw * 2.54 : heightRaw;
-                  // Sanity check: adult height should be 100-220cm.
-                  // If cm is selected but value < 100, user likely typed inches — auto-convert.
+                  // Sanity check adult height range
                   if(heightUnit === 'cm' && heightCm < 100 && heightCm > 30) {
+                    // Likely entered inches while cm was selected — auto-convert
                     heightCm = Math.round(heightRaw * 2.54);
                     const htEl = document.getElementById('patientHeight');
                     if(htEl) htEl.value = heightCm;
@@ -1334,7 +1344,18 @@ function startFrameExtraction(file, vid) {
                       htWarn.style.display = 'block';
                       setTimeout(() => { htWarn.style.display='none'; }, 5000);
                     }
-                    console.warn('[Height] Auto-converted from apparent inches to', heightCm, 'cm');
+                  } else if(heightUnit === 'in' && heightCm > 250) {
+                    // Likely entered cm while inches was selected (e.g. 168) — auto-convert
+                    const convertedIn = Math.round(heightRaw / 2.54);
+                    heightCm = heightRaw; // raw value IS cm, use directly
+                    const htEl = document.getElementById('patientHeight');
+                    if(htEl) htEl.value = convertedIn;
+                    const htWarn = document.getElementById('heightWarn');
+                    if(htWarn) {
+                      htWarn.textContent = `Looks like cm — using ${heightCm} cm (${convertedIn} in)`;
+                      htWarn.style.display = 'block';
+                      setTimeout(() => { htWarn.style.display='none'; }, 5000);
+                    }
                   }
                 }
                 window_strideMetrics = detectStridesAndComputeMetrics(
@@ -1364,12 +1385,23 @@ function startFrameExtraction(file, vid) {
                 const n=(i<arr.length-1&&arr[i+1]!=null)?arr[i+1]:v;
                 return (p+v+n)/3;
               });
-              const lAnkS=smooth(perFrame.map(f=>f.lAnkY));
-              const rAnkS=smooth(perFrame.map(f=>f.rAnkY));
-              const lKneeS=smooth(perFrame.map(f=>f.lKnee));
-              const rKneeS=smooth(perFrame.map(f=>f.rKnee));
-              const lHipS=smooth(perFrame.map(f=>f.lHip));
-              const rHipS=smooth(perFrame.map(f=>f.rHip));
+              // Facing direction: when patient faces RIGHT, camera is on their LEFT.
+              // MediaPipe sees right leg (landmarks 24/26/28) as the near/dominant leg.
+              // Swap L↔R signal series so contact detection correctly identifies the grounded leg.
+              const facingDir = (document.querySelector('input[name="facingDir"]:checked')?.value) || 'left';
+              const swapLR = (cameraView === 'side' && facingDir === 'right');
+              const _lAnkRaw=smooth(perFrame.map(f=>f.lAnkY));
+              const _rAnkRaw=smooth(perFrame.map(f=>f.rAnkY));
+              const _lKneeRaw=smooth(perFrame.map(f=>f.lKnee));
+              const _rKneeRaw=smooth(perFrame.map(f=>f.rKnee));
+              const _lHipRaw=smooth(perFrame.map(f=>f.lHip));
+              const _rHipRaw=smooth(perFrame.map(f=>f.rHip));
+              const lAnkS  = swapLR ? _rAnkRaw  : _lAnkRaw;
+              const rAnkS  = swapLR ? _lAnkRaw  : _rAnkRaw;
+              const lKneeS = swapLR ? _rKneeRaw : _lKneeRaw;
+              const rKneeS = swapLR ? _lKneeRaw : _rKneeRaw;
+              const lHipS  = swapLR ? _rHipRaw  : _lHipRaw;
+              const rHipS  = swapLR ? _lHipRaw  : _rHipRaw;
 
               // c) Local maxima detection for ankle Y (contact events)
               const localMaxima = (arr, minProm=0.015) => {
@@ -2096,10 +2128,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if(!v) return;
       if(heightUnitSel.value === 'in') {
         heightIn.value = Math.round(v / 2.54);
-        heightIn.min = 39; heightIn.max = 87;
+        heightIn.min = 48; heightIn.max = 84;
+        heightIn.placeholder = 'e.g. 66';
       } else {
         heightIn.value = Math.round(v * 2.54);
-        heightIn.min = 100; heightIn.max = 220;
+        heightIn.min = 30; heightIn.max = 220;
+        heightIn.placeholder = 'e.g. 168';
       }
     });
   }
@@ -4411,7 +4445,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 // Hip Flexion: stored as degrees-from-upright → bigger = more flexed → use .max
 // Knee Flexion: stored as included angle → smaller = more flexed → use .min
 // All others (trunk lean, ankle DF, pelvic drop): use .avg (contextual averages)
-const GAIT_USE_MAX = new Set(['Left Hip Flexion','Right Hip Flexion','Left Ankle Dorsiflexion','Right Ankle Dorsiflexion']);
+const GAIT_USE_MAX = new Set(['Left Hip Flexion','Right Hip Flexion']);
 const GAIT_USE_MIN = new Set(['Left Knee Flexion','Right Knee Flexion']);
 function gaitDisplayVal(jointName, agg, movement) {
   const isGait = /running|gait|walk/i.test(movement || '');
@@ -5032,7 +5066,7 @@ ${(() => {
   const exp  = document.getElementById('runningExperience')?.value||'';
   const injS = document.getElementById('injuredSide')?.value||'';
   const htRaw= parseFloat(document.getElementById('patientHeight')?.value||'');
-  const htU  = document.getElementById('heightUnit')?.value||'cm';
+  const htU  = document.getElementById('heightUnit')?.value||'in';
   const htCm = htRaw ? (htU==='in' ? htRaw*2.54 : htRaw) : null;
   const fps  = parseInt(document.getElementById('videoFps')?.value||'30');
   const lines = [];
@@ -5329,9 +5363,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         gaitPairs.forEach(({label, L, R}) => {
           const lv = aggregated[L], rv = R ? aggregated[R] : null;
           if(!lv && !rv) return;
-          const usePeak = usePeakFor.includes(label);
-          const lVal = lv ? (usePeak ? lv.max : lv.avg) : null;
-          const rVal = rv ? (usePeak ? rv.max : rv.avg) : null;
+          // Use gaitDisplayVal to correctly handle joint-specific peak conventions:
+          // Hip Flexion → .max (bigger = more flexed in degrees-from-upright)
+          // Knee Flexion → .min (smaller = more flexed in included-angle convention)
+          // Ankle DF → .avg (max unreliable due to swing-phase geometry)
+          // Others → .avg
+          const lVal = lv ? gaitDisplayVal(L, lv, movement) : null;
+          const rVal = rv ? gaitDisplayVal(R, rv, movement) : null;
+          const usePeak = usePeakFor.includes(label); // still used for peakNote display
           const lFlag = lv ? flagAngleForMovement(L, lVal, movNorm) : '';
           const rFlag = rv ? flagAngleForMovement(R, rVal, movNorm) : '';
           const ref   = getNormLabel(L, movNorm);
@@ -6357,14 +6396,29 @@ const VIEW_HINTS = {
 };
 function setCameraView(view, btn) {
   cameraView = view;
-  // Only update primary view buttons (those inside #viewSide, #viewFront, #viewPost)
   ['viewSide','viewFront','viewPost'].forEach(id => {
     const b = document.getElementById(id);
     if(b) b.classList.remove('active');
   });
   btn.classList.add('active');
   document.getElementById('viewHint').textContent = VIEW_HINTS[view] || '';
+  // Show/hide facing direction row — only relevant for side view
+  const facingRow = document.getElementById('facingRow');
+  if(facingRow) facingRow.style.display = (view === 'side') ? 'flex' : 'none';
 }
+
+// Update facing hint text when radio changes
+document.addEventListener('DOMContentLoaded', () => {
+  ['facingLeft','facingRight'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.addEventListener('change', () => {
+      const hint = document.getElementById('facingHint');
+      if(hint) hint.textContent = el.value === 'right'
+        ? 'Camera on patient left side'
+        : 'Camera on patient right side';
+    });
+  });
+});
 
 function setCameraView2(view, btn) {
   cameraView2 = view;
