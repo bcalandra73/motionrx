@@ -3194,10 +3194,29 @@ function extractAngles(lm) {
   if(lHip&&lKnee&&lAnkle) angles['Left Knee Flexion'] = calcAngle(lHip,lKnee,lAnkle);
   if(rHip&&rKnee&&rAnkle) angles['Right Knee Flexion'] = calcAngle(rHip,rKnee,rAnkle);
 
-  // Hip angles (flexion relative to vertical)
+  // Hip angles
+  // calcAngle(shoulder,hip,knee) returns the INCLUDED angle at the hip.
+  // Standing upright = 180°. As the hip flexes (knee comes forward), the angle DECREASES.
+  // Clinical convention: "hip flexion" = deviation from neutral = 180 - included_angle.
+  // We store the CLINICAL value (degrees of flexion from upright) so it matches norms (35-65°).
   const lShoulder=v(11),rShoulder=v(12);
-  if(lShoulder&&lHip&&lKnee) angles['Left Hip Flexion'] = calcAngle(lShoulder,lHip,lKnee);
-  if(rShoulder&&rHip&&rKnee) angles['Right Hip Flexion'] = calcAngle(rShoulder,rHip,rKnee);
+  if(lShoulder&&lHip&&lKnee) {
+    const raw = calcAngle(lShoulder,lHip,lKnee);
+    if(raw!=null) angles['Left Hip Flexion'] = Math.abs(180 - raw);
+  }
+  if(rShoulder&&rHip&&rKnee) {
+    const raw = calcAngle(rShoulder,rHip,rKnee);
+    if(raw!=null) angles['Right Hip Flexion'] = Math.abs(180 - raw);
+  }
+  // Hip extension at toe-off (same calculation, labelled differently for context)
+  if(lShoulder&&lHip&&lKnee) {
+    const raw = calcAngle(lShoulder,lHip,lKnee);
+    if(raw!=null) angles['Left Hip Extension'] = Math.abs(180 - raw);
+  }
+  if(rShoulder&&rHip&&rKnee) {
+    const raw = calcAngle(rShoulder,rHip,rKnee);
+    if(raw!=null) angles['Right Hip Extension'] = Math.abs(180 - raw);
+  }
 
   // Trunk lean (shoulder midpoint to hip midpoint angle from vertical)
   if(lShoulder&&rShoulder&&lHip&&rHip) {
@@ -3207,14 +3226,22 @@ function extractAngles(lm) {
     angles['Trunk Lean'] = Math.round(Math.abs(Math.atan2(dx,Math.abs(dy)) * 180/Math.PI));
   }
 
-  // Ankle dorsiflexion — knee → ankle → toe (landmark 31/32)
-  // Fallback: if toe landmark is missing, use heel (29/30) as distal point instead
+  // Ankle dorsiflexion — knee → ankle → toe/heel
+  // calcAngle(knee,ankle,toe) returns: ~90° = neutral, >90° = dorsiflexion, <90° = plantarflexion
+  // Clinical DF reported as degrees FROM 90° neutral (positive = DF, negative = PF).
+  // We store angle - 90 so values match clinical norms: DF at loading = +15 to +30°.
   const lKneeP=v(25),lAnkleP=v(27),lToe=v(31),lHeel=v(29);
   const rKneeP=v(26),rAnkleP=v(28),rToe=v(32),rHeel=v(30);
-  const lDistal = lToe || lHeel;   // prefer toe; heel is a reasonable proxy for dorsiflexion angle
+  const lDistal = lToe || lHeel;
   const rDistal = rToe || rHeel;
-  if(lKneeP&&lAnkleP&&lDistal) angles['Left Ankle Dorsiflexion'] = calcAngle(lKneeP,lAnkleP,lDistal);
-  if(rKneeP&&rAnkleP&&rDistal) angles['Right Ankle Dorsiflexion'] = calcAngle(rKneeP,rAnkleP,rDistal);
+  if(lKneeP&&lAnkleP&&lDistal) {
+    const raw = calcAngle(lKneeP,lAnkleP,lDistal);
+    if(raw!=null) angles['Left Ankle Dorsiflexion'] = raw - 90;
+  }
+  if(rKneeP&&rAnkleP&&rDistal) {
+    const raw = calcAngle(rKneeP,rAnkleP,rDistal);
+    if(raw!=null) angles['Right Ankle Dorsiflexion'] = raw - 90;
+  }
 
   // Shoulder angles
   const lElbow=v(13),rElbow=v(14);
@@ -3231,8 +3258,8 @@ const REF_RANGES = {
   'Left Hip Flexion':    {min:60, warn:45,  ok:60,  label:'Normal hip hinge: 60-90°'},
   'Right Hip Flexion':   {min:60, warn:45,  ok:60,  label:'Normal hip hinge: 60-90°'},
   'Trunk Lean':          {max:20, warn:30,  label:'Normal: <20° from vertical'},
-  'Left Ankle Dorsiflexion':  {min:100, warn:95, label:'Normal: >100° (10°+ DF)'},
-  'Right Ankle Dorsiflexion': {min:100, warn:95, label:'Normal: >100° (10°+ DF)'},
+  'Left Ankle Dorsiflexion':  {ideal:[10,30], warn:5, label:'Normal: +10 to +30° from neutral'},
+  'Right Ankle Dorsiflexion': {ideal:[10,30], warn:5, label:'Normal: +10 to +30° from neutral'},
   'Left Shoulder Flexion':    {label:'Normal: 0-180°'},
   'Right Shoulder Flexion':   {label:'Normal: 0-180°'},
 };
@@ -3653,8 +3680,8 @@ const MOVEMENT_NORMS = {
     'Left Knee Flexion':  {ideal:[30,70],  warn:20, label:'Deadlift knee: 30-70° at setup'},
     'Right Knee Flexion': {ideal:[30,70],  warn:20, label:'Deadlift knee: 30-70° at setup'},
     'Trunk Lean':         {max:45, warn:55, label:'Deadlift torso: up to 45° acceptable'},
-    'Left Ankle Dorsiflexion':  {min:90, warn:85, label:'>90° (neutral or slight DF)'},
-    'Right Ankle Dorsiflexion': {min:90, warn:85, label:'>90° (neutral or slight DF)'},
+    'Left Ankle Dorsiflexion':  {ideal:[0,20], warn:-5, label:'0 to +20° from neutral during stance'},
+    'Right Ankle Dorsiflexion': {ideal:[0,20], warn:-5, label:'0 to +20° from neutral during stance'},
   },
   'Squat (Double-Leg)': {
     'Left Hip Flexion':   {ideal:[80,130], warn:70, label:'Squat hip: 80-130° at bottom'},
@@ -3662,8 +3689,8 @@ const MOVEMENT_NORMS = {
     'Left Knee Flexion':  {ideal:[80,140], warn:70, label:'Squat knee: 80-140° at bottom'},
     'Right Knee Flexion': {ideal:[80,140], warn:70, label:'Squat knee: 80-140° at bottom'},
     'Trunk Lean':         {max:25, warn:40, label:'Squat torso: <25° preferred'},
-    'Left Ankle Dorsiflexion':  {min:95, warn:90, label:'>95° (10°+ DF needed for depth)'},
-    'Right Ankle Dorsiflexion': {min:95, warn:90, label:'>95° (10°+ DF needed for depth)'},
+    'Left Ankle Dorsiflexion':  {ideal:[10,30], warn:5, label:'+10 to +30° from neutral required for depth'},
+    'Right Ankle Dorsiflexion': {ideal:[10,30], warn:5, label:'+10 to +30° from neutral required for depth'},
   },
   'Single-Leg Squat': {
     'Left Hip Flexion':   {ideal:[60,110], warn:50, label:'SL squat hip: 60-110°'},
@@ -3684,8 +3711,8 @@ const MOVEMENT_NORMS = {
     'Right Hip Flexion':  {ideal:[20,40], warn:15, label:'Gait hip flexion: 20-40°'},
     'Left Knee Flexion':  {ideal:[0,70],  warn:0,  label:'Stance: ~0°; swing: up to 70°'},
     'Right Knee Flexion': {ideal:[0,70],  warn:0,  label:'Stance: ~0°; swing: up to 70°'},
-    'Left Ankle Dorsiflexion':  {min:95, warn:90, label:'Min 5° DF during stance phase'},
-    'Right Ankle Dorsiflexion': {min:95, warn:90, label:'Min 5° DF during stance phase'},
+    'Left Ankle Dorsiflexion':  {ideal:[5,25], warn:0,  label:'Min 5° DF during stance phase'},
+    'Right Ankle Dorsiflexion': {ideal:[5,25], warn:0,  label:'Min 5° DF during stance phase'},
     'Trunk Lean':         {max:10, warn:15, label:'<10° in gait'},
   },
   'Running': {
@@ -3697,8 +3724,8 @@ const MOVEMENT_NORMS = {
     'Right Knee Flexion':      {ideal:[90,130],warn:80, label:'Peak knee flexion swing: 90-130°'},
     'Left Knee Extension':     {ideal:[160,180],warn:150,label:'Knee at initial contact: near full extension'},
     'Right Knee Extension':    {ideal:[160,180],warn:150,label:'Knee at initial contact: near full extension'},
-    'Left Ankle Dorsiflexion': {ideal:[15,30], warn:10, label:'Ankle dorsiflexion at loading: 15-30°'},
-    'Right Ankle Dorsiflexion':{ideal:[15,30], warn:10, label:'Ankle dorsiflexion at loading: 15-30°'},
+    'Left Ankle Dorsiflexion': {ideal:[10,25], warn:5,  label:'Ankle dorsiflexion at loading: +10 to +25° (from neutral)'},
+    'Right Ankle Dorsiflexion':{ideal:[10,25], warn:5,  label:'Ankle dorsiflexion at loading: +10 to +25° (from neutral)'},
     'Trunk Lean':              {ideal:[5,15],  warn:20, label:'Forward trunk lean: 5-15° from vertical'},
     'Trunk Lateral Lean':      {max:5, warn:8,          label:'Lateral trunk lean: <5° per step (Trendelenburg)'},
     'Pelvic Drop':             {max:5, warn:8,          label:'Contralateral pelvic drop: <5° (hip abductor strength)'},
@@ -4681,6 +4708,21 @@ ${notes ? `CLINICAL NOTES: ${notes}` : ''}
 ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
+ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
+- Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion. Values near 0° = near-upright; values >80° = excessive forward lean.
+- Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
+- Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. -20° = significant plantarflexion (toe-off).
+- Trunk Lean: degrees from vertical (0° = perfectly upright). Running norm = 5-15° forward.
+- Shoulder Flexion: arm forward from body. 0° = arm at side; 90° = arm horizontal forward.
+${window_strideMetrics ? `
+RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete strides detected):
+- Cadence: ${window_strideMetrics.cadenceSpm} steps/min (optimal range: 160-180 spm)
+- Stride duration: ${Math.round(window_strideMetrics.strideDurationS*1000)}ms avg${window_strideMetrics.cvStridePct!=null ? `, CV=${window_strideMetrics.cvStridePct}% stride-to-stride variability` : ''}
+- Ground contact: ${window_strideMetrics.gcPct!=null ? window_strideMetrics.gcPct+'% of cycle' : 'not detected'} (norm: 30-45%)
+- Float time: ${window_strideMetrics.hasFloat ? window_strideMetrics.floatPct+'% of cycle (bilateral float present)' : 'No bilateral float phase detected'}
+- Foot strike pattern: ${window_strideMetrics.fsConsensus} (${window_strideMetrics.fsConsensus==='heel'?'higher impact, consider midfoot cues':window_strideMetrics.fsConsensus==='midfoot'?'optimal pattern':'forefoot strike'})
+${window_strideMetrics.stepLengthAsymPct!=null ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)` : ''}
+Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
 ${hasDualView && angleLines2 ? `\nSECOND VIEW ANGLES (${view2Label}):\n${angleLines2}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
 ${asiToPromptText(aggregated) ? `\n${asiToPromptText(aggregated)}` : ''}
@@ -5364,8 +5406,23 @@ async function exportPDF() {
           const slots     = group.querySelectorAll('.phase-view-slot');
           const imgs      = [...slots].map(s=>s.querySelector('img')).filter(Boolean);
           const viewLabels= [...slots].map(s=>s.querySelector('.phase-view-label')?.textContent?.trim()||'');
-          const phaseName = group.querySelector('.phase-group-header')?.firstChild
-                              ?.textContent?.replace(/[▲▼]/g,'').trim()||'';
+          // Extract clean phase name: get all text content from header, strip icons/badges
+          const hdrEl = group.querySelector('.phase-group-header');
+          let phaseName = '';
+          if(hdrEl) {
+            // Walk text nodes only, skip badge spans
+            const walker = document.createTreeWalker(hdrEl, NodeFilter.SHOW_TEXT);
+            const texts = [];
+            let node;
+            while((node = walker.nextNode())) {
+              const t = node.textContent.trim();
+              // Skip the phase badge (#1, #2...) and very short tokens
+              if(t && !/^#\d+$/.test(t) && t.length > 1) texts.push(t);
+            }
+            phaseName = texts[0] || ''; // first meaningful text = phase label
+            // Remove emoji/icon chars and truncate
+            phaseName = phaseName.replace(/[▲▼↑↓⊙↗↘]/g,'').replace(/[^\x20-\x7E]/g,' ').trim();
+          }
           const jpegs     = imgs.map(im=>imgToJpeg(im, 0.84));
           const aspect    = jpegs.find(j=>j)?.aspect || 0.75;
           return { phaseName, viewLabels, jpegs, aspect };
@@ -5469,8 +5526,12 @@ async function exportPDF() {
     const anglesSection = document.getElementById('anglesSection');
     if(anglesSection && anglesSection.style.display !== 'none') {
       const rows   = [...anglesSection.querySelectorAll('tbody tr')];
+      // For gait/running, the table has Left/Right columns instead of Avg/Range
+      const isGaitTable = anglesSection.querySelector('th[style*="0ea5e9"]') !== null;
       const colW   = [58,24,36,CW-122];
-      const hdrs   = ['Joint','Avg Angle','Range','Reference Range'];
+      const hdrs   = isGaitTable
+        ? ['Joint','Left','Right','Reference Range']
+        : ['Joint','Avg Angle','Range','Reference Range'];
       const ROW_H  = 6.5;
       const HEAD_H = 7;
       // Guard for section title + table header + at least 3 data rows
@@ -5511,6 +5572,69 @@ async function exportPDF() {
       });
       hRule(ML, y, CW, 0.3, C.border);
       y += 8;
+    }
+
+    // ════════════════════════════════════════════════
+    // STRIDE METRICS (Running/Gait only)
+    // ════════════════════════════════════════════════
+    const strideSection = document.getElementById('strideMetricsSection');
+    if(strideSection && strideSection.style.display !== 'none' && window_strideMetrics) {
+      const sm = window_strideMetrics;
+      guard(SECTION_HEAD_H + 60);
+      sectionHead('Running Stride Metrics', C.teal);
+
+      // KPI grid: 3 per row
+      const kpiDefs = [
+        {label:'Cadence',          value:`${sm.cadenceSpm} spm`,   sub:`${sm.cadenceStride} strides/min`},
+        {label:'Stride Duration',  value:`${Math.round(sm.strideDurationS*1000)} ms`, sub: sm.cvStridePct!=null ? `CV ${sm.cvStridePct}%` : `avg of ${sm.stridesDetected} strides`},
+        {label:'Ground Contact',   value: sm.gcPct!=null ? `${sm.gcPct}%` : '—',    sub:'of gait cycle'},
+        {label:'Float Time',       value: sm.hasFloat ? `${sm.floatPct}%` : 'None', sub: sm.hasFloat ? 'bilateral float' : 'no float detected'},
+        {label:'Strides Detected', value: `${sm.stridesDetected}`,                  sub:`in ${sm.videoDurationS.toFixed(1)}s clip`},
+        {label:'Foot Strike',      value: sm.fsConsensus.charAt(0).toUpperCase()+sm.fsConsensus.slice(1), sub:'consensus pattern'},
+      ];
+      if(sm.peakKneeFlex!=null)    kpiDefs.push({label:'Peak Knee Flex', value:`${sm.peakKneeFlex}°`, sub:'swing phase'});
+      if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step length'});
+
+      const KPI_COLS = 3;
+      const kW = (CW - (KPI_COLS-1)*4) / KPI_COLS;
+      const KPI_H = 18;
+      let kCol=0, kRowY=y;
+      kpiDefs.forEach(({label,value,sub}) => {
+        if(kCol===0) { guard(KPI_H+2); kRowY=y; }
+        const kx = ML + kCol*(kW+4);
+        setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.2);
+        doc.roundedRect(kx, kRowY, kW, KPI_H, 2, 2, 'FD');
+        setFill(C.teal); doc.roundedRect(kx, kRowY, kW, 2, 1, 0, 'F');
+        doc.setFont('helvetica','normal'); doc.setFontSize(5.5); setColor(C.muted);
+        doc.text(label.toUpperCase(), kx+4, kRowY+6);
+        doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.navy);
+        doc.text(value, kx+4, kRowY+13);
+        doc.setFont('helvetica','normal'); doc.setFontSize(5.5); setColor(C.muted);
+        doc.text(sub, kx+4, kRowY+17);
+        kCol++;
+        if(kCol>=KPI_COLS){ kCol=0; y=kRowY+KPI_H+3; }
+      });
+      if(kCol>0) y = kRowY+KPI_H+3;
+
+      // Clinical flags
+      const badFlags = Object.entries(sm.flags||{}).filter(([,v])=>v.level!=='ok');
+      if(badFlags.length>0) {
+        guard(6+badFlags.length*6);
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.5);
+        badFlags.forEach(([,v]) => {
+          const icon = v.level==='poor'?'● ':v.level==='warn'?'○ ':'';
+          setColor(v.level==='poor'?C.red:C.amber);
+          doc.text(icon+(v.msg||''), ML+3, y+4, {maxWidth:CW-6});
+          y += 6;
+        });
+      }
+
+      // Accuracy disclaimer
+      guard(10);
+      setFill(C.bg); doc.rect(ML, y+2, CW, 9, 'F');
+      doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
+      doc.text(`Timing metrics estimated from video at ${sm.fps}fps (±33ms resolution). Values reported as % of cycle to minimize frame-rate error. Cadence and stride duration are accurate.`, ML+3, y+7, {maxWidth:CW-6});
+      y += 13;
     }
 
     // ════════════════════════════════════════════════
