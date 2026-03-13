@@ -1433,15 +1433,21 @@ function startFrameExtraction(file, vid) {
               const oppMidswingIdx=argMaxR(refAnkS,  r0+Math.round(cycleLen*.65), r1); // OPP swing = REF ankle rises
 
               // g) Build timeline — deduplicate by (side+phaseId) first, then by frameIndex
+              // All 8 events are labeled as REF side — the gallery shows ONE complete
+              // reference leg cycle. OPP events provide timing landmarks but their
+              // frames are relabeled as the corresponding REF leg phase:
+              //   OPP contact    ≈ REF early swing  (opp heel strike = ref takes off)
+              //   OPP midstance  ≈ REF mid swing     (opp weight-bearing = ref swing peak)
+              //   OPP toeoff     ≈ REF late swing    (opp push-off = ref prepares to land)
               const rawEv=[
-                {i:refContactIdx,  side:REF,phaseId:'contact',  pri:0},
-                {i:refMidstIdx,    side:REF,phaseId:'midstance',pri:1},
-                {i:refToeoffIdx,   side:REF,phaseId:'toeoff',   pri:2},
-                {i:refMidswingIdx, side:REF,phaseId:'midswing', pri:3},
-                {i:oppContactIdx,  side:OPP,phaseId:'contact',  pri:4},
-                {i:oppMidstIdx,    side:OPP,phaseId:'midstance',pri:5},
-                {i:oppToeoffIdx,   side:OPP,phaseId:'toeoff',   pri:6},
-                {i:oppMidswingIdx, side:OPP,phaseId:'midswing', pri:7},
+                {i:refContactIdx,  side:REF, phaseId:'contact',    pri:0},
+                {i:refMidstIdx,    side:REF, phaseId:'midstance',  pri:1},
+                {i:refToeoffIdx,   side:REF, phaseId:'toeoff',     pri:2},
+                {i:refMidswingIdx, side:REF, phaseId:'midswing',   pri:3},
+                {i:oppContactIdx,  side:REF, phaseId:'earlyswing', pri:4},  // OPP contact → REF early swing
+                {i:oppMidstIdx,    side:REF, phaseId:'midswing',   pri:5},  // OPP midstance → REF mid swing
+                {i:oppToeoffIdx,   side:REF, phaseId:'lateswing',  pri:6},  // OPP toeoff → REF late swing
+                {i:oppMidswingIdx, side:REF, phaseId:'lateswing',  pri:7},  // OPP midswing → REF late swing (fallback)
               ].filter(e=>e.i>=0&&e.i<N);
 
               // Deduplicate by frame index (keep lowest priority)
@@ -4312,7 +4318,11 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     else                    flags.gct = {level:'ok',   msg:'Ground contact time within normal range (30–45% of cycle)'};
   } else {
     // Signal too flat to detect toe-off — common on treadmills at 30fps
-    flags.gct = {level:'info', msg:'Ground contact time: insufficient signal quality at 30fps. Use 60fps+ video for reliable GCT measurement.'};
+    const fpsValForMsg = parseInt(document.getElementById('videoFps')?.value || '30');
+    const gctFpsOkForMsg = fpsValForMsg >= 60;
+    flags.gct = {level:'info', msg: gctFpsOkForMsg
+      ? `Ground contact time: signal too flat for toe-off detection (treadmill geometry). Force plate or shoe sensor required for true GCT.`
+      : `Ground contact time requires 60fps+ video (recorded at ${fpsValForMsg}fps). Re-record at 60fps or higher.`};
   }
 
   if(stepLengthAsym != null) {
@@ -5947,7 +5957,7 @@ async function exportPDF() {
       if(sm.peakKneeFlex!=null)    kpiDefs.push({label:'Peak Knee Flex', value:`${sm.peakKneeFlex}°`, sub:'swing phase'});
       if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step length'});
       if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
-      if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'⚠ overstriding':sm.overstrideFlag==='understride'?'⚠ understriding':'optimal range'});
+      if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'! overstriding':sm.overstrideFlag==='understride'?'! understriding':'optimal range'});
 
       const KPI_COLS = 3;
       const kW = (CW - (KPI_COLS-1)*4) / KPI_COLS;
@@ -5976,7 +5986,7 @@ async function exportPDF() {
         guard(6+badFlags.length*6);
         doc.setFont('helvetica','normal'); doc.setFontSize(6.5);
         badFlags.forEach(([,v]) => {
-          const icon = v.level==='poor'?'● ':v.level==='warn'?'○ ':'';
+          const icon = v.level==='poor'?'!! ':v.level==='warn'?'! ':'';
           setColor(v.level==='poor'?C.red:C.amber);
           doc.text(icon+(v.msg||''), ML+3, y+4, {maxWidth:CW-6});
           y += 6;
