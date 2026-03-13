@@ -3587,13 +3587,20 @@ function applyPromsToReport() {
 
 // ── Asymmetry / LSI Calculation ──
 function calcLSI(leftVal, rightVal) {
-  if(!leftVal || !rightVal || leftVal === 0) return null;
-  return Math.round((Math.min(leftVal,rightVal) / Math.max(leftVal,rightVal)) * 100);
+  if(leftVal == null || rightVal == null) return null;
+  // Use absolute magnitudes — LSI is meaningless for signed/near-zero values
+  const L = Math.abs(leftVal), R = Math.abs(rightVal);
+  const denom = Math.max(L, R);
+  if(denom < 1) return null; // both near-zero, LSI undefined
+  return Math.round((Math.min(L, R) / denom) * 100);
 }
 
 function calcAsymmetryPct(leftVal, rightVal) {
-  if(!leftVal || !rightVal) return null;
-  return Math.round(Math.abs(leftVal - rightVal) / ((leftVal + rightVal) / 2) * 100);
+  if(leftVal == null || rightVal == null) return null;
+  const L = Math.abs(leftVal), R = Math.abs(rightVal);
+  const denom = (L + R) / 2;
+  if(denom < 1) return null; // near-zero denominator — asymmetry undefined
+  return Math.round(Math.abs(L - R) / denom * 100);
 }
 
 function renderASI(aggregated) {
@@ -5244,6 +5251,7 @@ async function exportPDF() {
       navy:    [15,39,68], navyMid:[26,58,92],
       teal:    [14,124,106], tealPale:[230,244,241], tealMid:[126,200,192],
       muted:   [107,122,141], border:[213,220,232], surface:[248,250,252],
+      bg:      [241,245,249],
       white:   [255,255,255], text:[26,35,50],
       red:     [192,57,43], amber:[217,119,6], purple:[124,58,237],
     };
