@@ -3371,15 +3371,10 @@ function extractAngles(lm) {
     const raw = calcAngle(rShoulder,rHip,rKnee);
     if(raw!=null) angles['Right Hip Flexion'] = Math.abs(180 - raw);
   }
-  // Hip extension at toe-off (same calculation, labelled differently for context)
-  if(lShoulder&&lHip&&lKnee) {
-    const raw = calcAngle(lShoulder,lHip,lKnee);
-    if(raw!=null) angles['Left Hip Extension'] = Math.abs(180 - raw);
-  }
-  if(rShoulder&&rHip&&rKnee) {
-    const raw = calcAngle(rShoulder,rHip,rKnee);
-    if(raw!=null) angles['Right Hip Extension'] = Math.abs(180 - raw);
-  }
+  // Hip Extension at toe-off is NOT computed here — it requires the specific toe-off frame.
+  // The stride engine's hipExtAtToeoff value is injected into the angles table separately
+  // via renderStrideAngles() after stride detection completes. Injecting it from calcAngles
+  // would give the same value as Hip Flexion (wrong landmark timing).
 
   // Trunk lean (shoulder midpoint to hip midpoint angle from vertical)
   if(lShoulder&&rShoulder&&lHip&&rHip) {
@@ -3772,7 +3767,7 @@ function calcAsymmetryPct(leftVal, rightVal, minMagnitude) {
   return Math.round(Math.abs(L - R) / meanMag * 100);
 }
 
-function renderASI(aggregated) {
+function renderASI(aggregated, movement) {
   const pairs = [
     {label:'Knee Flexion',       left:'Left Knee Flexion',         right:'Right Knee Flexion',         minMag: 10},
     {label:'Hip Flexion',        left:'Left Hip Flexion',          right:'Right Hip Flexion',           minMag: 5},
@@ -3788,7 +3783,8 @@ function renderASI(aggregated) {
     const L = aggregated[pair.left];
     const R = aggregated[pair.right];
     if(!L || !R) return;
-    const lAvg = L.avg, rAvg = R.avg;
+    const lAvg = gaitDisplayVal(pair.left, L, movement);
+    const rAvg = gaitDisplayVal(pair.right, R, movement);
     const lsi = calcLSI(lAvg, rAvg, pair.minMag);
     const asymPct = calcAsymmetryPct(lAvg, rAvg, pair.minMag);
     if(lsi === null || asymPct === null) return; // suppressed — values within noise floor
@@ -3830,7 +3826,7 @@ function renderASI(aggregated) {
 }
 
 // Build ASI summary text for Claude prompt
-function asiToPromptText(aggregated) {
+function asiToPromptText(aggregated, movement) {
   const pairs = [
     {label:'Knee Flexion',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
     {label:'Hip Flexion',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
@@ -3842,11 +3838,13 @@ function asiToPromptText(aggregated) {
     const L = aggregated[p.left];
     const R = aggregated[p.right];
     if(!L || !R) return;
-    const lsi = calcLSI(L.avg, R.avg, p.minMag);
-    const asym = calcAsymmetryPct(L.avg, R.avg, p.minMag);
+    const lDisp = gaitDisplayVal(p.left, L, movement);
+    const rDisp = gaitDisplayVal(p.right, R, movement);
+    const lsi = calcLSI(lDisp, rDisp, p.minMag);
+    const asym = calcAsymmetryPct(lDisp, rDisp, p.minMag);
     if(lsi === null || asym === null) return; // suppressed — values within noise floor
     const flag = asym < 10 ? 'symmetric' : asym < 15 ? 'monitor' : 'SIGNIFICANT ASYMMETRY';
-    lines.push(`  ${p.label}: L=${L.avg}° R=${R.avg}° → LSI ${lsi}% (${asym}% asymmetry — ${flag})`);
+    lines.push(`  ${p.label}: L=${lDisp}° R=${rDisp}° → LSI ${lsi}% (${asym}% asymmetry — ${flag})`);
   });
   return lines.length ? 'LIMB SYMMETRY INDEX:\n' + lines.join('\n') : '';
 }
@@ -4383,6 +4381,19 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 }
 
 // Render stride metrics section in the report
+// ── Gait angle display value helper ──
+// For running/gait, flexion angles should use PEAK (max) not average
+// Norms (35-65° hip, 90-130° knee) reference peak swing phase values
+const GAIT_PEAK_JOINTS = new Set([
+  'Left Hip Flexion','Right Hip Flexion',
+  'Left Knee Flexion','Right Knee Flexion',
+]);
+function gaitDisplayVal(jointName, agg, movement) {
+  const isGait = /running|gait|walk/i.test(movement || '');
+  if(isGait && GAIT_PEAK_JOINTS.has(jointName)) return agg.max;
+  return agg.avg;
+}
+
 function renderStrideMetrics(metrics) {
   const section = document.getElementById('strideMetricsSection');
   const body    = document.getElementById('strideMetricsBody');
@@ -4959,9 +4970,13 @@ async function runAnalysis() {
     ? `DUAL-PLANE ANALYSIS: Two camera angles were captured. Images 1–${framesToSend.length} are from the ${view1Label}; images ${framesToSend.length+1}–${frameCount} are from the ${view2Label}. Angles have been merged: sagittal-plane measurements (hip/knee flexion, trunk lean) taken from the most appropriate view, frontal-plane measurements (valgus, pelvic tilt, symmetry) from the other. Use both sets of frames to give a more complete 3D movement picture than a single-view analysis allows.`
     : `CAMERA VIEW: ${view1Label}`;
 
-  const mergedAngleLines = Object.entries(aggregated).map(([k,v]) =>
-    `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}°)${hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : ''}`
-  ).join('\n');
+  const mergedAngleLines = Object.entries(aggregated).map(([k,v]) => {
+    // For running/gait: report peak (max) for flexion joints, avg for others
+    const dispVal = gaitDisplayVal(k, v, movement);
+    const peakNote = (dispVal === v.max && dispVal !== v.avg) ? ' [peak]' : '';
+    const viewNote = hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : '';
+    return `${k}: ${dispVal}°${peakNote} (range ${v.min}°–${v.max}°)${viewNote}`;
+  }).join('\n');
 
   const injuredSideVal = document.getElementById('injuredSide')?.value || '';
   const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay: cyan joints/lines = high confidence, orange joints = estimated position (body was partially occluded, e.g. by a barbell), dashed lines = low confidence segment. A red dot labeled BAR marks the detected barbell position where applicable.
@@ -5017,7 +5032,7 @@ ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
 ${hasDualView && angleLines2 ? `\nSECOND VIEW ANGLES (${view2Label}):\n${angleLines2}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
-${asiToPromptText(aggregated) ? `\n${asiToPromptText(aggregated)}` : ''}
+${asiToPromptText(aggregated, movement) ? `\n${asiToPromptText(aggregated, movement)}` : ''}
 ${promsToPromptText(collectPROMs()) ? `\n${promsToPromptText(collectPROMs())}` : ''}
 
 MOVEMENT-SPECIFIC NORMS: Use the following reference ranges for ${movement} when interpreting angles:
@@ -5241,7 +5256,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     // Render ASI
     if(Object.keys(aggregated).length > 0) {
-      renderASI(aggregated);
+      renderASI(aggregated, movement);
     }
 
     // Render angle table
@@ -5249,13 +5264,23 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       const movNorm = movement;
       const isGait  = /running|gait|walk/i.test(movNorm);
 
+      // For gait/running: inject the stride engine's hip-at-toe-off into aggregated
+      // so the angles table can show it as a real per-side measurement.
+      // This is a single bilateral value from the reference leg — label it accordingly.
+      if(isGait && window_strideMetrics?.hipExtAtToeoff != null) {
+        const hte = window_strideMetrics.hipExtAtToeoff;
+        // The stride engine uses the reference leg only; inject as bilateral estimate
+        if(!aggregated['Left Hip Extension'])  aggregated['Left Hip Extension']  = {avg: hte, min: hte, max: hte, count: 1};
+        if(!aggregated['Right Hip Extension']) aggregated['Right Hip Extension'] = {avg: hte, min: hte, max: hte, count: 1};
+      }
+
       let tableHtml = `<div style="font-size:.73rem;color:var(--muted);margin-bottom:10px;">📐 Norms calibrated for: <strong style="color:var(--navy);">${movNorm || 'General movement'}</strong></div>`;
 
       if(isGait) {
         // Gait table: group L/R pairs in one row for side-by-side comparison
         const gaitPairs = [
           {label:'Hip Flexion',         L:'Left Hip Flexion',          R:'Right Hip Flexion'},
-          {label:'Hip Extension',        L:'Left Hip Extension',        R:'Right Hip Extension'},
+          {label:'Hip Ext at Toe-off',  L:'Left Hip Extension',        R:'Right Hip Extension'},
           {label:'Knee Flexion',         L:'Left Knee Flexion',         R:'Right Knee Flexion'},
           {label:'Knee Extension',       L:'Left Knee Extension',       R:'Right Knee Extension'},
           {label:'Ankle Dorsiflexion',   L:'Left Ankle Dorsiflexion',   R:'Right Ankle Dorsiflexion'},
@@ -5270,14 +5295,23 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           <th>Reference (${movNorm})</th>
         </tr></thead><tbody>`;
 
+        // For running/gait: flexion peaks are clinically meaningful, not averages
+        // Hip and knee flexion norms reference PEAK swing phase values
+        // Trunk lean, ankle DF, pelvic drop are contextual — use avg
+        const usePeakFor = ['Hip Flexion','Knee Flexion','Hip Ext at Toe-off'];
+
         gaitPairs.forEach(({label, L, R}) => {
           const lv = aggregated[L], rv = R ? aggregated[R] : null;
           if(!lv && !rv) return;
-          const lFlag = lv ? flagAngleForMovement(L, lv.avg, movNorm) : '';
-          const rFlag = rv ? flagAngleForMovement(R, rv.avg, movNorm) : '';
+          const usePeak = usePeakFor.includes(label);
+          const lVal = lv ? (usePeak ? lv.max : lv.avg) : null;
+          const rVal = rv ? (usePeak ? rv.max : rv.avg) : null;
+          const lFlag = lv ? flagAngleForMovement(L, lVal, movNorm) : '';
+          const rFlag = rv ? flagAngleForMovement(R, rVal, movNorm) : '';
           const ref   = getNormLabel(L, movNorm);
-          const lCell = lv ? `<span class="val ${lFlag}">${lv.avg}°</span><br><span class="ref">${lv.min}–${lv.max}°</span>` : '—';
-          const rCell = rv ? `<span class="val ${rFlag}">${rv.avg}°</span><br><span class="ref">${rv.min}–${rv.max}°</span>` : (R ? '—' : '<span class="ref">bilateral</span>');
+          const peakNote = usePeak ? ' <span style="font-size:.65rem;color:var(--muted)">peak</span>' : '';
+          const lCell = lv ? `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°</span>` : '—';
+          const rCell = rv ? `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°</span>` : (R ? '—' : '<span class="ref">bilateral</span>');
           tableHtml += `<tr>
             <td style="font-weight:600">${label}</td>
             <td>${lCell}</td>
@@ -5286,6 +5320,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           </tr>`;
         });
         tableHtml += '</tbody></table>';
+        if(window_strideMetrics?.hipExtAtToeoff != null) {
+          tableHtml += `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">† Hip Ext at Toe-off: bilateral estimate from stride engine (averaged across ${window_strideMetrics.stridesDetected} strides). Per-side values require 60fps+.</div>`;
+        }
       } else {
         tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
         Object.entries(aggregated).forEach(([k,v]) => {
@@ -5397,7 +5434,9 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   asiPairsForTile.forEach(p => {
     const L = aggregated[p.left], R = aggregated[p.right];
     if(!L || !R) return;
-    const a = calcAsymmetryPct(L.avg, R.avg, p.minMag); // minMag suppresses near-zero noise
+    const lDisp = gaitDisplayVal(p.left, L, movement);
+    const rDisp = gaitDisplayVal(p.right, R, movement);
+    const a = calcAsymmetryPct(lDisp, rDisp, p.minMag); // minMag suppresses near-zero noise
     if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; }
   });
   const asiTileFlag = worstAsymPct < 10 ? 'score-good' : worstAsymPct < 15 ? 'score-warn' : 'score-poor';
@@ -5886,7 +5925,9 @@ async function exportPDF() {
           unit: sm.gcPct!=null ? 'of gait cycle' : 'required',
           sub: sm.gcPct!=null
             ? `~${Math.round(sm.strideDurationS*sm.gcPct/100*1000)}ms est.`
-            : 'Signal insufficient at 30fps',
+            : sm.gctFpsOk
+              ? 'Signal too flat to detect toe-off (treadmill geometry)'
+              : `Requires 60fps+ video (recorded at ${sm.fps||30}fps)`,
           flag: sm.gcPct==null ? 'info' : (sm.flags.gct?.level ?? 'ok'),
         },
         {
@@ -5895,7 +5936,9 @@ async function exportPDF() {
           unit: sm.floatPct!=null ? 'of cycle' : 'required',
           sub: sm.floatPct!=null
             ? (sm.hasFloat ? `~${Math.round(sm.strideDurationS*sm.floatPct/100*1000)}ms est.` : 'No bilateral float phase detected')
-            : 'Signal insufficient at 30fps',
+            : sm.floatFpsOk
+              ? 'Signal too flat to detect float (treadmill geometry)'
+              : `Requires 60fps+ video (recorded at ${sm.fps||30}fps)`,
           flag: sm.floatPct==null ? 'info' : 'ok',
         },
         {label:'Strides Detected', value: `${sm.stridesDetected}`,                  sub:`in ${sm.videoDurationS.toFixed(1)}s clip`},
@@ -5953,7 +5996,7 @@ async function exportPDF() {
         sm.shoe ? `Shoe: ${sm.shoe}` : null,
         sm.heightCm ? `Height: ${Math.round(sm.heightCm)}cm` : null,
       ].filter(Boolean);
-      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(500/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '');
+      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '');
       doc.text(disclaimerText, ML+3, y+7, {maxWidth:CW-6});
       y += 13;
     }
