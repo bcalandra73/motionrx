@@ -2332,6 +2332,12 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
     { name:'R-tibia',  prox:26, dist:28 },
     { name:'L-humerus',prox:11, dist:13 },
     { name:'R-humerus',prox:12, dist:14 },
+    // Foot segments — keep heel/toe from drifting relative to ankle
+    // Tolerance wider than tibia because foot orientation varies greatly across gait cycle
+    { name:'L-foot-heel', prox:27, dist:29, tolLo:0.40, tolHi:1.80 },
+    { name:'R-foot-heel', prox:28, dist:30, tolLo:0.40, tolHi:1.80 },
+    { name:'L-foot-toe',  prox:27, dist:31, tolLo:0.35, tolHi:2.00 },
+    { name:'R-foot-toe',  prox:28, dist:32, tolLo:0.35, tolHi:2.00 },
   ];
 
   const nFrames = allFrameLandmarks.length;
@@ -2352,7 +2358,7 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
     const medLen = lengths[Math.floor(lengths.length/2)];
     if(medLen < 0.01) continue; // degenerate
 
-    // Reproject distal landmark if it's >20% off median
+    // Reproject distal landmark if it's outside tolerance
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
       const p = lms[seg.prox], d = lms[seg.dist];
@@ -2361,10 +2367,10 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
       const actualLen = Math.hypot(p.x-d.x, p.y-d.y);
       if(actualLen < 0.001) return;
       const ratio = actualLen / medLen;
-      // Frontal/posterior views have more foreshortening — use wider tolerance
+      // Use per-segment tolerance if defined, else frontal/side defaults
       const isFrontal = (view === 'front' || view === 'posterior');
-      const lo = isFrontal ? 0.55 : 0.80;
-      const hi = isFrontal ? 1.60 : 1.20;
+      const lo = seg.tolLo ?? (isFrontal ? 0.55 : 0.80);
+      const hi = seg.tolHi ?? (isFrontal ? 1.60 : 1.20);
       if(ratio < lo || ratio > hi) {
         // Reproject distal along same direction at median length
         const dx = (d.x - p.x) / actualLen;
@@ -2393,6 +2399,13 @@ function applyBilateralFallback(lms, movement, view='side') {
   const isSymmetric = /squat|deadlift|hinge|sit|walk|gait|running/i.test(movement);
   if(!isSymmetric) return lms;
 
+  // For running/gait: NEVER mirror distal landmarks (ankle, heel, toe — indices 27-32).
+  // The two legs are in completely different gait phases, so ankle positions are
+  // opposite (one at loading DF, one at push-off PF). Mirroring creates phantom
+  // asymmetries — e.g. copying a plantarflexed push-off ankle onto the other side.
+  const isGait = /running|gait|walk/i.test(movement);
+  const distalGaitLandmarks = new Set([27, 28, 29, 30, 31, 32]); // ankles, heels, toes
+
   const pairs = [[23,24],[25,26],[27,28],[11,12],[13,14],[15,16]];
   // Frontal view: both sides visible, use higher threshold to avoid overriding real detections
   const isFrontal = (view === 'front' || view === 'posterior');
@@ -2400,6 +2413,9 @@ function applyBilateralFallback(lms, movement, view='side') {
   const result = [...lms];
 
   pairs.forEach(([L, R]) => {
+    // Skip distal gait landmarks — phase mismatch makes mirroring harmful
+    if(isGait && (distalGaitLandmarks.has(L) || distalGaitLandmarks.has(R))) return;
+
     const lLM = lms[L], rLM = lms[R];
     const lConf = lLM?.visibility || 0;
     const rConf = rLM?.visibility || 0;
@@ -2624,36 +2640,60 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
         // Face landmarks (0-10): only show nose (0) on frontal views as head reference
         const isFrontalView = (view === 'front' || view === 'posterior');
         const jr = Math.max(4, W/110);
+        // Foot landmark indices that need special visual treatment
+        const footLandmarks = new Set([27, 28, 29, 30, 31, 32]); // ankles + heels + toes
         lm.forEach((p, i) => {
           if(p.visibility < 0.2) return;
-          // On frontal views, suppress face landmarks (1-10: eyes, ears, mouth)
-          // They're inaccurate when subject is close to camera and add visual noise
-          // Keep only nose (0) as a small head-position reference dot
           if(isFrontalView && i >= 1 && i <= 10) return;
           const conf = p.visibility;
+          const isFoot = footLandmarks.has(i);
           ctx.beginPath();
-          // Face landmarks rendered smaller (nose only on frontal)
-          const r = (i === 0 && isFrontalView) ? Math.max(3, W/150) : jr;
+          // Foot landmarks rendered slightly larger to be easier to inspect visually
+          const r = (i === 0 && isFrontalView) ? Math.max(3, W/150)
+                  : isFoot ? Math.max(5, W/90)   // foot: bigger for inspection
+                  : jr;
           ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
-          if(conf >= 0.6) {
-            ctx.fillStyle = i < 11 ? '#ffeb3b' : '#00e5cc'; // high confidence
+          if(isFoot) {
+            // Foot landmarks: use distinct color scheme to flag their reliability
+            if(conf >= 0.55) {
+              ctx.fillStyle = '#a8ff78'; // bright lime = heel/toe well-tracked
+            } else if(conf >= 0.35) {
+              ctx.fillStyle = '#ff9f43'; // orange = estimated
+            } else {
+              ctx.fillStyle = 'rgba(255,80,80,0.8)'; // red = unreliable
+            }
+            // Small label for ankle landmarks (27/28) to help PT identify them
+            if((i === 27 || i === 28) && conf >= 0.25) {
+              const side = (i === 27) ? 'LA' : 'RA';
+              ctx.font = `bold ${Math.max(9, W/85)}px sans-serif`;
+              ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
+              ctx.strokeText(side, p.x*W + r + 3, p.y*H + 4);
+              ctx.fillStyle = '#fff';
+              ctx.fillText(side, p.x*W + r + 3, p.y*H + 4);
+            }
+            ctx.beginPath();
+            ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
+            ctx.fillStyle = conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
+          } else if(conf >= 0.6) {
+            ctx.fillStyle = i < 11 ? '#ffeb3b' : '#00e5cc';
           } else if(conf >= 0.35) {
-            ctx.fillStyle = '#ffa500'; // medium — orange = estimated/occluded
+            ctx.fillStyle = '#ffa500';
           } else {
-            ctx.fillStyle = 'rgba(255,100,100,0.7)'; // low confidence
+            ctx.fillStyle = 'rgba(255,100,100,0.7)';
           }
           ctx.fill();
           ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-          ctx.lineWidth = 1.5;
+          ctx.lineWidth = isFoot ? 2 : 1.5;
           ctx.stroke();
         });
 
         // Confidence legend (small, bottom-left)
         ctx.font = `${Math.max(10, W/70)}px sans-serif`;
         const legendItems = [
-          {color:'#00e5cc', label:'High confidence'},
-          {color:'#ffa500', label:'Estimated (occluded)'},
-          {color:'rgba(255,100,100,0.9)', label:'Low confidence'},
+          {color:'#00e5cc',              label:'High confidence'},
+          {color:'#a8ff78',              label:'Foot landmark (verify!)'},
+          {color:'#ffa500',              label:'Estimated (occluded)'},
+          {color:'rgba(255,100,100,0.9)',label:'Low confidence'},
         ];
         const lx = 8, ly = H - legendItems.length * Math.max(16, H/40) - 8;
         legendItems.forEach((item, idx) => {
@@ -3492,21 +3532,65 @@ function extractAngles(lm) {
     angles['Trunk Lean'] = Math.round(Math.abs(Math.atan2(dx,Math.abs(dy)) * 180/Math.PI));
   }
 
-  // Ankle dorsiflexion — knee → ankle → toe/heel
-  // calcAngle(knee,ankle,toe) returns: ~90° = neutral, >90° = dorsiflexion, <90° = plantarflexion
-  // Clinical DF reported as degrees FROM 90° neutral (positive = DF, negative = PF).
-  // We store angle - 90 so values match clinical norms: DF at loading = +15 to +30°.
-  const lKneeP=v(25),lAnkleP=v(27),lToe=v(31),lHeel=v(29);
-  const rKneeP=v(26),rAnkleP=v(28),rToe=v(32),rHeel=v(30);
-  const lDistal = lToe || lHeel;
-  const rDistal = rToe || rHeel;
-  if(lKneeP&&lAnkleP&&lDistal) {
-    const raw = calcAngle(lKneeP,lAnkleP,lDistal);
-    if(raw!=null) angles['Left Ankle Dorsiflexion'] = raw - 90;
+  // Ankle dorsiflexion — knee → ankle → foot distal landmark
+  // calcAngle(knee,ankle,foot) returns: 90°=neutral, >90°=DF(heel strike), <90°=PF(push-off)
+  // Clinical DF = angle - 90 so values match norms: loading DF = +10 to +25°.
+  //
+  // LANDMARK PRIORITY — running/gait-specific:
+  //   Heel (29/30):       large flat surface, best visibility from side during STANCE
+  //   Foot index (31/32): toe tip, more visible during SWING but often occluded at contact
+  //   Strategy: use heel if its confidence ≥ 0.40 AND it is below the ankle (stance geometry).
+  //             Fall back to toe if heel is absent/low-conf.
+  //             Reject the measurement entirely if the chosen distal landmark confidence < 0.35.
+  //
+  // VISIBILITY THRESHOLDS — tighter than knee/hip because distal landmarks are noisy:
+  //   Knee/ankle at 0.30 is fine; toe/heel at 0.40 to avoid false positives
+  const vHigh = (i) => lm[i] && lm[i].visibility > 0.40 ? lm[i] : null;
+  const vMed  = (i) => lm[i] && lm[i].visibility > 0.35 ? lm[i] : null;
+
+  const lKneeP=v(25), lAnkleP=v(27);
+  const rKneeP=v(26), rAnkleP=v(28);
+  const lHeelLM=vHigh(29), lToeLM=vMed(31);
+  const rHeelLM=vHigh(30), rToeLM=vMed(32);
+
+  // Choose distal: prefer heel (more stable in stance); fall back to toe
+  // Heel must be at or below the ankle Y (y increases downward) — guards against
+  // MediaPipe placing the heel landmark above the ankle in fast frames
+  const pickDistal = (ankleLM, heelLM, toeLM) => {
+    if(heelLM && ankleLM) {
+      const heelBelowAnkle = heelLM.y >= ankleLM.y - 0.04; // allow small noise
+      if(heelBelowAnkle) return {lm: heelLM, src:'heel'};
+    }
+    if(toeLM) return {lm: toeLM, src:'toe'};
+    return null;
+  };
+
+  const lDistalPick = lAnkleP ? pickDistal(lAnkleP, lHeelLM, lToeLM) : null;
+  const rDistalPick = rAnkleP ? pickDistal(rAnkleP, rHeelLM, rToeLM) : null;
+
+  if(lKneeP && lAnkleP && lDistalPick) {
+    const raw = calcAngle(lKneeP, lAnkleP, lDistalPick.lm);
+    if(raw != null) {
+      // Clamp to physiological range: ankle DF is −30° (max push-off PF) to +35° (max DF)
+      // Values outside this range are tracking artefacts — discard rather than report
+      const df = raw - 90;
+      if(df >= -35 && df <= 40) {
+        angles['Left Ankle Dorsiflexion'] = df;
+        angles['_lAnkleSrc'] = lDistalPick.src; // internal: for confidence note in table
+        angles['_lAnkleConf'] = Math.round((lDistalPick.lm.visibility || 0) * 100);
+      }
+    }
   }
-  if(rKneeP&&rAnkleP&&rDistal) {
-    const raw = calcAngle(rKneeP,rAnkleP,rDistal);
-    if(raw!=null) angles['Right Ankle Dorsiflexion'] = raw - 90;
+  if(rKneeP && rAnkleP && rDistalPick) {
+    const raw = calcAngle(rKneeP, rAnkleP, rDistalPick.lm);
+    if(raw != null) {
+      const df = raw - 90;
+      if(df >= -35 && df <= 40) {
+        angles['Right Ankle Dorsiflexion'] = df;
+        angles['_rAnkleSrc'] = rDistalPick.src;
+        angles['_rAnkleConf'] = Math.round((rDistalPick.lm.visibility || 0) * 100);
+      }
+    }
   }
 
   // Shoulder angles
@@ -4689,6 +4773,14 @@ function renderStrideMetrics(metrics) {
         Dense frames: ${metrics.fps >= 60 ? '64–128' : '48–64'} extracted for event anchoring<br>
         <span style="font-size:.66rem;">Nearest-event assignment prevents adjacent-frame label flipping.</span>
       </div>
+      <div><strong style="color:var(--navy);">🦶 Ankle/foot tracking</strong><br>
+        <span style="font-size:.66rem;">
+          Foot landmarks are the hardest to track — they move fastest and are often partially occluded.<br>
+          <strong>Lime dots</strong> on skeleton = foot landmarks (verify placement in overlay).<br>
+          <strong>Improve with:</strong> Bright/contrasting footwear, ankle markers (kinesiology tape X), 
+          filming at knee height, 60fps+. Ankle DF >20° asymmetry should always be verified visually.
+        </span>
+      </div>
       <div><strong style="color:var(--navy);">🔬 Upgrade pathways</strong><br>
         <span style="font-size:.66rem;">
           <strong>Best free:</strong> iPhone 120/240fps slo-mo → 4× more contact events captured<br>
@@ -4898,18 +4990,30 @@ function flagAngle(name, val) {
 }
 
 // Aggregate angles across frames (take the most extreme / representative value)
-function aggregateAngles(allFrameAngles) {
+// For ankle DF in running: only use frames tagged as stance (contact/loading/midstance)
+// to avoid push-off plantarflexion swamping the loading-response measurement.
+function aggregateAngles(allFrameAngles, framePhases) {
   const combined = {};
-  allFrameAngles.forEach(frameAngles => {
+  allFrameAngles.forEach((frameAngles, fi) => {
+    const phaseId = framePhases?.[fi]?.id || null;
+    // For ankle DF: stance phases only (contact, loading, midstance, propulsion)
+    // Swing phases (toeoff, earlyswing, midswing, lateswing) have deep plantarflexion
+    // that is normal push-off mechanics, not a pathological finding
+    const isStance = !phaseId || ['contact','loading','midstance','propulsion'].includes(phaseId);
+    const isSwing  = ['toeoff','earlyswing','midswing','lateswing'].includes(phaseId);
+
     Object.entries(frameAngles).forEach(([k,v]) => {
       if(v === null || v === undefined) return;
+      // Skip internal confidence/source keys from aggregation
+      if(k.startsWith('_')) return;
+      // Skip ankle DF from swing frames — push-off PF is not the measurement we want
+      if(isSwing && (k.includes('Ankle Dorsiflexion'))) return;
       if(!combined[k]) combined[k] = [];
       combined[k].push(v);
     });
   });
   const result = {};
   Object.entries(combined).forEach(([k,vals]) => {
-    // Use min for flexion (most restricted point), and report range
     result[k] = {
       min: Math.min(...vals),
       max: Math.max(...vals),
@@ -5020,9 +5124,10 @@ async function runAnalysis() {
     }
   }
 
-  // Step 3: Aggregate angles
+  // Step 3: Aggregate angles — pass frame phases so ankle DF uses stance frames only
   console.log('[Analysis] Stage 3: Aggregating angles, allAngles:', allAngles.length);
-    aggregated = allAngles.length > 0 ? aggregateAngles(allAngles) : {};
+  const framePhases = extractedFrames.map(f => f.phase || null);
+    aggregated = allAngles.length > 0 ? aggregateAngles(allAngles, framePhases) : {};
   const angleLines = Object.entries(aggregated).map(([k,v]) =>
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
@@ -5064,7 +5169,7 @@ async function runAnalysis() {
     } else {
       annotatedFrames2 = extractedFrames2.map(f => ({base64: f.imageData, canvas: null}));
     }
-    aggregated2 = allAngles2.length > 0 ? aggregateAngles(allAngles2) : {};
+    aggregated2 = allAngles2.length > 0 ? aggregateAngles(allAngles2, extractedFrames2.map(f => f.phase || null)) : {};
     angleLines2 = Object.entries(aggregated2).map(([k,v]) =>
       `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles2.length} frames)`
     ).join('\n');
@@ -5149,7 +5254,7 @@ ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both v
 ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion. Values near 0° = near-upright; values >80° = excessive forward lean.
 - Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
-- Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. -20° = significant plantarflexion (toe-off).
+- Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. Values aggregated from STANCE frames only (swing excluded). IMPORTANT: ankle/foot landmarks (heel, toe) are the LEAST reliable landmarks in side-view running at 30–60fps — foot moves fast and is often partially occluded. Values outside −12° to +35° are likely tracking artefacts. If ankle DF appears severely asymmetric (>20° L/R difference) or deeply plantarflexed (< −15°) during stance, flag it as UNCONFIRMED and instruct the clinician to verify against the skeleton overlay before drawing clinical conclusions. Do NOT diagnose ankle dysfunction solely from a single plantarflexion reading.
 - Trunk Lean: degrees from vertical (0° = perfectly upright). Running norm = 5-15° forward.
 - Shoulder Flexion: arm forward from body. 0° = arm at side; 90° = arm horizontal forward.
 ${(() => {
@@ -5497,23 +5602,44 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           // Use gaitDisplayVal to correctly handle joint-specific peak conventions:
           // Hip Flexion → .max (bigger = more flexed in degrees-from-upright)
           // Knee Flexion → .min (smaller = more flexed in included-angle convention)
-          // Ankle DF → .avg (max unreliable due to swing-phase geometry)
+          // Ankle DF → .avg (stance frames only — swing excluded during aggregation)
           // Others → .avg
           const lVal = lv ? gaitDisplayVal(L, lv, movement) : null;
           const rVal = rv ? gaitDisplayVal(R, rv, movement) : null;
-          const usePeak = usePeakFor.includes(label); // still used for peakNote display
+          const usePeak = usePeakFor.includes(label);
           const lFlag = lv ? flagAngleForMovement(L, lVal, movNorm) : '';
           const rFlag = rv ? flagAngleForMovement(R, rVal, movNorm) : '';
           const ref   = getNormLabel(L, movNorm);
           const peakNote = usePeak ? ' <span style="font-size:.65rem;color:var(--muted)">peak</span>' : '';
-          const lCell = lv ? `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°</span>` : '—';
-          const rCell = rv ? `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°</span>` : (R ? '—' : '<span class="ref">bilateral</span>');
+
+          // Ankle DF: add confidence note if values look implausible (outside −10 to +35)
+          // These are stance-phase aggregated values — deep PF here signals poor tracking
+          let ankleCaveat = '';
+          if(label === 'Ankle Dorsiflexion') {
+            const lPlausible = lVal == null || (lVal >= -12 && lVal <= 35);
+            const rPlausible = rVal == null || (rVal >= -12 && rVal <= 35);
+            if(!lPlausible || !rPlausible) {
+              ankleCaveat = `<tr><td colspan="4" style="font-size:.68rem;color:var(--amber);padding:2px 10px 8px;background:#fffbf0;">
+                ⚠️ <strong>Ankle tracking note:</strong> Value(s) outside normal stance range suggest foot landmark occlusion or poor MediaPipe confidence. 
+                Distal foot landmarks (heel/toe) are the hardest to track in side-view running — treat ankle DF as an estimate only. 
+                Check skeleton overlay for foot landmark placement. 60fps+ video and bright footwear improve accuracy.
+              </td></tr>`;
+            } else if(lVal != null && rVal != null && Math.abs(lVal - rVal) > 20) {
+              ankleCaveat = `<tr><td colspan="4" style="font-size:.68rem;color:var(--amber);padding:2px 10px 8px;background:#fffbf0;">
+                ⚠️ <strong>Large asymmetry (${Math.abs(lVal-rVal)}°):</strong> Ankle DF asymmetry >20° should be verified against skeleton overlay — foot landmark drift can produce false asymmetry. 
+                True ankle DF asymmetry this large is clinically significant if tracking is confirmed accurate.
+              </td></tr>`;
+            }
+          }
+
+          const lCell = lv ? `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°, range ${lv.min}°–${lv.max}°</span>` : '—';
+          const rCell = rv ? `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°, range ${rv.min}°–${rv.max}°</span>` : (R ? '—' : '<span class="ref">bilateral</span>');
           tableHtml += `<tr>
             <td style="font-weight:600">${label}</td>
             <td>${lCell}</td>
             <td>${rCell}</td>
             <td class="ref">${ref}</td>
-          </tr>`;
+          </tr>${ankleCaveat}`;
         });
         tableHtml += '</tbody></table>';
         if(window_strideMetrics?.hipExtAtToeoff != null) {
