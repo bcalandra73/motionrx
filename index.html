@@ -1695,22 +1695,45 @@ function startFrameExtraction(file, vid) {
               // Clinical priority order for running — initial contact is #1 (foot strike pattern)
               // Propulsion added between midstance and toeoff (push-off is high value)
               const clinicalPriority=['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
+              // Track which _baseId labels have already been selected — prevents the same
+              // phase (e.g. "contact") appearing multiple times because there are multiple
+              // contact events across 15 strides all labeled 'contact' in the dense pool.
+              const usedBaseIds = new Set();
+
+              // Identify the frame index range for the best stride (within cycle bounds)
+              // Candidates are restricted to this range so we don't accidentally pick
+              // a contact frame from a different stride cycle.
+              const cycleFrameMin = cycleStart;
+              const cycleFrameMax = cycleEnd;
 
               for(const pid of clinicalPriority){
                 if(dedupedFrames.length>=8) break;
                 const cands=perFrame
                   .map((fd,li)=>({fd,li,lbl:asgn[li]}))
-                  .filter(c=>c.lbl?._baseId===pid&&!usedFis.has(c.fd.fi));
-                if(!cands.length) continue;
+                  .filter(c=>{
+                    if(c.lbl?._baseId !== pid) return false;
+                    if(usedFis.has(c.fd.fi)) return false;
+                    // Prefer frames within the identified stride cycle
+                    // Allow a 20% overshoot for phases that naturally fall near cycle edges
+                    const inCycle = c.li >= cycleFrameMin && c.li <= cycleFrameMax;
+                    return inCycle;
+                  });
+
+                // If no candidates within cycle, allow outside but still no duplicates
+                const candsAll = cands.length > 0 ? cands : perFrame
+                  .map((fd,li)=>({fd,li,lbl:asgn[li]}))
+                  .filter(c=>c.lbl?._baseId===pid && !usedFis.has(c.fd.fi));
+
+                if(!candsAll.length) continue;
 
                 // Strongly prefer directly detected event frames (from timeline)
-                const detectedCands=cands.filter(c=>keySet.has(c.li)&&!tooClose(c.fd.fi));
-                const nearbyKeysCands=cands.filter(c=>keySet.has(c.li));
-                const allNonClose=cands.filter(c=>!tooClose(c.fd.fi));
+                const detectedCands=candsAll.filter(c=>keySet.has(c.li)&&!tooClose(c.fd.fi));
+                const nearbyKeysCands=candsAll.filter(c=>keySet.has(c.li));
+                const allNonClose=candsAll.filter(c=>!tooClose(c.fd.fi));
                 const pool = detectedCands.length>0 ? detectedCands
                            : allNonClose.length>0 ? allNonClose
                            : nearbyKeysCands.length>0 ? nearbyKeysCands
-                           : cands; // last resort: allow close frames
+                           : candsAll;
 
                 const idealFrac=gaitPhaseMap[pid]?.time??0.5;
                 const best=pool.reduce((acc,cur)=>{
@@ -1735,21 +1758,25 @@ function startFrameExtraction(file, vid) {
 
                 usedFis.add(best.fd.fi);
                 usedFrameNums.add(best.fd.fi);
+                usedBaseIds.add(pid); // mark this phase as selected — prevents duplicates
                 dedupedFrames.push({...frames[best.fd.fi],phase:enrichedLbl});
               }
 
-              // Pad if needed — pick frames that are sufficiently spread out
+              // Pad if needed — only add phases not already represented, spread out
               if(dedupedFrames.length<8){
                 for(const fd of perFrame){
                   if(dedupedFrames.length>=8) break;
                   const li=perFrame.indexOf(fd);
-                  if(!usedFis.has(fd.fi)&&asgn[li]&&!tooClose(fd.fi)){
+                  const baseId = asgn[li]?._baseId;
+                  // Don't pad with a phase already represented
+                  if(!usedFis.has(fd.fi)&&asgn[li]&&!tooClose(fd.fi)&&!usedBaseIds.has(baseId)){
                     usedFis.add(fd.fi);
                     usedFrameNums.add(fd.fi);
+                    if(baseId) usedBaseIds.add(baseId);
                     dedupedFrames.push({...frames[fd.fi],phase:asgn[li]});
                   }
                 }
-                // If still not enough, relax the gap constraint
+                // Last resort: allow phase repeats only if we still need frames
                 for(const fd of perFrame){
                   if(dedupedFrames.length>=8) break;
                   const li=perFrame.indexOf(fd);
@@ -3974,10 +4001,19 @@ function extractAngles(lm) {
   //             Fall back to toe if heel is absent/low-conf.
   //             Reject the measurement entirely if the chosen distal landmark confidence < 0.35.
   //
-  // VISIBILITY THRESHOLDS — tighter than knee/hip because distal landmarks are noisy:
-  //   Knee/ankle at 0.30 is fine; toe/heel at 0.40 to avoid false positives
-  const vHigh = (i) => lm[i] && lm[i].visibility > 0.40 ? lm[i] : null;
-  const vMed  = (i) => lm[i] && lm[i].visibility > 0.35 ? lm[i] : null;
+  // COMBINED CONFIDENCE = min(visibility, presence) for Pose Landmarker API
+  // The new API provides `presence` (is landmark in frame?) alongside `visibility` 
+  // (is it facing the camera?). Using both catches cases where MediaPipe places a 
+  // landmark with high visibility but low presence — a common ankle artifact.
+  // For legacy MediaPipe Pose, `presence` is undefined → falls back to visibility only.
+  const combinedConf = (lmItem) => {
+    if(!lmItem) return 0;
+    const vis = lmItem.visibility ?? 0;
+    const pres = lmItem.presence ?? 1; // legacy API has no presence → assume 1.0
+    return Math.min(vis, pres);
+  };
+  const vHigh = (i) => lm[i] && combinedConf(lm[i]) > 0.40 ? lm[i] : null;
+  const vMed  = (i) => lm[i] && combinedConf(lm[i]) > 0.35 ? lm[i] : null;
 
   const lKneeP=v(25), lAnkleP=v(27);
   const rKneeP=v(26), rAnkleP=v(28);
@@ -3999,27 +4035,36 @@ function extractAngles(lm) {
   const lDistalPick = lAnkleP ? pickDistal(lAnkleP, lHeelLM, lToeLM) : null;
   const rDistalPick = rAnkleP ? pickDistal(rAnkleP, rHeelLM, rToeLM) : null;
 
-  if(lKneeP && lAnkleP && lDistalPick) {
+  // worldLandmarks Z-depth cross-check (Pose Landmarker API only)
+  // _wz = metric depth in metres relative to pelvis; _wy = metric height.
+  // In a side-view treadmill shot, the ipsilateral ankle should be close in Z
+  // to its own knee (both are on the near side of the body).
+  // If the ankle-knee Z diff exceeds 0.30m the ankle is on the far side or on
+  // the belt — this reading will produce a spurious angle, so we discard it.
+  const worldZReject = (ankleLM, kneeLM) => {
+    if(!ankleLM?._wz || !kneeLM?._wz) return false; // no 3D data — can't reject
+    return Math.abs(ankleLM._wz - kneeLM._wz) > 0.30;
+  };
+
+  if(lKneeP && lAnkleP && lDistalPick && !worldZReject(lAnkleP, lKneeP)) {
     const raw = calcAngle(lKneeP, lAnkleP, lDistalPick.lm);
     if(raw != null) {
-      // Clamp to physiological range: ankle DF is −30° (max push-off PF) to +35° (max DF)
-      // Values outside this range are tracking artefacts — discard rather than report
       const df = raw - 90;
       if(df >= -35 && df <= 40) {
         angles['Left Ankle Dorsiflexion'] = df;
-        angles['_lAnkleSrc'] = lDistalPick.src; // internal: for confidence note in table
-        angles['_lAnkleConf'] = Math.round((lDistalPick.lm.visibility || 0) * 100);
+        angles['_lAnkleSrc'] = lDistalPick.src;
+        angles['_lAnkleConf'] = Math.round(combinedConf(lDistalPick.lm) * 100);
       }
     }
   }
-  if(rKneeP && rAnkleP && rDistalPick) {
+  if(rKneeP && rAnkleP && rDistalPick && !worldZReject(rAnkleP, rKneeP)) {
     const raw = calcAngle(rKneeP, rAnkleP, rDistalPick.lm);
     if(raw != null) {
       const df = raw - 90;
       if(df >= -35 && df <= 40) {
         angles['Right Ankle Dorsiflexion'] = df;
         angles['_rAnkleSrc'] = rDistalPick.src;
-        angles['_rAnkleConf'] = Math.round((rDistalPick.lm.visibility || 0) * 100);
+        angles['_rAnkleConf'] = Math.round(combinedConf(rDistalPick.lm) * 100);
       }
     }
   }
@@ -6659,6 +6704,21 @@ async function exportPDF() {
       y += HEAD_H;
 
       rows.forEach((row, ri) => {
+        // Skip note/caveat rows (colspan rows used for ankle tracking warnings etc.)
+        // These render as garbled text in PDF — render them as a separate note box instead
+        const isNoteRow = row.querySelector('td[colspan]') !== null;
+        if(isNoteRow) {
+          const noteText = row.textContent.trim().replace(/\s+/g,' ');
+          if(noteText.length > 5) {
+            if(y + 8 > PAGE_BODY_BOT) newPage();
+            setFill('#fffbf0'); doc.rect(ML, y, CW, 7, 'F');
+            doc.setFont('helvetica','italic'); doc.setFontSize(6.5); setColor(C.amber||'#d97706');
+            doc.text('⚠ ' + noteText.substring(0,120), ML+3, y+4.5, {maxWidth: CW-6});
+            y += 8;
+          }
+          return; // skip normal row rendering
+        }
+
         // If row would cross footer, start new page and redraw table header
         if(y + ROW_H > PAGE_BODY_BOT) {
           newPage();
