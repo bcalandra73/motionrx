@@ -535,16 +535,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
                   <span class="view-btn-icon">↩</span><span>Post.</span>
                 </button>
               </div>
-              <div id="facingRow" style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:.72rem;color:var(--muted);">
-                <span style="font-weight:600;white-space:nowrap;">Patient faces:</span>
-                <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
-                  <input type="radio" name="facingDir" id="facingLeft" value="left" checked style="accent-color:var(--teal)"> Left ◀
-                </label>
-                <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
-                  <input type="radio" name="facingDir" id="facingRight" value="right" style="accent-color:var(--teal)"> Right ▶
-                </label>
-                <span id="facingHint" style="color:var(--teal);font-size:.66rem;margin-left:4px;">Camera on patient's right side</span>
-              </div>
+
               <div id="viewHint" style="font-size:.68rem;color:var(--teal);margin-top:4px;line-height:1.4;">
                 📐 Side: sagittal plane — hip hinge, squat depth, bar path
               </div>
@@ -1385,23 +1376,15 @@ function startFrameExtraction(file, vid) {
                 const n=(i<arr.length-1&&arr[i+1]!=null)?arr[i+1]:v;
                 return (p+v+n)/3;
               });
-              // Facing direction: when patient faces RIGHT, camera is on their LEFT.
-              // MediaPipe sees right leg (landmarks 24/26/28) as the near/dominant leg.
-              // Swap L↔R signal series so contact detection correctly identifies the grounded leg.
-              const facingDir = (document.querySelector('input[name="facingDir"]:checked')?.value) || 'left';
-              const swapLR = (cameraView === 'side' && facingDir === 'right');
-              const _lAnkRaw=smooth(perFrame.map(f=>f.lAnkY));
-              const _rAnkRaw=smooth(perFrame.map(f=>f.rAnkY));
-              const _lKneeRaw=smooth(perFrame.map(f=>f.lKnee));
-              const _rKneeRaw=smooth(perFrame.map(f=>f.rKnee));
-              const _lHipRaw=smooth(perFrame.map(f=>f.lHip));
-              const _rHipRaw=smooth(perFrame.map(f=>f.rHip));
-              const lAnkS  = swapLR ? _rAnkRaw  : _lAnkRaw;
-              const rAnkS  = swapLR ? _lAnkRaw  : _rAnkRaw;
-              const lKneeS = swapLR ? _rKneeRaw : _lKneeRaw;
-              const rKneeS = swapLR ? _lKneeRaw : _rKneeRaw;
-              const lHipS  = swapLR ? _rHipRaw  : _lHipRaw;
-              const rHipS  = swapLR ? _lHipRaw  : _rHipRaw;
+
+              // Use signals as-is — visibility-based REF detection auto-selects the near leg.
+              // The REF label is corrected anatomically after detection (see _REF/REF below).
+              const lAnkS  = smooth(perFrame.map(f=>f.lAnkY));
+              const rAnkS  = smooth(perFrame.map(f=>f.rAnkY));
+              const lKneeS = smooth(perFrame.map(f=>f.lKnee));
+              const rKneeS = smooth(perFrame.map(f=>f.rKnee));
+              const lHipS  = smooth(perFrame.map(f=>f.lHip));
+              const rHipS  = smooth(perFrame.map(f=>f.rHip));
 
               // c) Local maxima detection for ankle Y (contact events)
               const localMaxima = (arr, minProm=0.015) => {
@@ -3815,11 +3798,14 @@ function calcAsymmetryPct(leftVal, rightVal, minMagnitude) {
   if(leftVal == null || rightVal == null) return null;
   const L = Math.abs(leftVal), R = Math.abs(rightVal);
   const noiseFloor = minMagnitude ?? 1;
-  // Suppress when the mean magnitude is too small to yield meaningful asymmetry
   const meanMag = (L + R) / 2;
   if(meanMag < noiseFloor) return null;
   if(meanMag < 1) return null;
-  return Math.round(Math.abs(L - R) / meanMag * 100);
+  // Use max(L,R) as denominator: "% deficit of weaker vs stronger side"
+  // This bounds the result at 100% and prevents inflation when one value is near zero
+  // e.g. L=1°, R=15°: 14/15 = 93% (not 175% which used mean denominator)
+  const denom = Math.max(L, R);
+  return Math.round(Math.abs(L - R) / denom * 100);
 }
 
 function renderASI(aggregated, movement) {
@@ -6402,23 +6388,10 @@ function setCameraView(view, btn) {
   });
   btn.classList.add('active');
   document.getElementById('viewHint').textContent = VIEW_HINTS[view] || '';
-  // Show/hide facing direction row — only relevant for side view
-  const facingRow = document.getElementById('facingRow');
-  if(facingRow) facingRow.style.display = (view === 'side') ? 'flex' : 'none';
+
 }
 
-// Update facing hint text when radio changes
-document.addEventListener('DOMContentLoaded', () => {
-  ['facingLeft','facingRight'].forEach(id => {
-    const el = document.getElementById(id);
-    if(el) el.addEventListener('change', () => {
-      const hint = document.getElementById('facingHint');
-      if(hint) hint.textContent = el.value === 'right'
-        ? 'Camera on patient left side'
-        : 'Camera on patient right side';
-    });
-  });
-});
+
 
 function setCameraView2(view, btn) {
   cameraView2 = view;
