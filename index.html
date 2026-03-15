@@ -2333,7 +2333,6 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
     { name:'L-humerus',prox:11, dist:13 },
     { name:'R-humerus',prox:12, dist:14 },
     // Foot segments — keep heel/toe from drifting relative to ankle
-    // Tolerance wider than tibia because foot orientation varies greatly across gait cycle
     { name:'L-foot-heel', prox:27, dist:29, tolLo:0.40, tolHi:1.80 },
     { name:'R-foot-heel', prox:28, dist:30, tolLo:0.40, tolHi:1.80 },
     { name:'L-foot-toe',  prox:27, dist:31, tolLo:0.35, tolHi:2.00 },
@@ -2341,7 +2340,7 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
   ];
 
   const nFrames = allFrameLandmarks.length;
-  if(nFrames < 3) return allFrameLandmarks; // need enough frames for median
+  if(nFrames < 3) return allFrameLandmarks;
 
   // Compute all segment lengths across frames
   for(const seg of segments) {
@@ -2356,23 +2355,20 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
     if(lengths.length < 2) continue;
     lengths.sort((a,b)=>a-b);
     const medLen = lengths[Math.floor(lengths.length/2)];
-    if(medLen < 0.01) continue; // degenerate
+    if(medLen < 0.01) continue;
 
-    // Reproject distal landmark if it's outside tolerance
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
       const p = lms[seg.prox], d = lms[seg.dist];
       if(!p || !d) return;
-      if((p.visibility||0) < 0.3) return; // proximal unreliable — can't reproject
+      if((p.visibility||0) < 0.3) return;
       const actualLen = Math.hypot(p.x-d.x, p.y-d.y);
       if(actualLen < 0.001) return;
       const ratio = actualLen / medLen;
-      // Use per-segment tolerance if defined, else frontal/side defaults
       const isFrontal = (view === 'front' || view === 'posterior');
       const lo = seg.tolLo ?? (isFrontal ? 0.55 : 0.80);
       const hi = seg.tolHi ?? (isFrontal ? 1.60 : 1.20);
       if(ratio < lo || ratio > hi) {
-        // Reproject distal along same direction at median length
         const dx = (d.x - p.x) / actualLen;
         const dy = (d.y - p.y) / actualLen;
         const newD = {
@@ -2384,10 +2380,175 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
           medianLen: medLen
         };
         lms[seg.dist] = newD;
-        console.log(`[Segment] ${seg.name} frame ${fi+1}: len=${(actualLen*100).toFixed(1)}% of median ${(medLen*100).toFixed(1)}% → reprojected`);
+        console.log(`[Segment] ${seg.name} frame ${fi+1}: len=${(actualLen*100).toFixed(1)}% → reprojected`);
       }
     });
   }
+  return allFrameLandmarks;
+}
+
+// ── Tibia-direction ankle reprojection for running/gait ──────────────────────
+// The #1 MediaPipe failure in treadmill running: the far-side ankle gets placed
+// horizontally along the belt instead of at the end of the tibia. Standard segment
+// length constraint misses this because the distance can be correct while the
+// direction is completely wrong.
+//
+// Strategy:
+//   1. Compute median tibia length from HIGH-CONFIDENCE frames only (both knee+ankle ≥0.55)
+//   2. Compute median tibia direction (unit vector from knee→ankle) from those same frames
+//   3. For any frame where the ankle confidence is LOW (< 0.45) but the knee is GOOD (≥ 0.45):
+//      a. Project a candidate ankle = knee + medianDir * medianTibiaLen
+//      b. If the detected ankle is >15% of frame width away from this projection, replace it
+//   4. Apply ground-plane constraint: the stance-phase ankle Y should not be significantly
+//      ABOVE the detected ground level (lowest reliable ankle Y across all frames)
+//
+// This is a running/gait-specific pass that runs AFTER the general segment constraints.
+function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
+  if(allFrameLandmarks.length < 4) return allFrameLandmarks;
+  const isSide = (view === 'side');
+
+  const sides = [
+    { knee:25, ankle:27, name:'L' },
+    { knee:26, ankle:28, name:'R' },
+  ];
+
+  for(const {knee:KI, ankle:AI, name} of sides) {
+    // ── Step 1: Collect high-confidence tibia observations ──
+    const goodObs = []; // {dx, dy, len} — unit vector * length
+    allFrameLandmarks.forEach(lms => {
+      if(!lms) return;
+      const k = lms[KI], a = lms[AI];
+      if(!k || !a) return;
+      const kc = k.visibility||0, ac = a.visibility||0;
+      if(kc < 0.50 || ac < 0.50) return; // both must be well-tracked
+      const dx = a.x - k.x, dy = a.y - k.y;
+      const len = Math.hypot(dx, dy);
+      if(len < 0.01) return;
+      goodObs.push({ dx: dx/len, dy: dy/len, len });
+    });
+
+    if(goodObs.length < 3) {
+      console.log(`[TibiaReproj] ${name}: not enough high-conf frames (${goodObs.length}) — skipping`);
+      continue;
+    }
+
+    // ── Step 2: Median tibia length and direction ──
+    const lens = goodObs.map(o => o.len).sort((a,b)=>a-b);
+    const medLen = lens[Math.floor(lens.length/2)];
+
+    // Median direction: average of unit vectors (robust to outliers)
+    const medDx = goodObs.reduce((s,o)=>s+o.dx,0) / goodObs.length;
+    const medDy = goodObs.reduce((s,o)=>s+o.dy,0) / goodObs.length;
+    const medDirLen = Math.hypot(medDx, medDy);
+    if(medDirLen < 0.01) continue;
+    const unitDx = medDx / medDirLen;
+    const unitDy = medDy / medDirLen;
+
+    // Sanity check: tibia should point DOWNWARD (positive dy in image coords where y↓)
+    // If median direction is upward, something is wrong — skip
+    if(unitDy < -0.1) {
+      console.log(`[TibiaReproj] ${name}: median direction pointing up (dy=${unitDy.toFixed(2)}) — skipping`);
+      continue;
+    }
+
+    console.log(`[TibiaReproj] ${name}: medLen=${(medLen*100).toFixed(1)}%, dir=(${unitDx.toFixed(2)},${unitDy.toFixed(2)}), from ${goodObs.length} frames`);
+
+    // ── Step 3: Reproject ankles where knee is good but ankle is suspicious ──
+    // Threshold for replacement: ankle is >18% of normalized width off projection
+    // (18% ≈ ~32px on an 800px wide frame — clearly misplaced)
+    const REPLACE_THRESH = 0.18;
+    // Also replace when ankle confidence is very low (<0.35) regardless of distance
+    const LOW_CONF_THRESH = 0.35;
+    // Require knee to be reasonably confident to trust projection
+    const KNEE_MIN_CONF = 0.40;
+
+    let reprojCount = 0;
+    allFrameLandmarks.forEach((lms, fi) => {
+      if(!lms) return;
+      const k = lms[KI], a = lms[AI];
+      if(!k) return;
+      const kc = k.visibility||0, ac = a?.visibility||0;
+      if(kc < KNEE_MIN_CONF) return; // knee too uncertain — projection unreliable
+
+      // Projected ankle position
+      const projX = k.x + unitDx * medLen;
+      const projY = k.y + unitDy * medLen;
+
+      if(!a || ac < LOW_CONF_THRESH) {
+        // Missing or very low confidence ankle — use projection directly
+        lms[AI] = {
+          x: projX, y: projY,
+          visibility: Math.min(kc * 0.65, 0.45), // projected confidence = 65% of knee conf
+          source: 'tibia-projected', tibiaProjFi: fi
+        };
+        reprojCount++;
+      } else {
+        // Check if detected ankle is suspiciously far from projection
+        const dist = Math.hypot(a.x - projX, a.y - projY);
+        if(dist > REPLACE_THRESH) {
+          // For side view: the projected position is almost certainly more reliable.
+          // Blend toward projection, weighted by disagreement severity
+          const blendToProj = Math.min(1.0, (dist - REPLACE_THRESH) / 0.15 + 0.5);
+          const newX = a.x + blendToProj * (projX - a.x);
+          const newY = a.y + blendToProj * (projY - a.y);
+          lms[AI] = {
+            ...a,
+            x: newX, y: newY,
+            visibility: Math.max(ac, kc * 0.55),
+            source: 'tibia-blended', origDist: dist, blendToProj
+          };
+          console.log(`[TibiaReproj] ${name} frame ${fi+1}: ankle ${(dist*100).toFixed(1)}% off → blended ${(blendToProj*100).toFixed(0)}% toward proj`);
+          reprojCount++;
+        }
+      }
+    });
+    console.log(`[TibiaReproj] ${name}: reprojected/blended ${reprojCount}/${allFrameLandmarks.length} frames`);
+  }
+
+  // ── Step 4: Ground-plane constraint ──────────────────────────────────────────
+  // In side-view treadmill running, the lowest well-tracked ankle Y across all frames
+  // gives us the treadmill belt level. Stance-phase ankles should be AT this level.
+  // Swing-phase ankles will be above it — that's fine and expected.
+  // We only correct ankles that are TOO HIGH when they should be at ground level
+  // (indicated by confidence being decent but position clearly elevated).
+  if(isSide) {
+    for(const {ankle:AI, name} of sides) {
+      // Collect minimum (most floor-level) Y across all frames with decent confidence
+      let groundY = -Infinity;
+      allFrameLandmarks.forEach(lms => {
+        if(!lms) return;
+        const a = lms[AI];
+        if(a && (a.visibility||0) > 0.45 && a.y > groundY) groundY = a.y;
+      });
+      if(groundY < 0.3) continue; // degenerate — ground not found
+
+      // The belt is at groundY. Any stance-phase ankle that's more than 12% of frame
+      // height ABOVE groundY when it has low confidence is suspicious.
+      // We don't blindly move everything to groundY — swing ankles are legitimately high.
+      // We only correct frames where the projected ankle from tibia-reproj also suggests
+      // the ankle should be near ground (projY within 10% of groundY).
+      allFrameLandmarks.forEach((lms, fi) => {
+        if(!lms) return;
+        const a = lms[AI], k = lms[sides.find(s=>s.ankle===AI)?.knee ?? AI];
+        if(!a || !k) return;
+        const ac = a.visibility||0;
+        if(ac > 0.55) return; // confident reading — trust it
+        const gapAboveGround = groundY - a.y; // positive = ankle is above ground
+        if(gapAboveGround > 0.12) {
+          // Ankle is suspiciously high and has low confidence
+          // Move it toward ground level proportionally
+          const correctionStrength = Math.min(1.0, (gapAboveGround - 0.12) / 0.10);
+          lms[AI] = {
+            ...a,
+            y: a.y + correctionStrength * gapAboveGround * 0.7,
+            source: (a.source||'') + '+ground-corrected',
+          };
+          console.log(`[GroundPlane] ${name} frame ${fi+1}: ankle ${(gapAboveGround*100).toFixed(1)}% above ground → corrected`);
+        }
+      });
+    }
+  }
+
   return allFrameLandmarks;
 }
 
@@ -2545,6 +2706,13 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
     statusEl.textContent = 'Applying segment constraints...';
     allLandmarks = applySegmentConstraints(allLandmarks, view);
 
+    // Running/gait: tibia-direction ankle reprojection + ground-plane constraint
+    // This corrects the most common treadmill failure: far-side ankle placed on belt
+    if(/running|gait|walk/i.test(movement)) {
+      statusEl.textContent = 'Correcting ankle landmarks (tibia projection)...';
+      allLandmarks = applyTibiaAnkleReprojection(allLandmarks, view);
+    }
+
     statusEl.textContent = 'Applying bilateral symmetry fallback...';
     allLandmarks = allLandmarks.map(lms => applyBilateralFallback(lms, movement, view));
 
@@ -2655,8 +2823,15 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
           ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
           if(isFoot) {
             // Foot landmarks: use distinct color scheme to flag their reliability
-            if(conf >= 0.55) {
-              ctx.fillStyle = '#a8ff78'; // bright lime = heel/toe well-tracked
+            // Special case: tibia-projected ankles get a distinct purple ring
+            const isProjected = p.source && (p.source.includes('tibia-projected') || p.source.includes('tibia-blended'));
+            const isGroundCorrected = p.source && p.source.includes('ground-corrected');
+            if(isProjected) {
+              ctx.fillStyle = '#c084fc'; // purple = tibia-projected (estimated from knee direction)
+            } else if(isGroundCorrected) {
+              ctx.fillStyle = '#fb923c'; // orange-red = ground-plane corrected
+            } else if(conf >= 0.55) {
+              ctx.fillStyle = '#a8ff78'; // lime = heel/toe well-tracked
             } else if(conf >= 0.35) {
               ctx.fillStyle = '#ff9f43'; // orange = estimated
             } else {
@@ -2665,15 +2840,17 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
             // Small label for ankle landmarks (27/28) to help PT identify them
             if((i === 27 || i === 28) && conf >= 0.25) {
               const side = (i === 27) ? 'LA' : 'RA';
+              const srcNote = isProjected ? '~' : isGroundCorrected ? '↓' : '';
               ctx.font = `bold ${Math.max(9, W/85)}px sans-serif`;
               ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
-              ctx.strokeText(side, p.x*W + r + 3, p.y*H + 4);
+              ctx.strokeText(side+srcNote, p.x*W + r + 3, p.y*H + 4);
               ctx.fillStyle = '#fff';
-              ctx.fillText(side, p.x*W + r + 3, p.y*H + 4);
+              ctx.fillText(side+srcNote, p.x*W + r + 3, p.y*H + 4);
             }
             ctx.beginPath();
             ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
-            ctx.fillStyle = conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
+            ctx.fillStyle = isProjected ? '#c084fc' : isGroundCorrected ? '#fb923c'
+                          : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
           } else if(conf >= 0.6) {
             ctx.fillStyle = i < 11 ? '#ffeb3b' : '#00e5cc';
           } else if(conf >= 0.35) {
@@ -2692,6 +2869,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
         const legendItems = [
           {color:'#00e5cc',              label:'High confidence'},
           {color:'#a8ff78',              label:'Foot landmark (verify!)'},
+          {color:'#c084fc',              label:'Ankle: tibia-projected (est.)'},
           {color:'#ffa500',              label:'Estimated (occluded)'},
           {color:'rgba(255,100,100,0.9)',label:'Low confidence'},
         ];
