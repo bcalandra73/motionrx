@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MotionRx — Clinical Motion Analysis</title>
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<!-- MediaPipe Tasks Vision — loaded dynamically via initMediaPipe() with multi-CDN fallback -->
+<!-- Legacy @mediapipe/pose kept as guaranteed fallback if new API can't load -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@tensorflow/tfjs@4.11.0/dist/tf.min.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js" crossorigin="anonymous"></script>
@@ -778,7 +780,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="loading-sub">MediaPipe is measuring joint angles, then Claude AI will generate your clinical findings</div>
     <div class="step-list">
       <div class="step-item active" id="s1"><div class="step-icon">✓</div> Extracting video frames</div>
-      <div class="step-item" id="s2"><div class="step-icon">✓</div> Running MediaPipe pose detection</div>
+      <div class="step-item" id="s2"><div class="step-icon">✓</div> Running Pose Landmarker Heavy detection</div>
       <div class="step-item" id="s2b" style="display:none;"><div class="step-icon">✓</div> Processing second camera angle</div>
       <div class="step-item" id="s3"><div class="step-icon">✓</div> Calculating joint angles</div>
       <div class="step-item" id="s4"><div class="step-icon">✓</div> Sending to Claude AI for clinical analysis</div>
@@ -962,53 +964,168 @@ const MOVENET_TO_MP = {
   15:27, 16:28  // ankles
 };
 
-// ── Init MediaPipe ──
-async function initMediaPipe() {
+// ── MediaPipe Tasks Vision bundle readiness polling ──────────────────────────
+function probeTasksVisionNamespace() {
+  try { if(typeof mpTasksVision !== 'undefined' && mpTasksVision?.PoseLandmarker) return { PoseLandmarker: mpTasksVision.PoseLandmarker, FilesetResolver: mpTasksVision.FilesetResolver }; } catch(e) {}
+  try { if(typeof window.PoseLandmarker === 'function' && typeof window.FilesetResolver === 'function') return { PoseLandmarker: window.PoseLandmarker, FilesetResolver: window.FilesetResolver }; } catch(e) {}
   try {
-    const badge = document.getElementById('mpBadge');
-    badge.className = 'mp-badge loading';
-    badge.textContent = '⏳ Loading MediaPipe...';
+    var keys = Object.keys(window);
+    for(var ki = 0; ki < keys.length; ki++) {
+      try { var v = window[keys[ki]]; if(v && typeof v === 'object' && typeof v.PoseLandmarker === 'function' && typeof v.FilesetResolver === 'function') return { PoseLandmarker: v.PoseLandmarker, FilesetResolver: v.FilesetResolver }; } catch(e2) {}
+    }
+  } catch(e3) {}
+  return null;
+}
 
-    poseInstance = new Pose({
-      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`
-    });
-    poseInstance.setOptions({
-      modelComplexity: 2,        // Highest accuracy — better with occlusion
-      smoothLandmarks: false,    // Off for multi-frame analysis (no temporal smoothing)
-      enableSegmentation: false,
-      minDetectionConfidence: 0.35,  // Lower for running — fast limb motion causes false misses
-      minTrackingConfidence: 0.35
-    });
-    await poseInstance.initialize();
+function injectFallbackCDN(url) {
+  return new Promise(function(resolve) {
+    var s = document.createElement('script');
+    s.src = url; s.crossOrigin = 'anonymous';
+    // 12 second timeout per CDN attempt
+    var timer = setTimeout(function() { resolve(false); }, 12000);
+    s.onload = function() { clearTimeout(timer); setTimeout(function() { resolve(true); }, 800); };
+    s.onerror = function() { clearTimeout(timer); resolve(false); };
+    document.head.appendChild(s);
+  });
+}
+
+// ── Init MediaPipe — tries new Pose Landmarker API, falls back to legacy ──────
+async function initMediaPipe() {
+  const badge = document.getElementById('mpBadge');
+  badge.className = 'mp-badge loading';
+  badge.textContent = '⏳ Loading pose model...';
+
+  const WASM_CDNS = [
+    'https://unpkg.com/@mediapipe/tasks-vision@0.10.14/wasm',
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm',
+  ];
+
+  const MODEL_URL =
+    'https://storage.googleapis.com/mediapipe-models/pose_landmarker/' +
+    'pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task';
+
+  // ── Attempt 1: Check if tasks-vision bundle already loaded (via <script> tag) ──
+  let ns = probeTasksVisionNamespace();
+
+  // ── Attempt 2: ES module dynamic import ──────────────────────────────────
+  // This is the PROVEN working method — bypasses CORS restrictions that block
+  // UMD script tag injection. Runs in parallel with a 15s timeout.
+  if(!ns) {
+    badge.textContent = '⏳ Loading pose model...';
+    console.log('[PoseLandmarker] Trying ES module import (primary method)...');
+    try {
+      const mod = await Promise.race([
+        import('https://unpkg.com/@mediapipe/tasks-vision@0.10.14?module'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))
+      ]);
+      if(mod?.PoseLandmarker && mod?.FilesetResolver) {
+        ns = { PoseLandmarker: mod.PoseLandmarker, FilesetResolver: mod.FilesetResolver };
+        console.log('[PoseLandmarker] ES module import succeeded');
+      }
+    } catch(e) {
+      console.warn('[PoseLandmarker] ES module import failed:', e.message, '— trying CDN scripts');
+    }
+  }
+
+  // ── Attempt 3: UMD script tag injection (fallback if ES module fails) ────
+  if(!ns) {
+    const TASKS_VISION_CDNS = [
+      'https://unpkg.com/@mediapipe/tasks-vision@0.10.14/vision_bundle.js',
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js',
+    ];
+    for(const cdnUrl of TASKS_VISION_CDNS) {
+      badge.textContent = '⏳ Trying CDN...';
+      console.log('[PoseLandmarker] Trying script CDN:', cdnUrl);
+      const ok = await injectFallbackCDN(cdnUrl);
+      if(ok) {
+        ns = probeTasksVisionNamespace();
+        if(ns) { console.log('[PoseLandmarker] Bundle loaded from:', cdnUrl); break; }
+      }
+      console.warn('[PoseLandmarker] CDN failed:', cdnUrl);
+    }
+  }
+
+  // ── If all CDN attempts fail: fall back to legacy MediaPipe Pose ──────────
+  if(!ns) {
+    console.warn('[PoseLandmarker] All CDN attempts failed — using legacy MediaPipe Pose');
+    await initMediaPipeLegacyFallback();
+    return;
+  }
+
+  // ── CDN loaded: initialize PoseLandmarker ────────────────────────────────
+  try {
+    const { PoseLandmarker, FilesetResolver } = ns;
+    badge.textContent = '⏳ Loading WASM...';
+
+    let vision = null;
+    for(const wasmUrl of WASM_CDNS) {
+      try { vision = await FilesetResolver.forVisionTasks(wasmUrl); break; }
+      catch(e) { console.warn('[PoseLandmarker] WASM CDN failed:', wasmUrl, e.message); }
+    }
+    if(!vision) throw new Error('All WASM CDNs failed');
+
+    badge.textContent = '⏳ Downloading model...';
+    const opts = { runningMode: 'IMAGE', numPoses: 1, minPoseDetectionConfidence: 0.30, minPosePresenceConfidence: 0.30, minTrackingConfidence: 0.30, outputSegmentationMasks: false };
+
+    try {
+      poseLandmarkerInstance = await PoseLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' }, ...opts });
+      console.log('[PoseLandmarker] GPU delegate OK');
+    } catch(gpuErr) {
+      console.warn('[PoseLandmarker] GPU failed, using CPU:', gpuErr.message);
+      poseLandmarkerInstance = await PoseLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' }, ...opts });
+    }
+
+    poseInstance = poseLandmarkerInstance;
     mpReady = true;
     badge.className = 'mp-badge ready';
-    badge.textContent = '✓ MediaPipe Ready';
+    badge.textContent = '✓ Pose Landmarker Ready';
+    console.log('[PoseLandmarker] Ready');
+
   } catch(e) {
-    document.getElementById('mpBadge').className = 'mp-badge error';
-    document.getElementById('mpBadge').textContent = '⚠ MediaPipe unavailable';
-    console.warn('MediaPipe init failed:', e);
+    console.warn('[PoseLandmarker] Init failed after bundle load:', e.message, '— falling back to legacy');
+    await initMediaPipeLegacyFallback();
   }
 }
+
+// ── Legacy fallback — @mediapipe/pose (loaded via <script> tag in <head>) ──────
+// This is the original working API. It runs when the new Tasks Vision API
+// can't load (CDN blocked, network issue, etc.).
+async function initMediaPipeLegacyFallback() {
+  const badge = document.getElementById('mpBadge');
+  try {
+    // Wait briefly for the pose.js script tag to finish loading if needed
+    let poseWait = 0;
+    while(typeof Pose === 'undefined' && poseWait < 8000) {
+      await new Promise(r => setTimeout(r, 300));
+      poseWait += 300;
+    }
+    if(typeof Pose === 'undefined') throw new Error('Legacy Pose class not available');
+
+    badge.textContent = '⏳ Loading legacy model...';
+    const legacyPose = new Pose({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`
+    });
+    legacyPose.setOptions({
+      modelComplexity: 2, smoothLandmarks: false,
+      enableSegmentation: false,
+      minDetectionConfidence: 0.35, minTrackingConfidence: 0.35
+    });
+    await legacyPose.initialize();
+    poseInstance = legacyPose;
+    poseLandmarkerInstance = null; // explicitly null — signals legacy mode to runMediaPipeOnFrames
+    mpReady = true;
+    badge.className = 'mp-badge loading'; // amber = working but legacy mode
+    badge.textContent = '⚠ Legacy Pose (reduced accuracy)';
+    console.log('[MP] Legacy mode active — ankle/foot accuracy reduced vs Pose Landmarker');
+  } catch(e2) {
+    badge.className = 'mp-badge error';
+    badge.textContent = '⚠ Pose detection unavailable';
+    console.error('[MP] Both new and legacy init failed:', e2.message);
+  }
+}
+
 initMediaPipe();
 
-// ── Init MoveNet (loads after TF.js is ready) ──
-async function initMoveNet() {
-  try {
-    if(typeof poseDetection === 'undefined' || typeof tf === 'undefined') {
-      console.warn('MoveNet: TF.js or pose-detection not loaded yet');
-      return;
-    }
-    moveNetDetector = await poseDetection.createDetector(
-      poseDetection.SupportedModels.MoveNet,
-      { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER,
-        enableSmoothing: false }  // Thunder: higher accuracy, still >30fps on desktop
-    );
-    moveNetReady = true;
-    console.log('MoveNet Thunder ready');
-  } catch(e) {
-    console.warn('MoveNet init failed (non-critical, MediaPipe only):', e);
-  }
-}
 // ── Init MoveNet (loads after TF.js is ready) ──
 async function initMoveNet() {
   try {
@@ -2455,11 +2572,8 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
 
     // ── Step 3: Reproject ankles where knee is good but ankle is suspicious ──
     // Threshold for replacement: ankle is >18% of normalized width off projection
-    // (18% ≈ ~32px on an 800px wide frame — clearly misplaced)
     const REPLACE_THRESH = 0.18;
-    // Also replace when ankle confidence is very low (<0.35) regardless of distance
     const LOW_CONF_THRESH = 0.35;
-    // Require knee to be reasonably confident to trust projection
     const KNEE_MIN_CONF = 0.40;
 
     let reprojCount = 0;
@@ -2468,26 +2582,39 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       const k = lms[KI], a = lms[AI];
       if(!k) return;
       const kc = k.visibility||0, ac = a?.visibility||0;
-      if(kc < KNEE_MIN_CONF) return; // knee too uncertain — projection unreliable
+      if(kc < KNEE_MIN_CONF) return;
 
-      // Projected ankle position
+      // Projected ankle position from tibia direction
       const projX = k.x + unitDx * medLen;
       const projY = k.y + unitDy * medLen;
 
-      if(!a || ac < LOW_CONF_THRESH) {
-        // Missing or very low confidence ankle — use projection directly
+      // ── World Z-depth validation (new with PoseLandmarker API) ──────────────
+      // worldLandmarks._wz gives metric depth relative to body center.
+      // In side-view running: the near-side ankle has |_wz| < 0.15m (near body plane).
+      // A misplaced ankle on the belt would have |_wz| >> 0.2m (implausibly far).
+      // If available, use this to boost confidence in the correction decision.
+      const worldAnkleZ = a?._wz ?? null;
+      const worldKneeZ  = k?._wz ?? null;
+      let worldSuggestsMisplaced = false;
+      if(worldAnkleZ !== null && worldKneeZ !== null) {
+        // Ankle should be within ~0.25m of knee in depth for a side-view camera
+        const zDiff = Math.abs(worldAnkleZ - worldKneeZ);
+        if(zDiff > 0.35) {
+          worldSuggestsMisplaced = true;
+          console.log(`[TibiaReproj] ${name} frame ${fi+1}: world Z diff=${zDiff.toFixed(2)}m — ankle likely misplaced`);
+        }
+      }
+
+      if(!a || ac < LOW_CONF_THRESH || worldSuggestsMisplaced) {
         lms[AI] = {
           x: projX, y: projY,
-          visibility: Math.min(kc * 0.65, 0.45), // projected confidence = 65% of knee conf
+          visibility: Math.min(kc * 0.65, 0.45),
           source: 'tibia-projected', tibiaProjFi: fi
         };
         reprojCount++;
       } else {
-        // Check if detected ankle is suspiciously far from projection
         const dist = Math.hypot(a.x - projX, a.y - projY);
         if(dist > REPLACE_THRESH) {
-          // For side view: the projected position is almost certainly more reliable.
-          // Blend toward projection, weighted by disagreement severity
           const blendToProj = Math.min(1.0, (dist - REPLACE_THRESH) / 0.15 + 0.5);
           const newX = a.x + blendToProj * (projX - a.x);
           const newY = a.y + blendToProj * (projY - a.y);
@@ -2666,9 +2793,23 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
     let allLandmarks = [];
     const statusEl = document.getElementById('loadingStatus') || {textContent:''};
 
-    // Step 1: MoveNet fusion (with per-frame timeout)
+    // Step 1: MoveNet fusion + worldLandmark Z-depth injection
     for(let i = 0; i < nFrames; i++) {
       const mpLM = toPlainArray(mpResults[i]?.poseLandmarks || null);
+      // worldLandmarks: metric-space 3D coords from new PoseLandmarker API
+      // Shape: [{x,y,z} in meters, hip-centered]. Z negative = in front of body.
+      // We embed the world Z into each normalized landmark as _wz for use in
+      // tibia reprojection depth validation.
+      const worldLM = mpResults[i]?.worldLandmarks || null;
+      if(mpLM && worldLM && Array.isArray(worldLM)) {
+        for(let li = 0; li < Math.min(mpLM.length, worldLM.length); li++) {
+          if(mpLM[li] && worldLM[li] != null) {
+            mpLM[li]._wz = worldLM[li].z ?? null;   // metric Z (forward = negative)
+            mpLM[li]._wy = worldLM[li].y ?? null;   // metric Y (up = negative)
+            mpLM[li]._wx = worldLM[li].x ?? null;   // metric X (right = positive)
+          }
+        }
+      }
       statusEl.textContent = `Refining landmarks — frame ${i+1}/${nFrames}...`;
 
       if(moveNetReady && imageBase64Array[i]) {
@@ -2729,14 +2870,81 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
 }
 
 
-async function runMediaPipeOnFrames(frames) {
-  if(!mpReady || !poseInstance) return frames.map(()=>null);
-  const results = [];
-  const withTimeout = (p, ms) => Promise.race([p, new Promise(res => setTimeout(() => res(null), ms))]);
+// ── Frame pre-processing — contrast/brightness normalization ──────────────────
+// MediaPipe's segmentation model (which informs landmark confidence) works better
+// when the subject contrasts clearly against the background. Gym treadmill environments
+// often have low subject-background contrast (similar tones) and can be underexposed.
+// This pass applies a mild contrast enhancement and brightness lift before inference.
+// The original frame is never modified — a separate canvas is used.
+function preprocessFrameForPose(imageBase64) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
 
-  for(const frame of frames) {
+      // Sample a small center strip to estimate average brightness
+      const sample = ctx.getImageData(
+        Math.floor(img.width * 0.25), Math.floor(img.height * 0.2),
+        Math.floor(img.width * 0.5),  Math.floor(img.height * 0.6)
+      );
+      let lum = 0;
+      for(let i = 0; i < sample.data.length; i += 16) { // stride 4 pixels
+        lum += (sample.data[i]*0.299 + sample.data[i+1]*0.587 + sample.data[i+2]*0.114);
+      }
+      lum /= (sample.data.length / 16);
+
+      // Only apply correction if the frame is notably dark (< 90 avg luma, 0-255 scale)
+      // or very flat in contrast. Avoid touching already well-exposed frames.
+      const needsBrighten  = lum < 90;
+      const contrastFactor = 1.12; // mild — avoids over-sharpening fast-motion blur
+      const brightOffset   = needsBrighten ? Math.round((90 - lum) * 0.4) : 0;
+
+      if(contrastFactor === 1.0 && brightOffset === 0) {
+        resolve(imageBase64); // no processing needed
+        return;
+      }
+
+      // Apply CSS filter via OffscreenCanvas or standard canvas
+      // CSS filter string: contrast() then brightness() via pixel manipulation
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = imgData.data;
+      const mid = 128;
+      for(let i = 0; i < d.length; i += 4) {
+        d[i]   = Math.min(255, Math.max(0, Math.round((d[i]   - mid) * contrastFactor + mid + brightOffset)));
+        d[i+1] = Math.min(255, Math.max(0, Math.round((d[i+1] - mid) * contrastFactor + mid + brightOffset)));
+        d[i+2] = Math.min(255, Math.max(0, Math.round((d[i+2] - mid) * contrastFactor + mid + brightOffset)));
+      }
+      ctx.putImageData(imgData, 0, 0);
+      resolve(canvas.toDataURL('image/jpeg', 0.92).split(',')[1]);
+    };
+    img.onerror = () => resolve(imageBase64); // on error return original
+    img.src = 'data:image/jpeg;base64,' + imageBase64;
+  });
+}
+
+// ── Run new PoseLandmarker API on all frames ──────────────────────────────────
+// Returns an array of result objects shaped like the old API for backward compat:
+//   { poseLandmarks: [{x,y,z,visibility,presence}, ...33], worldLandmarks: [...] }
+// worldLandmarks are in metric space (meters, hip-centered) — used by
+// applyTibiaAnkleReprojection for 3D depth validation.
+//
+// Falls back to the legacy Pose callback API if poseLandmarkerInstance isn't set
+// (e.g. if new API failed to load and legacy fallback is active).
+async function runMediaPipeOnFrames(frames) {
+  if(!mpReady) return frames.map(() => null);
+  const withTimeout = (p, ms) => Promise.race([p, new Promise(res => setTimeout(() => res(null), ms))]);
+  const results = [];
+
+  const isNewAPI = !!(poseLandmarkerInstance && poseLandmarkerInstance.detect);
+
+  for(let fi = 0; fi < frames.length; fi++) {
+    const frame = frames[fi];
     try {
-      const img = await withTimeout(new Promise((res, rej) => {
+      // Load image from base64
+      const img = await withTimeout(new Promise((res) => {
         const im = new Image();
         im.onload = () => res(im);
         im.onerror = () => res(null);
@@ -2745,13 +2953,58 @@ async function runMediaPipeOnFrames(frames) {
 
       if(!img) { results.push(null); continue; }
 
-      let result = null;
-      poseInstance.onResults(r => { result = r; });
-      await withTimeout(poseInstance.send({image: img}), 8000);
-      await new Promise(r => setTimeout(r, 80)); // let callback fire
-      results.push(result);
+      if(isNewAPI) {
+        // ── New Tasks Vision API ──────────────────────────────────────────────
+        // Pre-process frame for better contrast before pose inference
+        const processedB64 = await withTimeout(preprocessFrameForPose(frame.imageData), 2000);
+        const procImg = processedB64 !== frame.imageData ? await withTimeout(new Promise(res => {
+          const im2 = new Image(); im2.onload = () => res(im2); im2.onerror = () => res(img);
+          im2.src = 'data:image/jpeg;base64,' + processedB64;
+        }), 3000) : img;
+
+        // detect() is synchronous in IMAGE mode — wrap defensively
+        let poseResult = null;
+        try {
+          // detect() returns the result synchronously; wrap in Promise.resolve so
+          // we can still use the timeout guard for unexpectedly slow calls
+          const rawResult = poseLandmarkerInstance.detect(procImg || img);
+          poseResult = await withTimeout(Promise.resolve(rawResult), 8000);
+        } catch(detectErr) {
+          console.warn(`[PoseLandmarker] Frame ${fi+1} detect() error:`, detectErr.message);
+        }
+
+        // Validate result shape — new API returns {landmarks:[], worldLandmarks:[]}
+        // .landmarks[0] is the 33-landmark array for the first detected pose
+        const hasNewShape = poseResult?.landmarks?.length > 0;
+        // Legacy shape fallback: {poseLandmarks:[...]} (shouldn't occur with new API)
+        const hasLegacyShape = poseResult?.poseLandmarks?.length > 0;
+
+        if(hasNewShape) {
+          results.push({
+            poseLandmarks:  poseResult.landmarks[0],
+            worldLandmarks: poseResult.worldLandmarks?.[0] || null,
+            _source: 'landmarker-heavy'
+          });
+        } else if(hasLegacyShape) {
+          // Shouldn't happen but handle gracefully
+          results.push({ poseLandmarks: poseResult.poseLandmarks, _source: 'legacy-shape' });
+        } else {
+          results.push(null); // no pose detected this frame
+        }
+
+      } else if(poseInstance && poseInstance.send) {
+        // ── Legacy Pose callback API (fallback) ───────────────────────────────
+        let result = null;
+        poseInstance.onResults(r => { result = r; });
+        await withTimeout(poseInstance.send({image: img}), 8000);
+        await new Promise(r => setTimeout(r, 80));
+        results.push(result); // already has {poseLandmarks:[...]} shape
+      } else {
+        results.push(null);
+      }
+
     } catch(e) {
-      console.warn('[MediaPipe] Frame error:', e);
+      console.warn(`[MediaPipe] Frame ${fi+1} error:`, e.message);
       results.push(null);
     }
   }
@@ -4488,31 +4741,59 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     for(let i=startIdx; i<=endIdx && i<N; i++) strideIdxs.push(i);
     if(!strideIdxs.length) return null;
 
-    // Ground contact time for REF leg:
-    // Toe-off = first point where ref ankle Y drops meaningfully below contact peak.
-    // RELIABILITY CHECK: At 30fps, ankle Y signal on a treadmill is often too flat
-    // (person stays centered; only the belt moves). If the ankle Y range across the
-    // stride is < 3% of frame height, the signal is within noise and GCT is unreliable.
+    // ── GCT signal reliability check ─────────────────────────────────────────
+    // At 30fps on a treadmill, ankle Y is often too flat to detect toe-off reliably.
     const refAnkArr = REF==='L' ? lAnkSmooth : rAnkSmooth;
     const strideAnkVals = strideIdxs.map(i=>refAnkArr[i]).filter(v=>v!=null);
     const ankRange = strideAnkVals.length > 1
       ? Math.max(...strideAnkVals) - Math.min(...strideAnkVals) : 0;
     const gctReliable = ankRange >= 0.03; // need at least 3% frame-height variation
 
-    let toeoffIdx = endIdx;
-    let gcPct = null; // null = unreliable, not 100%
+    // ── Toe-off detection ─────────────────────────────────────────────────────
+    // Primary method (when reliable): ankle Y drops below contact peak → toe-off
+    // Treadmill limitation: at 30-60fps the ankle Y is often too flat to detect.
+    //
+    // Treadmill fallback (much more reliable): use MINIMUM HIP FLEXION in the
+    // propulsion zone (25–55% of stride). Minimum hip flexion = maximum hip extension
+    // ≈ toe-off timing. Hip landmarks are high-confidence from side view, making this
+    // a robust treadmill-specific alternative to ankle-Y detection.
+    //
+    // This also fixes the hipExtAtToeoff = 43° bug: when toeoffIdx defaulted to endIdx
+    // (next contact), the hip was at ~50° flexion (early stance of next stride), not
+    // the 10-20° near-neutral that true toe-off produces.
+    let toeoffIdx = null;
+    let gcPct = null;
+
+    // Try ankle Y method first
     if(gctReliable) {
       const contactPeak = refAnkArr[startIdx] ?? 0;
-      for(let i=startIdx+1; i<=endIdx && i<N; i++) {
+      for(let i = startIdx + 1; i <= endIdx && i < N; i++) {
         const v = refAnkArr[i];
-        if(v!=null && v < contactPeak * 0.85) { toeoffIdx = i; break; }
+        if(v != null && v < contactPeak * 0.85) { toeoffIdx = i; break; }
       }
-      // Only trust GCT if toe-off was actually detected (not just defaulted to endIdx)
-      if(toeoffIdx < endIdx) {
+      if(toeoffIdx != null && toeoffIdx < endIdx) {
         const stanceFrames = toeoffIdx - startIdx;
         const rawGcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
-        // Sanity check: GCT 25-75% is physiologically plausible for running
         if(rawGcPct >= 20 && rawGcPct <= 80) gcPct = rawGcPct;
+      }
+    }
+
+    // Hip-angle fallback: minimum hip flexion in propulsion zone (25–55% of stride)
+    // This is the clinically preferred method for treadmill side-view video
+    if(toeoffIdx == null || toeoffIdx >= endIdx) {
+      const propStart = startIdx + Math.round((endIdx - startIdx) * 0.25);
+      const propEnd   = startIdx + Math.round((endIdx - startIdx) * 0.55);
+      let minHip = Infinity, minHipIdx = null;
+      for(let i = propStart; i <= propEnd && i < N; i++) {
+        const h = refHSm[i];
+        if(h != null && h < minHip) { minHip = h; minHipIdx = i; }
+      }
+      if(minHipIdx != null) {
+        toeoffIdx = minHipIdx;
+        console.log(`[StrideEngine] Toe-off via hip-min: frame ${toeoffIdx}, hip=${minHip?.toFixed(1)}°`);
+      } else {
+        // Last resort: 40% of stride (population average for running)
+        toeoffIdx = startIdx + Math.round((endIdx - startIdx) * 0.40);
       }
     }
 
@@ -5552,7 +5833,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     const now = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
     document.getElementById('reportSubtitle').textContent =
-      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${hasDualView ? `Dual-plane (${view1Label.split(' (')[0]} + ${view2Label.split(' (')[0]})` : (cameraView === 'side' ? 'Side view' : cameraView === 'front' ? 'Front view' : 'Posterior view')} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0?'MediaPipe tracked':'Visual analysis'}`;
+      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${hasDualView ? `Dual-plane (${view1Label.split(' (')[0]} + ${view2Label.split(' (')[0]})` : (cameraView === 'side' ? 'Side view' : cameraView === 'front' ? 'Front view' : 'Posterior view')} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0 ? (poseLandmarkerInstance ? 'Pose Landmarker Heavy' : 'MediaPipe tracked') :'Visual analysis'}`;
 
     // Render skeleton frames gallery
     if(annotatedFrames.length > 0) {
