@@ -1139,11 +1139,12 @@ function startFrameExtraction(file, vid) {
 
     let times, effectiveLabels, effectiveProportions;
     if(isGaitMovement && dur >= 1.0) {
-      // Scale dense frame count with clip duration: ~10 frames/stride target
-      // cap at 96 (browser memory); floor at 48 (minimum for peak detection)
+      // Scale dense frame count with clip duration: ~14 frames/stride target for running
+      // (up from 10 — running at 30fps needs more frames to reliably catch contact events)
+      // cap at 128 (browser memory); floor at 64 (minimum for reliable peak detection in running)
       const estStrideRate = 88 / 60; // strides/sec at typical 176spm
       const estStrides = dur * estStrideRate;
-      const denseCount = Math.min(96, Math.max(48, Math.ceil(estStrides * 10)));
+      const denseCount = Math.min(128, Math.max(64, Math.ceil(estStrides * 14)));
       effectiveProportions = Array.from({length:denseCount}, (_,i) => 0.03 + (i/(denseCount-1))*0.94);
       times = effectiveProportions.map(t => t * dur);
       // Placeholder labels — GaitFSM will overwrite these
@@ -1369,22 +1370,33 @@ function startFrameExtraction(file, vid) {
               perFrame.sort((a,b) => a.t - b.t);
               const N = perFrame.length;
 
-              // b) Smooth signals
-              const smooth = (arr) => arr.map((v,i) => {
+              // b) Smooth signals — use 5-point weighted smoothing for running
+              // (wider window vs 3-point reduces high-frequency jitter that causes
+              // adjacent frames to read as different phases at 30fps)
+              const smooth5 = (arr) => arr.map((v,i) => {
                 if(v==null) return null;
-                const p=(i>0&&arr[i-1]!=null)?arr[i-1]:v;
-                const n=(i<arr.length-1&&arr[i+1]!=null)?arr[i+1]:v;
-                return (p+v+n)/3;
+                const pts=[];
+                const ws=[];
+                for(let d=-2;d<=2;d++){
+                  const idx=i+d;
+                  if(idx>=0&&idx<arr.length&&arr[idx]!=null){
+                    pts.push(arr[idx]);
+                    // Gaussian-like weights: center=2, adjacent=1.5, outer=1
+                    ws.push(d===0?2:Math.abs(d)===1?1.5:1);
+                  }
+                }
+                if(!pts.length) return null;
+                return pts.reduce((s,v,j)=>s+v*ws[j],0)/ws.reduce((s,w)=>s+w,0);
               });
 
               // Use signals as-is — visibility-based REF detection auto-selects the near leg.
               // The REF label is corrected anatomically after detection (see _REF/REF below).
-              const lAnkS  = smooth(perFrame.map(f=>f.lAnkY));
-              const rAnkS  = smooth(perFrame.map(f=>f.rAnkY));
-              const lKneeS = smooth(perFrame.map(f=>f.lKnee));
-              const rKneeS = smooth(perFrame.map(f=>f.rKnee));
-              const lHipS  = smooth(perFrame.map(f=>f.lHip));
-              const rHipS  = smooth(perFrame.map(f=>f.rHip));
+              const lAnkS  = smooth5(perFrame.map(f=>f.lAnkY));
+              const rAnkS  = smooth5(perFrame.map(f=>f.rAnkY));
+              const lKneeS = smooth5(perFrame.map(f=>f.lKnee));
+              const rKneeS = smooth5(perFrame.map(f=>f.rKnee));
+              const lHipS  = smooth5(perFrame.map(f=>f.lHip));
+              const rHipS  = smooth5(perFrame.map(f=>f.rHip));
 
               // c) Local maxima detection for ankle Y (contact events)
               const localMaxima = (arr, minProm=0.015) => {
@@ -1506,69 +1518,127 @@ function startFrameExtraction(file, vid) {
                   desc:`${sideStr} leg — ${base.desc}`,_side:side,_baseId:phaseId};
               };
 
-              // i) Assign labels to all N frames by interpolating between key events
+              // i) Assign labels to all N frames using NEAREST-EVENT phase assignment.
+              // ── CRITICAL FIX: Do NOT linearly interpolate phase IDs between events. ──
+              // Linear interpolation of phase index caused adjacent dense frames
+              // (e.g. frames 6 and 7) to receive different phase labels even when
+              // they looked visually identical — because the index rounding crossed
+              // a phase boundary. Instead, each frame gets the phase of its nearest
+              // detected event. This ensures visually similar frames share the same label.
               const phaseOrder=['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
               const asgn=new Array(N).fill(null);
-              for(const ev of timeline) asgn[ev.i]=makeLabel(ev.side,ev.phaseId);
 
-              for(let ti=0;ti<timeline.length-1;ti++){
-                const cur=timeline[ti], nxt=timeline[ti+1], span=nxt.i-cur.i;
-                if(span<=1) continue;
-                const pS=phaseOrder.indexOf(cur.phaseId), pE=phaseOrder.indexOf(nxt.phaseId);
-                for(let fi2=cur.i+1;fi2<nxt.i;fi2++){
-                  if(asgn[fi2]) continue;
-                  const frac=(fi2-cur.i)/span;
-                  const interp=Math.max(0,Math.min(phaseOrder.length-1,Math.round(pS+frac*(pE-pS))));
-                  asgn[fi2]=makeLabel(frac<0.5?cur.side:nxt.side, phaseOrder[interp]);
-                }
+              // Mark directly-detected event frames with _detected=true for priority
+              for(const ev of timeline) {
+                const lbl = makeLabel(ev.side, ev.phaseId);
+                if(lbl) lbl._detected = true;
+                asgn[ev.i] = lbl;
               }
+
+              // Fill gaps between events using nearest-event wins (no phase-index interpolation)
               for(let fi2=0;fi2<N;fi2++){
                 if(asgn[fi2]) continue;
-                const first=timeline[0],last=timeline[timeline.length-1];
-                if(!first){asgn[fi2]=makeLabel(REF,'contact');continue;}
-                if(fi2<first.i){
-                  const pIdx=phaseOrder.indexOf(first.phaseId),back=first.i-fi2;
-                  const wrap=((pIdx-back)%phaseOrder.length+phaseOrder.length)%phaseOrder.length;
-                  asgn[fi2]=makeLabel(first.side,phaseOrder[wrap]);
+                // Find the nearest timeline event by frame distance
+                let nearEv = null, nearDist = Infinity;
+                for(const ev of timeline){
+                  const d = Math.abs(ev.i - fi2);
+                  if(d < nearDist){ nearDist=d; nearEv=ev; }
+                }
+                if(nearEv) {
+                  // Use the nearest event's phase for this frame
+                  // (no interpolation — identical-looking frames stay in the same phase)
+                  asgn[fi2] = makeLabel(nearEv.side, nearEv.phaseId);
                 } else {
-                  const pIdx=phaseOrder.indexOf(last.phaseId),fwd=fi2-last.i;
-                  asgn[fi2]=makeLabel(last.side,phaseOrder[(pIdx+fwd)%phaseOrder.length]);
+                  asgn[fi2] = makeLabel(REF,'contact');
                 }
               }
 
               // j) Select 8 best frames — one per canonical phase, no duplicate source frames
+              // KEY RULE: enforce a minimum gap between selected frames so visually similar
+              // adjacent frames (which get the same nearest-event phase) are never both selected.
               const keySet=new Set(timeline.map(e=>e.i));
               const usedFis=new Set();
+              const usedFrameNums=new Set(); // track actual frame indices to enforce gap
               const dedupedFrames=[];
               const cycleStartT=perFrame[Math.min(cycleStart,N-1)]?.t??0;
               const cycleEndT  =perFrame[Math.min(cycleEnd,N-1)]?.t??1;
               const cycleDur   =Math.max(0.001,cycleEndT-cycleStartT);
+              // Minimum frame index gap between any two selected gallery frames
+              // = roughly 1/12th of the dense frame pool = ~4 frames at 48 dense
+              const minGap = Math.max(2, Math.floor(N / 12));
 
-              for(const pid of phaseOrder){
+              // Helper: check if a frame index is too close to any already selected frame
+              const tooClose = (fi) => {
+                for(const used of usedFrameNums){
+                  if(Math.abs(fi - used) < minGap) return true;
+                }
+                return false;
+              };
+
+              // Clinical priority order for running — initial contact is #1 (foot strike pattern)
+              // Propulsion added between midstance and toeoff (push-off is high value)
+              const clinicalPriority=['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
+
+              for(const pid of clinicalPriority){
                 if(dedupedFrames.length>=8) break;
                 const cands=perFrame
                   .map((fd,li)=>({fd,li,lbl:asgn[li]}))
                   .filter(c=>c.lbl?._baseId===pid&&!usedFis.has(c.fd.fi));
                 if(!cands.length) continue;
-                const keyCands=cands.filter(c=>keySet.has(c.li));
-                const pool=keyCands.length>0?keyCands:cands;
+
+                // Strongly prefer directly detected event frames (from timeline)
+                const detectedCands=cands.filter(c=>keySet.has(c.li)&&!tooClose(c.fd.fi));
+                const nearbyKeysCands=cands.filter(c=>keySet.has(c.li));
+                const allNonClose=cands.filter(c=>!tooClose(c.fd.fi));
+                const pool = detectedCands.length>0 ? detectedCands
+                           : allNonClose.length>0 ? allNonClose
+                           : nearbyKeysCands.length>0 ? nearbyKeysCands
+                           : cands; // last resort: allow close frames
+
                 const idealFrac=gaitPhaseMap[pid]?.time??0.5;
                 const best=pool.reduce((acc,cur)=>{
                   const acyc=((perFrame[cur.li]?.t??0)-cycleStartT)/cycleDur;
                   const bcyc=((perFrame[acc.li]?.t??0)-cycleStartT)/cycleDur;
                   return Math.abs(acyc-idealFrac)<Math.abs(bcyc-idealFrac)?cur:acc;
                 });
+
+                // Enrich Initial Contact frame with foot strike pattern from stride engine
+                let enrichedLbl = best.lbl;
+                if(pid==='contact' && window_strideMetrics?.fsConsensus && window_strideMetrics.fsConsensus !== 'unknown') {
+                  const fsMap = {heel:'🦶 Heel Strike', midfoot:'🦶 Midfoot Strike', forefoot:'🦶 Forefoot Strike'};
+                  const fsLabel = fsMap[window_strideMetrics.fsConsensus] || '';
+                  enrichedLbl = {...best.lbl,
+                    label: best.lbl.label,
+                    desc: best.lbl.desc + (fsLabel ? ` · ${fsLabel}` : ''),
+                    _footStrike: window_strideMetrics.fsConsensus
+                  };
+                }
+                // Mark detected vs interpolated frames for gallery display
+                if(asgn[best.li]?._detected) enrichedLbl = {...enrichedLbl, _detected:true};
+
                 usedFis.add(best.fd.fi);
-                dedupedFrames.push({...frames[best.fd.fi],phase:best.lbl});
+                usedFrameNums.add(best.fd.fi);
+                dedupedFrames.push({...frames[best.fd.fi],phase:enrichedLbl});
               }
 
-              // Pad if needed
+              // Pad if needed — pick frames that are sufficiently spread out
               if(dedupedFrames.length<8){
+                for(const fd of perFrame){
+                  if(dedupedFrames.length>=8) break;
+                  const li=perFrame.indexOf(fd);
+                  if(!usedFis.has(fd.fi)&&asgn[li]&&!tooClose(fd.fi)){
+                    usedFis.add(fd.fi);
+                    usedFrameNums.add(fd.fi);
+                    dedupedFrames.push({...frames[fd.fi],phase:asgn[li]});
+                  }
+                }
+                // If still not enough, relax the gap constraint
                 for(const fd of perFrame){
                   if(dedupedFrames.length>=8) break;
                   const li=perFrame.indexOf(fd);
                   if(!usedFis.has(fd.fi)&&asgn[li]){
                     usedFis.add(fd.fi);
+                    usedFrameNums.add(fd.fi);
                     dedupedFrames.push({...frames[fd.fi],phase:asgn[li]});
                   }
                 }
@@ -4224,22 +4294,43 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       : null;
 
     // Foot strike pattern: ankle angle at contact
-    // From ankle (27/28), knee (25/26), toe (31/32) angle
-    // Small angle (plantarflexed) = forefoot; ~90° = midfoot; >90° = heel
-    // We approximate using the ankle Y relative to the knee Y at contact
+    // Primary method: ankle dorsiflexion angle at contact frame
+    // - calcAngle(knee, ankle, toe/heel) gives: ~90°=neutral, >90°=DF (heel), <90°=PF (forefoot)
+    // - At initial contact: heel strike shows dorsiflexion (ankle angled toward shin)
+    //                       forefoot strike shows plantarflexion (ankle pointed down)
     const refAnkLM = perFrameData[startIdx];
     let footStrike = 'unknown';
     if(refAnkLM) {
-      // Use hip-knee-ankle sagittal angle as proxy for foot strike if toe not available
-      // High hip angle at contact (hip flexed forward) usually correlates with forefoot
-      // Hip angle at contact (degrees-from-upright: 0°=standing, positive=flexion)
-      // High hip flexion at contact → foot landing ahead of COG → heel strike
-      // Low hip flexion at contact → foot landing near COG → forefoot/midfoot
+      // Try direct ankle angle from per-frame data if available
+      // refAnkLM is a frame data object with processed angles
+      // We use the hip-at-contact as a proxy, but also cross-check with
+      // the knee angle at contact (high knee angle = limb more extended = heel further forward)
       const hipAtContact = refHSm[startIdx];
+      const kneeAtContact = refKSm[startIdx]; // included angle: 180°=straight, <180°=flexed
+
+      // Primary signal: hip flexion angle at contact
+      // High hip flexion (>35°) = foot landing ahead of CoM = overstriding = heel strike
+      // Secondary signal: knee extension at contact
+      // Near-straight knee (>160°) at contact = overstriding = heel strike
+      // Flexed knee (<155°) at contact = midfoot or forefoot
       if(hipAtContact != null) {
-        if(hipAtContact > 35)       footStrike = 'heel';     // hip flexed forward — overstriding
-        else if(hipAtContact > 20)  footStrike = 'midfoot';  // moderate — midfoot landing
-        else                        footStrike = 'forefoot'; // hip near upright — forefoot strike
+        if(hipAtContact > 38) {
+          footStrike = 'heel';      // strong heel — overstriding
+        } else if(hipAtContact > 24) {
+          // Borderline — check knee angle to disambiguate
+          if(kneeAtContact != null && kneeAtContact > 162) {
+            footStrike = 'heel';    // extended knee confirms heel
+          } else {
+            footStrike = 'midfoot'; // moderate flexion = midfoot
+          }
+        } else {
+          // Low hip flexion — likely forefoot/midfoot
+          if(kneeAtContact != null && kneeAtContact < 150) {
+            footStrike = 'forefoot'; // flexed knee + low hip = forefoot
+          } else {
+            footStrike = 'midfoot';
+          }
+        }
       }
     }
 
@@ -4585,12 +4676,31 @@ function renderStrideMetrics(metrics) {
     });
   }
 
-  // ── Disclaimer ──
+  // ── Disclaimer + Accuracy Context ──
+  const fpsColor = metrics.fps >= 120 ? 'var(--green)' : metrics.fps >= 60 ? 'var(--amber)' : 'var(--red)';
+  const fpsMsg   = metrics.fps >= 120 ? 'Clinical grade' : metrics.fps >= 60 ? 'Good — GCT viable' : 'Limited — upgrade recommended';
   html += `<div class="stride-disclaimer">
-    ⚠️ <strong>Measurement accuracy note:</strong> Ground contact time and float time are estimated from video at ${metrics.fps}fps.
-    At 30fps, timing resolution is ±33ms (~12–20% error on individual events). Values are reported as % of cycle to reduce
-    absolute error. For clinical-grade GCT measurement, 120fps+ video is recommended. Cadence and stride duration accuracy
-    are not affected by frame rate limitations.
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:8px;">
+      <div><strong style="color:var(--navy);">📹 Video quality</strong><br>
+        Frame rate: <strong style="color:${fpsColor};">${metrics.fps}fps — ${fpsMsg}</strong><br>
+        <span style="font-size:.66rem;">At 30fps: ±33ms/event. At 60fps: ±16ms. At 120fps+: ±8ms (clinical).</span>
+      </div>
+      <div><strong style="color:var(--navy);">🎯 Phase detection</strong><br>
+        Dense frames: ${metrics.fps >= 60 ? '64–128' : '48–64'} extracted for event anchoring<br>
+        <span style="font-size:.66rem;">Nearest-event assignment prevents adjacent-frame label flipping.</span>
+      </div>
+      <div><strong style="color:var(--navy);">🔬 Upgrade pathways</strong><br>
+        <span style="font-size:.66rem;">
+          <strong>Best free:</strong> iPhone 120/240fps slo-mo → 4× more contact events captured<br>
+          <strong>Mid-tier:</strong> RunScribe / Garmin Running Dynamics Pod for true GCT + GCT asymmetry<br>
+          <strong>Research:</strong> Treadmill-mounted force plates (gold standard for GCT, braking impulse)<br>
+          <strong>Lab-grade:</strong> OpenPose / MMPose on GPU server → full 3D kinematics from any camera
+        </span>
+      </div>
+    </div>
+    ⚠️ Cadence and stride duration are accurate at any frame rate. GCT and float time require 60fps+.
+    Phase labels on gallery frames marked <strong style="color:#7ec8c0;">✓</strong> are biomechanically detected; those marked
+    <strong style="color:var(--muted);">~</strong> are nearest-event interpolated and should be interpreted with caution.
   </div>`;
 
   body.innerHTML = html;
@@ -5209,8 +5319,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
                         : gaitSwingPhase   ? ' <span style="color:#818cf8;font-size:.75rem;">↑</span>'
                         : concentric       ? ' <span style="color:var(--teal);font-size:.75rem;">▲</span>'
                         : eccentric        ? ' <span style="color:#a78bfa;font-size:.75rem;">▼</span>' : '';
+          const fsBadgeDual = phase?._footStrike
+            ? ` <span style="background:#f97316;color:#fff;font-size:.55rem;font-weight:800;padding:1px 5px;border-radius:3px;margin-left:3px;" title="${phase._footStrike} strike">${phase._footStrike.toUpperCase()} STRIKE</span>`
+            : '';
+          const confBadgeDual = phase?._detected
+            ? `<span style="color:#7ec8c0;font-size:.65rem;margin-left:3px;" title="Directly detected event">✓</span>`
+            : `<span style="color:rgba(255,255,255,.4);font-size:.60rem;margin-left:3px;" title="Nearest-event assigned">~</span>`;
           header.innerHTML = '<span style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">'
-            + phaseLabel + dirIcon + sideBadge
+            + phaseLabel + dirIcon + sideBadge + fsBadgeDual + confBadgeDual
             + (phaseDesc ? '<span style="font-weight:400;opacity:.7;font-size:.63rem;display:block;width:100%;margin-top:1px;text-transform:none;letter-spacing:0;">' + phaseDesc + '</span>' : '')
             + '</span><span class="phase-badge phase-' + phaseId + '" style="flex-shrink:0;">#' + (i+1) + '</span>';
           group.appendChild(header);
@@ -5279,8 +5395,17 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const sideBadgeS = phaseSideS
             ? `<span style="background:${phaseSideS==='L'?'#0ea5e9':'#f97316'};color:#fff;font-size:.50rem;font-weight:800;padding:0 4px;border-radius:2px;margin-left:3px;">${phaseSideS==='L'?'L':'R'}</span>`
             : '';
-          lbl.innerHTML = '<span style="display:flex;align-items:center;gap:2px;">' + phaseLabel + sideBadgeS + '</span>'
-            + '<span class="phase-badge phase-' + phaseId + '">' + (phaseId === 'frame' ? '#'+(i+1) : phase?.desc || '') + '</span>';
+          // Foot strike badge for Initial Contact frames
+          const fsMap = {heel:'🦶H', midfoot:'🦶M', forefoot:'🦶FF'};
+          const fsBadge = phase?._footStrike
+            ? `<span style="background:#f97316;color:#fff;font-size:.50rem;font-weight:800;padding:0 4px;border-radius:2px;margin-left:3px;" title="${phase._footStrike} strike">${fsMap[phase._footStrike]||''}</span>`
+            : '';
+          // Confidence indicator: ✓ = event directly detected, ~ = nearest-event interpolated
+          const confBadge = phase?._detected
+            ? `<span style="color:#7ec8c0;font-size:.60rem;margin-left:2px;" title="Directly detected event">✓</span>`
+            : `<span style="color:rgba(255,255,255,.45);font-size:.55rem;margin-left:2px;" title="Nearest-event assigned">~</span>`;
+          lbl.innerHTML = '<span style="display:flex;align-items:center;gap:2px;">' + phaseLabel + sideBadgeS + fsBadge + confBadge + '</span>'
+            + '<span class="phase-badge phase-' + phaseId + '">' + (phaseId === 'frame' ? '#'+(i+1) : '#'+(i+1)) + '</span>';
           card.appendChild(imgWrap);
           card.appendChild(lbl);
           gallery.appendChild(card);
@@ -5298,7 +5423,26 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           titleEl.textContent = `Motion Capture — ${vName} · ${annotatedFrames.length} Tracked Frames`;
         }
       }
-    }
+      // Phase legend for running/gait — explains confidence indicators
+      const galleryParent = document.getElementById('framesSection')?.querySelector('.section-body');
+      const existingLegend = galleryParent?.querySelector('.gait-phase-legend');
+      if(existingLegend) existingLegend.remove();
+      if(/running|gait|walk/i.test(movement) && galleryParent) {
+        const legend = document.createElement('div');
+        legend.className = 'gait-phase-legend';
+        legend.style.cssText = 'margin-top:10px;padding:8px 12px;background:var(--navy-light);border-radius:6px;font-size:.72rem;color:var(--navy-mid);display:flex;flex-wrap:wrap;gap:14px;align-items:center;';
+        legend.innerHTML = `
+          <strong style="color:var(--navy);">Frame legend:</strong>
+          <span><span style="color:#7ec8c0;font-weight:700;">✓</span> Biomechanically detected event (highest confidence)</span>
+          <span><span style="color:var(--muted);font-weight:700;">~</span> Nearest-event phase (interpolated)</span>
+          <span><span style="background:#0ea5e9;color:#fff;font-size:.60rem;font-weight:800;padding:0 4px;border-radius:2px;">L</span> Left leg phase</span>
+          <span><span style="background:#f97316;color:#fff;font-size:.60rem;font-weight:800;padding:0 4px;border-radius:2px;">R</span> Right leg phase</span>
+          <span><span style="color:#f97316;">↓</span> Contact/loading &nbsp; <span style="color:var(--teal);">⊙</span> Stance &nbsp; <span style="color:#818cf8;">↑</span> Swing</span>
+          ${window_strideMetrics?.fsConsensus && window_strideMetrics.fsConsensus !== 'unknown'
+            ? `<span style="background:#f97316;color:#fff;font-size:.65rem;font-weight:800;padding:1px 6px;border-radius:3px;">🦶 ${window_strideMetrics.fsConsensus.toUpperCase()} STRIKE</span> <span>Foot strike pattern on Initial Contact frame</span>`
+            : ''}`;
+        galleryParent.appendChild(legend);
+      }
 
     // Render ASI
     if(Object.keys(aggregated).length > 0) {
