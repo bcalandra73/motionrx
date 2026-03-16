@@ -798,10 +798,21 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="report-header-right">
         <button class="btn-outline" onclick="resetAll()">+ New Assessment</button>
         <button class="add-proms-btn" id="addPromsBtn" onclick="showAddPromsModal()" style="display:none;">📋 Add PROMs</button>
+        <button class="btn-outline" id="saveSessionBtn" onclick="saveSessionForComparison()" style="display:none;" title="Save this report to compare with a future session">💾 Save Session</button>
+        <button class="btn-outline" id="compareSessionBtn" onclick="showComparisonPanel()" style="display:none;" title="Compare with a previously saved session">📊 Compare</button>
         <button class="btn-solid" onclick="exportPDF()">⬇ Download PDF Report</button>
       </div>
     </div>
     <div class="score-strip" id="scoreStrip"></div>
+
+    <!-- Session Comparison Panel -->
+    <div id="comparisonPanel" style="display:none;margin-bottom:16px;background:var(--navy-light);border:1px solid var(--border);border-radius:10px;padding:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="font-size:.85rem;font-weight:700;color:var(--navy);letter-spacing:.04em;text-transform:uppercase;">📊 Session Comparison</h3>
+        <button onclick="document.getElementById('comparisonPanel').style.display='none'" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1rem;">✕</button>
+      </div>
+      <div id="comparisonBody"></div>
+    </div>
 
     <!-- Asymmetry Index -->
     <div class="report-section full" id="asiSection" style="margin-bottom:16px;display:none;">
@@ -3194,7 +3205,83 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
           ctx.stroke();
         });
 
-        // Confidence legend (small, bottom-left)
+        // ── Feature 1: Vertical centreline (front/posterior view) ────────────────
+        // Draws a dashed vertical reference line from pelvis midpoint to ground.
+        // Clinically marks: crossover gait, lateral trunk sway, arm crossover.
+        // Feature 4: Crossover gait flag — annotates if foot lands inside centreline.
+        if(isFrontalView) {
+          const lHip = lm[23], rHip = lm[24];
+          const lAnkle = lm[27], rAnkle = lm[28];
+          const lHeel = lm[29], rHeel = lm[30];
+
+          if(lHip && rHip && (lHip.visibility||0) > 0.3 && (rHip.visibility||0) > 0.3) {
+            const pelvisMidX = ((lHip.x + rHip.x) / 2) * W;
+            const pelvisMidY = ((lHip.y + rHip.y) / 2) * H;
+
+            // Dashed vertical centreline from top of frame to bottom
+            ctx.save();
+            ctx.setLineDash([8, 6]);
+            ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(pelvisMidX, 0);
+            ctx.lineTo(pelvisMidX, H);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Solid highlight at pelvis level — shows where midline is anchored
+            ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(pelvisMidX, pelvisMidY - 12);
+            ctx.lineTo(pelvisMidX, pelvisMidY + 12);
+            ctx.stroke();
+
+            // Small label
+            const fs = Math.max(9, W/80);
+            ctx.font = `${fs}px sans-serif`;
+            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            ctx.fillText('⊕', pelvisMidX - fs*0.4, pelvisMidY + fs*0.4);
+
+            // ── Feature 4: Crossover gait detection ─────────────────────────────
+            // Check if either foot (ankle or heel) lands MEDIAL to the centreline.
+            // Normal: both feet land at or outside the pelvis midpoint.
+            // Crossover: foot lands inside (medial to) centreline — IT band / knee risk.
+            const footLMs = [
+              {lm: lAnkle,  side:'L', label:'LA'},
+              {lm: rAnkle,  side:'R', label:'RA'},
+              {lm: lHeel,   side:'L', label:'LH'},
+              {lm: rHeel,   side:'R', label:'RH'},
+            ].filter(f => f.lm && (f.lm.visibility||0) > 0.3);
+
+            let crossoverDetected = false;
+            footLMs.forEach(({lm: foot, side, label}) => {
+              const footX = foot.x * W;
+              // Left foot crosses over if it lands RIGHT of centreline (>centreline X)
+              // Right foot crosses over if it lands LEFT of centreline (<centreline X)
+              const isCrossover = (side === 'L' && footX > pelvisMidX + W*0.02)
+                                || (side === 'R' && footX < pelvisMidX - W*0.02);
+              if(isCrossover) {
+                crossoverDetected = true;
+                // Red ring around the crossed-over foot
+                const r = Math.max(10, W/55);
+                ctx.beginPath();
+                ctx.arc(footX, foot.y*H, r, 0, 2*Math.PI);
+                ctx.strokeStyle = 'rgba(239,68,68,0.85)';
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+                // Arrow pointing to violation
+                ctx.font = `bold ${Math.max(10, W/65)}px sans-serif`;
+                ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth = 2.5;
+                ctx.strokeText('⚠ CROSSOVER', footX + r + 4, foot.y*H + 4);
+                ctx.fillStyle = '#ef4444';
+                ctx.fillText('⚠ CROSSOVER', footX + r + 4, foot.y*H + 4);
+              }
+            });
+
+            ctx.restore();
+          }
+        }
         ctx.font = `${Math.max(10, W/70)}px sans-serif`;
         const legendItems = [
           {color:'#00e5cc',              label:'High confidence'},
@@ -4000,7 +4087,7 @@ function calcAngle(a, b, c) {
   return Math.round(Math.acos(cosA) * 180/Math.PI);
 }
 
-function extractAngles(lm) {
+function extractAngles(lm, view='side') {
   if(!lm) return {};
   // 0.30 threshold (down from 0.40) — fast-moving distal landmarks (ankles, toes) in
   // running often land between 0.30–0.40 confidence; too-strict threshold drops them all.
@@ -4086,14 +4173,16 @@ function extractAngles(lm) {
   const rDistalPick = rAnkleP ? pickDistal(rAnkleP, rHeelLM, rToeLM) : null;
 
   // worldLandmarks Z-depth cross-check (Pose Landmarker API only)
-  // _wz = metric depth in metres relative to pelvis; _wy = metric height.
-  // In a side-view treadmill shot, the ipsilateral ankle should be close in Z
-  // to its own knee (both are on the near side of the body).
-  // If the ankle-knee Z diff exceeds 0.30m the ankle is on the far side or on
-  // the belt — this reading will produce a spurious angle, so we discard it.
+  // _wz = metric depth in metres relative to pelvis (hip-centred world coords).
+  // Calibration rationale: the tibia is NOT vertical during running — it's typically
+  // angled 15-30° forward at contact and up to 45° backward at toe-off. At 30° tilt,
+  // a 0.45m tibia produces a Z-offset of ~0.22m between knee and ankle even on the
+  // NEAR side. The old 0.30m threshold rejected valid near-side readings.
+  // New threshold 0.48m: rejects far-side ankles (Z-diff typically 0.5-0.8m across
+  // the body) while keeping near-side ankles at any physiological tibia angle.
   const worldZReject = (ankleLM, kneeLM) => {
     if(!ankleLM?._wz || !kneeLM?._wz) return false; // no 3D data — can't reject
-    return Math.abs(ankleLM._wz - kneeLM._wz) > 0.30;
+    return Math.abs(ankleLM._wz - kneeLM._wz) > 0.48;
   };
 
   if(lKneeP && lAnkleP && lDistalPick && !worldZReject(lAnkleP, lKneeP)) {
@@ -4119,6 +4208,129 @@ function extractAngles(lm) {
     }
   }
 
+  // ── Frontal-plane metrics (front/posterior view only) ─────────────────────
+  // These are physically invalid from a side view — only compute when frontal.
+  const isFrontalView = (view === 'front' || view === 'posterior');
+  if(isFrontalView) {
+    const lHipF=v(23), rHipF=v(24);
+    const lKneeF=v(25), rKneeF=v(26);
+    const lAnkF=v(27), rAnkF=v(28);
+
+    // ── Pelvic drop (Trendelenburg) ─────────────────────────────────────────
+    // Measured as the angle of the pelvis from horizontal during single-leg stance.
+    // In frontal view both hips are visible. The hip that drops lower on the
+    // CONTRALATERAL side during stance = classic Trendelenburg sign.
+    // We report the MAGNITUDE of pelvic tilt as a bilateral value.
+    // Normal: < 5°  |  Mild: 5–10°  |  Significant: > 10°
+    if(lHipF && rHipF) {
+      const hipDx = rHipF.x - lHipF.x;
+      const hipDy = rHipF.y - lHipF.y; // positive = right hip lower in image
+      const pelvicTiltDeg = Math.round(Math.abs(Math.atan2(Math.abs(hipDy), Math.abs(hipDx)) * 180 / Math.PI));
+      // Only report if hips are a reasonable distance apart (avoids degenerate frames)
+      const hipDist = Math.hypot(hipDx, hipDy);
+      if(hipDist > 0.05) { // hips must be >5% of frame width apart
+        angles['Pelvic Drop'] = pelvicTiltDeg;
+        // Also store which side drops for clinical context
+        angles['_pelvicDropSide'] = hipDy > 0.01 ? 'right' : hipDy < -0.01 ? 'left' : 'neutral';
+      }
+    }
+
+    // ── Dynamic knee valgus ──────────────────────────────────────────────────
+    // Measured as the deviation of the knee from the hip-ankle line in frontal plane.
+    // Positive = knee medial to hip-ankle line (valgus = "knees in")
+    // Negative = knee lateral (varus = "knees out")
+    // Clinical threshold: > 5° valgus during running is flagged.
+    //
+    // Method: project the knee onto the hip→ankle vector, measure perpendicular offset.
+    // We report as an angle approximation using atan2 of the offset.
+    const computeKneeValgus = (hip, knee, ankle) => {
+      if(!hip || !knee || !ankle) return null;
+      // Vector from hip to ankle (the "ideal" leg axis)
+      const axDx = ankle.x - hip.x, axDy = ankle.y - hip.y;
+      const axLen = Math.hypot(axDx, axDy);
+      if(axLen < 0.05) return null; // degenerate
+      // Project knee onto hip→ankle axis
+      const t = ((knee.x - hip.x) * axDx + (knee.y - hip.y) * axDy) / (axLen * axLen);
+      // Perpendicular offset of knee from the axis
+      const perpX = (knee.x - hip.x) - t * axDx;
+      const perpY = (knee.y - hip.y) - t * axDy;
+      const perpDist = Math.hypot(perpX, perpY);
+      if(perpDist < 0.005) return 0; // within noise — essentially straight
+      // Angle approximation: atan(perpendicular offset / projected leg length)
+      const projLen = t * axLen;
+      if(projLen < 0.02) return null; // knee too close to hip
+      const valgusDeg = Math.round(Math.atan2(perpDist, projLen) * 180 / Math.PI);
+      // Sign: in frontal view, valgus = knee moved medially
+      // Left leg: knee moves RIGHT (positive x) = valgus; Right leg: knee moves LEFT = valgus
+      // For left leg: medial direction is positive x (toward center)
+      // For right leg: medial direction is negative x (toward center)
+      return valgusDeg; // magnitude only — reported separately per side
+    };
+
+    const lValgus = computeKneeValgus(lHipF, lKneeF, lAnkF);
+    const rValgus = computeKneeValgus(rHipF, rKneeF, rAnkF);
+    if(lValgus != null) angles['Left Knee Valgus']  = lValgus;
+    if(rValgus != null) angles['Right Knee Valgus'] = rValgus;
+
+    // ── Pronation estimation (posterior view only) ───────────────────────────
+    // From a posterior camera, pronation is visible as the calcaneal (heel) eversion
+    // angle relative to the Achilles tendon / lower leg axis.
+    // Method: angle between (ankle → heel) vector and (knee → ankle) vector.
+    //   Neutral: heel in line with lower leg (~0-4° eversion)
+    //   Mild pronation: 5-10° eversion
+    //   Significant pronation: >10° eversion
+    // Only valid from posterior view where both heel and ankle face the camera.
+    const isPosterior = (view === 'posterior');
+    if(isPosterior) {
+      const computePronation = (kneeLM, ankleLM, heelLM) => {
+        if(!kneeLM || !ankleLM || !heelLM) return null;
+        // Vector: lower leg axis (knee → ankle)
+        const legDx = ankleLM.x - kneeLM.x;
+        const legDy = ankleLM.y - kneeLM.y;
+        const legLen = Math.hypot(legDx, legDy);
+        if(legLen < 0.03) return null;
+        // Vector: heel offset from ankle (ankle → heel)
+        const heelDx = heelLM.x - ankleLM.x;
+        const heelDy = heelLM.y - ankleLM.y;
+        const heelLen = Math.hypot(heelDx, heelDy);
+        if(heelLen < 0.01) return null;
+        // Cross product sign gives eversion direction; magnitude gives angle
+        const cross = (legDx / legLen) * (heelDy / heelLen) - (legDy / legLen) * (heelDx / heelLen);
+        const dot   = (legDx / legLen) * (heelDx / heelLen) + (legDy / legLen) * (heelDy / heelLen);
+        const angleDeg = Math.round(Math.atan2(Math.abs(cross), dot) * 180 / Math.PI);
+        // cross > 0 in image coords (y↓) typically means eversion (medial heel tilt = pronation)
+        // Store sign for side-specific clinical interpretation
+        return { deg: angleDeg, everted: cross > 0 };
+      };
+
+      const lKneePost = v(25), lAnkPost = v(27), lHeelPost = vHigh(29);
+      const rKneePost = v(26), rAnkPost = v(28), rHeelPost = vHigh(30);
+
+      const lPron = computePronation(lKneePost, lAnkPost, lHeelPost);
+      const rPron = computePronation(rKneePost, rAnkPost, rHeelPost);
+
+      // Only report if heel confidence is adequate (posterior heel is usually visible)
+      if(lPron != null && lHeelPost && (lHeelPost.visibility||0) > 0.40) {
+        angles['Left Pronation']  = lPron.deg;
+        angles['_lPronEverted']   = lPron.everted;
+      }
+      if(rPron != null && rHeelPost && (rHeelPost.visibility||0) > 0.40) {
+        angles['Right Pronation'] = rPron.deg;
+        angles['_rPronEverted']   = rPron.everted;
+      }
+    }
+    // More accurate from frontal than sagittal. Trunk lateral deviation angle.
+    if(lShoulder && rShoulder && lHipF && rHipF) {
+      const sMid = {x:(lShoulder.x+rShoulder.x)/2, y:(lShoulder.y+rShoulder.y)/2};
+      const hMid = {x:(lHipF.x+rHipF.x)/2,         y:(lHipF.y+rHipF.y)/2};
+      const lateralDx = sMid.x - hMid.x;
+      const vertDy    = Math.abs(sMid.y - hMid.y);
+      if(vertDy > 0.05) {
+        angles['Trunk Lateral Lean'] = Math.round(Math.abs(Math.atan2(Math.abs(lateralDx), vertDy) * 180/Math.PI));
+      }
+    }
+  }
+
   // Shoulder angles
   const lElbow=v(13),rElbow=v(14);
   if(lShoulder&&lElbow&&lHip) angles['Left Shoulder Flexion'] = calcAngle(lHip,lShoulder,lElbow);
@@ -4138,6 +4350,11 @@ const REF_RANGES = {
   'Right Ankle Dorsiflexion': {ideal:[10,30], warn:5, label:'Normal: +10 to +30° from neutral'},
   'Left Shoulder Flexion':    {label:'Normal: 0-180°'},
   'Right Shoulder Flexion':   {label:'Normal: 0-180°'},
+  'Left Knee Valgus':         {max:5, warn:10, label:'Dynamic valgus: <5° (frontal view)'},
+  'Right Knee Valgus':        {max:5, warn:10, label:'Dynamic valgus: <5° (frontal view)'},
+  'Pelvic Drop':              {max:5, warn:8,  label:'Contralateral pelvic drop: <5°'},
+  'Left Pronation':           {max:4, warn:8,  label:'Calcaneal eversion: neutral 0-4°, mild 5-10°, significant >10°'},
+  'Right Pronation':          {max:4, warn:8,  label:'Calcaneal eversion: neutral 0-4°, mild 5-10°, significant >10°'},
 };
 
 // ── PROMs Data & Logic ──
@@ -4493,7 +4710,13 @@ function renderASI(aggregated, movement) {
     {label:'Knee Flexion',       left:'Left Knee Flexion',         right:'Right Knee Flexion',         minMag: 10},
     {label:'Hip Flexion',        left:'Left Hip Flexion',          right:'Right Hip Flexion',           minMag: 5},
     {label:'Ankle Dorsiflexion', left:'Left Ankle Dorsiflexion',   right:'Right Ankle Dorsiflexion',    minMag: 5},
-    {label:'Shoulder Flexion',   left:'Left Shoulder Flexion',     right:'Right Shoulder Flexion',      minMag: 5},
+    {label:'Knee Valgus',        left:'Left Knee Valgus',          right:'Right Knee Valgus',           minMag: 3},
+    {label:'Pronation',          left:'Left Pronation',             right:'Right Pronation',              minMag: 2},
+    // Shoulder excluded for running side-view (arm swing phase mismatch = always asymmetric)
+    ...(/running|gait|walk/i.test(movement) && (cameraView === 'side' || cameraView2 !== 'front')
+      ? [] // omit shoulder in running side-view — it's a timing artifact, not a real finding
+      : [{label:'Shoulder Flexion', left:'Left Shoulder Flexion', right:'Right Shoulder Flexion', minMag: 5}]
+    ),
   ];
   // minMag: minimum mean absolute value (degrees) before asymmetry is meaningful.
   // Ankle DF values near 0° (e.g. -4° vs +1°) are within 30fps noise (±5°)
@@ -4627,6 +4850,10 @@ const MOVEMENT_NORMS = {
     'Trunk Lean':              {ideal:[5,15],  warn:20, label:'Forward trunk lean: 5-15° from vertical'},
     'Trunk Lateral Lean':      {max:5, warn:8,          label:'Lateral trunk lean: <5° per step (Trendelenburg)'},
     'Pelvic Drop':             {max:5, warn:8,          label:'Contralateral pelvic drop: <5° (hip abductor strength)'},
+    'Left Knee Valgus':        {max:5, warn:10,         label:'Dynamic valgus: <5° (frontal view — requires front camera)'},
+    'Right Knee Valgus':       {max:5, warn:10,         label:'Dynamic valgus: <5° (frontal view — requires front camera)'},
+    'Left Pronation':          {max:4, warn:8,           label:'Calcaneal eversion: neutral 0-4°, mild 5-10° (posterior view)'},
+    'Right Pronation':         {max:4, warn:8,           label:'Calcaneal eversion: neutral 0-4°, mild 5-10° (posterior view)'},
   },
   'Sit to Stand': {
     'Left Hip Flexion':   {ideal:[80,120], warn:70, label:'STS hip at initiation: 80-120°'},
@@ -5670,7 +5897,7 @@ async function runAnalysis() {
       if(canvas) frameHeight = Math.max(frameHeight, canvas.height);
 
       if(mpResult && mpResult.poseLandmarks) {
-        allAngles.push(extractAngles(mpResult.poseLandmarks));
+        allAngles.push(extractAngles(mpResult.poseLandmarks, cameraView));
       }
     }
   } else {
@@ -5723,7 +5950,7 @@ async function runAnalysis() {
         const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2);
         annotatedFrames2.push({base64, canvas, phase: frame.phase});
         if(mpResult && mpResult.poseLandmarks) {
-          allAngles2.push(extractAngles(mpResult.poseLandmarks));
+          allAngles2.push(extractAngles(mpResult.poseLandmarks, cameraView2));
         }
       }
     } else {
@@ -5740,7 +5967,7 @@ async function runAnalysis() {
   // Sagittal-dominant: hip flexion, knee flexion, ankle DF, trunk lean, elbow
   // Frontal-dominant: hip abduction, valgus, pelvic tilt, shoulder abduction
   const SAGITTAL_ANGLES = ['Hip Flexion','Knee Flexion','Ankle Dorsiflexion','Trunk Lean','Elbow Flexion','Shoulder Flexion'];
-  const FRONTAL_ANGLES  = ['Hip Abduction','Knee Valgus','Pelvic Tilt','Shoulder Abduction','Trunk Lateral Lean'];
+  const FRONTAL_ANGLES  = ['Hip Abduction','Knee Valgus','Pelvic Tilt','Pelvic Drop','Trunk Lateral Lean','Shoulder Abduction','Pronation'];
 
   let mergedAggregated = {...aggregated};
   let mergeNotes = [];
@@ -5816,7 +6043,10 @@ ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
 - Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. Values aggregated from STANCE frames only (swing excluded). IMPORTANT: ankle/foot landmarks (heel, toe) are the LEAST reliable landmarks in side-view running at 30–60fps — foot moves fast and is often partially occluded. Values outside −12° to +35° are likely tracking artefacts. If ankle DF appears severely asymmetric (>20° L/R difference) or deeply plantarflexed (< −15°) during stance, flag it as UNCONFIRMED and instruct the clinician to verify against the skeleton overlay before drawing clinical conclusions. Do NOT diagnose ankle dysfunction solely from a single plantarflexion reading.
 - Trunk Lean: degrees from vertical (0° = perfectly upright). Running norm = 5-15° forward.
-- Shoulder Flexion: arm forward from body. 0° = arm at side; 90° = arm horizontal forward.
+- Shoulder Flexion: arm forward from body. 0° = arm at side; 90° = arm horizontal forward. NOTE: In running from a SIDE-VIEW camera, shoulder asymmetry reflects timing (one arm forward, one back) not ROM — do NOT flag shoulder asymmetry as clinically significant unless the front/posterior view also shows it.
+- Pelvic Drop: measured from FRONT view as pelvis tilt angle during single-leg stance. Normal <5°. Values >5° suggest weak hip abductors (Trendelenburg sign). Only valid from frontal camera.
+- Knee Valgus (Left/Right): measured from FRONT view as knee deviation from hip-ankle axis. Normal <5°. Values >10° suggest dynamic valgus collapse. Only valid from frontal camera. Side-view knee valgus data is not reliable — ignore if only side view available.
+- Knee Flexion: when a stride engine peak value is available (from dense 64-128 frame analysis), it supersedes gallery-frame estimates for the reference leg. The stride engine value is more accurate as it averages across 10-15+ strides.
 ${(() => {
   // Running context from manual inputs
   const sp = parseFloat(document.getElementById('treadmillSpeed')?.value||'');
@@ -6127,12 +6357,32 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
       // For gait/running: inject the stride engine's hip-at-toe-off into aggregated
       // so the angles table can show it as a real per-side measurement.
-      // This is a single bilateral value from the reference leg — label it accordingly.
       if(isGait && window_strideMetrics?.hipExtAtToeoff != null) {
         const hte = window_strideMetrics.hipExtAtToeoff;
-        // The stride engine uses the reference leg only; inject as bilateral estimate
         if(!aggregated['Left Hip Extension'])  aggregated['Left Hip Extension']  = {avg: hte, min: hte, max: hte, count: 1};
         if(!aggregated['Right Hip Extension']) aggregated['Right Hip Extension'] = {avg: hte, min: hte, max: hte, count: 1};
+      }
+
+      // ── Inject stride engine peak knee flexion ──────────────────────────────
+      // The stride engine computes peak swing-phase knee flexion from 64-128 dense
+      // frames, averaging across 15+ strides. This is far more accurate than the
+      // gallery-frame aggregate (8 frames, may not capture peak swing).
+      // We use the stride engine value as a floor: if it shows MORE flexion than
+      // the gallery (smaller included angle), it's more accurate and we use it.
+      // The stride engine gives REF-leg only; the non-REF leg keeps gallery value.
+      if(isGait && window_strideMetrics?.peakKneeFlex != null) {
+        const pkf = window_strideMetrics.peakKneeFlex; // minimum included angle = peak flexion
+        const refSide = window_strideMetrics.refSide; // 'L' or 'R'
+        const refKey = refSide === 'L' ? 'Left Knee Flexion' : 'Right Knee Flexion';
+        const existing = aggregated[refKey];
+        // Only override if stride engine found MORE flexion (smaller angle) than gallery
+        if(!existing || pkf < existing.min) {
+          aggregated[refKey] = {
+            ...(existing || {}),
+            min: pkf, avg: pkf, max: existing?.max ?? pkf,
+            _fromStride: true
+          };
+        }
       }
 
       let tableHtml = `<div style="font-size:.73rem;color:var(--muted);margin-bottom:10px;">📐 Norms calibrated for: <strong style="color:var(--navy);">${movNorm || 'General movement'}</strong></div>`;
@@ -6144,6 +6394,8 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           {label:'Hip Ext at Toe-off',  L:'Left Hip Extension',        R:'Right Hip Extension'},
           {label:'Knee Flexion',         L:'Left Knee Flexion',         R:'Right Knee Flexion'},
           {label:'Knee Extension',       L:'Left Knee Extension',       R:'Right Knee Extension'},
+          {label:'Knee Valgus (frontal)',L:'Left Knee Valgus',          R:'Right Knee Valgus'},
+          {label:'Pronation (posterior)',L:'Left Pronation',             R:'Right Pronation'},
           {label:'Ankle Dorsiflexion',   L:'Left Ankle Dorsiflexion',   R:'Right Ankle Dorsiflexion'},
           {label:'Trunk Lean',           L:'Trunk Lean',                R:null},
           {label:'Trunk Lateral Lean',   L:'Trunk Lateral Lean',        R:null},
@@ -6290,7 +6542,16 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     console.log('[Analysis] Stage 5: Calling renderReport, report:', !!report);
     try {
+      // Store for session comparison snapshot
+      window._lastAggregated = aggregated;
       report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
+      // Show session save/compare buttons after a successful analysis
+      const saveBtn = document.getElementById('saveSessionBtn');
+      const cmpBtn  = document.getElementById('compareSessionBtn');
+      if(saveBtn) saveBtn.style.display = 'inline-flex';
+      let sessions = [];
+      try { sessions = JSON.parse(localStorage.getItem(SESSION_KEY) || '[]'); } catch(e) {}
+      if(cmpBtn && sessions.length >= 1) cmpBtn.style.display = 'inline-flex';
     } catch(renderErr) {
       console.error('[renderReport] CRASH:', renderErr.message, renderErr.stack);
       showErr('Render error: ' + renderErr.message);
@@ -6308,16 +6569,24 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
 function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) {
   const score = r.score||null;
+  window._lastScore = score; // for session comparison snapshot
   const sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
   const highCount = (r.findings||[]).filter(f=>f.priority==='high').length;
-  // Build ASI summary tile — find worst asymmetry pair
-  let worstAsymPct = 0, worstAsymLabel = '';
+  const isRunningSideView = /running|gait|walk/i.test(movement) && cameraView === 'side';
   const asiPairsForTile = [
     {label:'Knee',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
     {label:'Hip',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
     {label:'Ankle',    left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion',  minMag:5},
-    {label:'Shoulder', left:'Left Shoulder Flexion',   right:'Right Shoulder Flexion',    minMag:5},
+    {label:'Knee Valgus', left:'Left Knee Valgus',     right:'Right Knee Valgus',         minMag:3},
+    {label:'Pronation',   left:'Left Pronation',        right:'Right Pronation',            minMag:2},
+    // Shoulder asymmetry excluded for running side-view: alternating arm swing means
+    // one arm is always forward and one back at any given frame — pure timing artifact.
+    ...(!isRunningSideView
+      ? [{label:'Shoulder', left:'Left Shoulder Flexion', right:'Right Shoulder Flexion', minMag:5}]
+      : []
+    ),
   ];
+  let worstAsymPct = 0, worstAsymLabel = '';
   asiPairsForTile.forEach(p => {
     const L = aggregated[p.left], R = aggregated[p.right];
     if(!L || !R) return;
@@ -6436,6 +6705,202 @@ function getBranding() {
     address:   document.getElementById('brandAddress').value.trim()   || '',
     contact:   document.getElementById('brandContact').value.trim()   || '',
   };
+}
+
+// ── Session Comparison ──────────────────────────────────────────────────────
+// Saves current report's key metrics to localStorage so a future session can
+// be compared side-by-side. Uses the patient name + date as the key.
+// Max 5 saved sessions — oldest dropped when limit reached.
+
+const SESSION_KEY = 'motionrx_saved_sessions';
+const MAX_SESSIONS = 5;
+
+function buildSessionSnapshot() {
+  // Collect current metrics into a portable snapshot object
+  const sm = window_strideMetrics;
+  const agg = window._lastAggregated || {};
+  const movement = document.getElementById('movementType')?.value || 'Unknown';
+  const patient = document.getElementById('patientName')?.value?.trim() || 'Patient';
+  const now = new Date();
+
+  const getVal = (key) => {
+    const v = agg[key];
+    if(!v) return null;
+    return gaitDisplayVal ? gaitDisplayVal(key, v, movement) : v.avg;
+  };
+
+  return {
+    id: Date.now(),
+    date: now.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}),
+    patient,
+    movement,
+    score: window._lastScore ?? null,
+    metrics: {
+      'Hip Flexion L':       getVal('Left Hip Flexion'),
+      'Hip Flexion R':       getVal('Right Hip Flexion'),
+      'Knee Flexion L':      getVal('Left Knee Flexion'),
+      'Knee Flexion R':      getVal('Right Knee Flexion'),
+      'Ankle DF L':          getVal('Left Ankle Dorsiflexion'),
+      'Ankle DF R':          getVal('Right Ankle Dorsiflexion'),
+      'Hip Ext Toe-off':     sm?.hipExtAtToeoff ?? null,
+      'Cadence (spm)':       sm?.cadenceSpm ?? null,
+      'Step Asym (%)':       sm?.stepAsymPct ?? null,
+      'Peak Knee Flex':      sm?.peakKneeFlex ?? null,
+      'Trunk Lean':          getVal('Trunk Lean'),
+      'Pelvic Drop':         getVal('Pelvic Drop'),
+      'Knee Valgus L':       getVal('Left Knee Valgus'),
+      'Knee Valgus R':       getVal('Right Knee Valgus'),
+      'Pronation L':         getVal('Left Pronation'),
+      'Pronation R':         getVal('Right Pronation'),
+    }
+  };
+}
+
+function saveSessionForComparison() {
+  const snapshot = buildSessionSnapshot();
+  let sessions = [];
+  try { sessions = JSON.parse(localStorage.getItem(SESSION_KEY) || '[]'); } catch(e) {}
+  sessions.unshift(snapshot); // newest first
+  if(sessions.length > MAX_SESSIONS) sessions = sessions.slice(0, MAX_SESSIONS);
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(sessions));
+    const btn = document.getElementById('saveSessionBtn');
+    btn.textContent = '✓ Saved';
+    btn.style.color = 'var(--teal)';
+    setTimeout(() => { btn.textContent = '💾 Save Session'; btn.style.color = ''; }, 2000);
+    // Show compare button now that there's something to compare
+    if(sessions.length >= 2) document.getElementById('compareSessionBtn').style.display = 'inline-flex';
+  } catch(e) {
+    alert('Could not save session — localStorage may be unavailable in this browser.');
+  }
+}
+
+function showComparisonPanel() {
+  let sessions = [];
+  try { sessions = JSON.parse(localStorage.getItem(SESSION_KEY) || '[]'); } catch(e) {}
+  if(sessions.length < 2) {
+    alert('Save at least 2 sessions first to compare them.');
+    return;
+  }
+
+  const panel = document.getElementById('comparisonPanel');
+  const body  = document.getElementById('comparisonBody');
+  panel.style.display = 'block';
+
+  // Build a selector for which two sessions to compare
+  const opts = sessions.map((s,i) =>
+    `<option value="${i}">${s.date} — ${s.patient} — ${s.movement}${s.score!=null?' ('+s.score+'/10)':''}</option>`
+  ).join('');
+
+  body.innerHTML = `
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:200px;">
+        <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Baseline (earlier)</div>
+        <select id="cmpA" style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);font-size:.8rem;">
+          ${opts}
+        </select>
+      </div>
+      <div style="font-size:1.1rem;color:var(--muted);padding-top:18px;">→</div>
+      <div style="flex:1;min-width:200px;">
+        <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Current (later)</div>
+        <select id="cmpB" style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);font-size:.8rem;">
+          ${sessions.map((s,i) =>
+            `<option value="${i}" ${i===0?'selected':''}>${s.date} — ${s.patient} — ${s.movement}${s.score!=null?' ('+s.score+'/10)':''}</option>`
+          ).join('')}
+        </select>
+      </div>
+      <button onclick="renderComparisonTable()" class="btn-solid" style="align-self:flex-end;white-space:nowrap;">Compare →</button>
+    </div>
+    <div id="cmpTable"></div>
+    <div style="font-size:.72rem;color:var(--muted);margin-top:10px;">
+      💾 Saved ${sessions.length}/${MAX_SESSIONS} sessions &nbsp;·&nbsp;
+      <button onclick="clearSavedSessions()" style="background:none;border:none;color:var(--muted);cursor:pointer;text-decoration:underline;font-size:.72rem;padding:0;">Clear all</button>
+    </div>`;
+
+  // Default: compare index 1 (second saved) vs index 0 (most recent)
+  document.getElementById('cmpA').value = '1';
+  document.getElementById('cmpB').value = '0';
+  renderComparisonTable();
+}
+
+function renderComparisonTable() {
+  let sessions = [];
+  try { sessions = JSON.parse(localStorage.getItem(SESSION_KEY) || '[]'); } catch(e) {}
+  const iA = parseInt(document.getElementById('cmpA')?.value ?? '1');
+  const iB = parseInt(document.getElementById('cmpB')?.value ?? '0');
+  const sA = sessions[iA], sB = sessions[iB];
+  if(!sA || !sB) return;
+
+  const keys = Object.keys(sA.metrics).filter(k =>
+    sA.metrics[k] != null || sB.metrics[k] != null
+  );
+
+  const fmt = (v) => v != null ? v + (typeof v === 'number' && !Number.isInteger(v) ? '' : '°') : '—';
+  const deltaColor = (a, b, higherIsBetter=false) => {
+    if(a == null || b == null) return 'color:var(--muted)';
+    const d = b - a;
+    if(Math.abs(d) < 2) return 'color:var(--muted)'; // within noise
+    const improved = higherIsBetter ? d > 0 : d < 0;
+    return improved ? 'color:#16a34a;font-weight:600' : 'color:#dc2626;font-weight:600';
+  };
+  const deltaArrow = (a, b, higherIsBetter=false) => {
+    if(a == null || b == null) return '';
+    const d = b - a;
+    if(Math.abs(d) < 2) return '';
+    const improved = higherIsBetter ? d > 0 : d < 0;
+    return (improved ? '↑ ' : '↓ ') + (d > 0 ? '+' : '') + Math.round(d);
+  };
+  // For these metrics, higher value = better
+  const higherBetter = new Set(['Hip Flexion L','Hip Flexion R','Peak Knee Flex','Ankle DF L','Ankle DF R']);
+
+  const rows = keys.map(k => {
+    const a = sA.metrics[k], b = sB.metrics[k];
+    const hb = higherBetter.has(k);
+    const dColor = deltaColor(a, b, hb);
+    const dArrow = deltaArrow(a, b, hb);
+    const unit = k.includes('spm') || k.includes('Asym') ? '' : '°';
+    const fmtV = (v) => v != null ? v + (k.includes('Cadence') || k.includes('Asym') ? (k.includes('spm')?'':' %') : '°') : '—';
+    return `<tr>
+      <td style="padding:6px 10px;font-size:.8rem;font-weight:600;color:var(--navy);">${k}</td>
+      <td style="padding:6px 10px;font-size:.8rem;text-align:center;">${fmtV(a)}</td>
+      <td style="padding:6px 10px;font-size:.8rem;text-align:center;">${fmtV(b)}</td>
+      <td style="padding:6px 10px;font-size:.8rem;text-align:center;${dColor}">${dArrow || '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const scoreRow = (s) => s.score != null
+    ? `<span style="font-size:.95rem;font-weight:700;color:${s.score>=7?'#16a34a':s.score>=5?'#d97706':'#dc2626'}">${s.score}/10</span>`
+    : '<span style="color:var(--muted)">—</span>';
+
+  document.getElementById('cmpTable').innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
+      <thead>
+        <tr style="background:var(--navy);color:#fff;">
+          <th style="padding:7px 10px;text-align:left;font-size:.72rem;letter-spacing:.05em;">Metric</th>
+          <th style="padding:7px 10px;text-align:center;font-size:.72rem;">${sA.date}</th>
+          <th style="padding:7px 10px;text-align:center;font-size:.72rem;">${sB.date}</th>
+          <th style="padding:7px 10px;text-align:center;font-size:.72rem;">Change</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="background:var(--surface);">
+          <td style="padding:6px 10px;font-size:.8rem;font-weight:600;">Quality Score</td>
+          <td style="padding:6px 10px;text-align:center;">${scoreRow(sA)}</td>
+          <td style="padding:6px 10px;text-align:center;">${scoreRow(sB)}</td>
+          <td style="padding:6px 10px;text-align:center;${sA.score!=null&&sB.score!=null?deltaColor(sA.score,sB.score,true):'color:var(--muted)'}">
+            ${sA.score!=null&&sB.score!=null?deltaArrow(sA.score,sB.score,true)||'—':'—'}
+          </td>
+        </tr>
+        ${rows}
+      </tbody>
+    </table>`;
+}
+
+function clearSavedSessions() {
+  if(!confirm('Clear all saved sessions?')) return;
+  try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+  document.getElementById('comparisonPanel').style.display = 'none';
+  document.getElementById('compareSessionBtn').style.display = 'none';
 }
 
 // ── PDF Export ──
