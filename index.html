@@ -2618,18 +2618,29 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
   ];
 
   for(const {knee:KI, ankle:AI, name} of sides) {
-    // ── Step 1: Collect high-confidence tibia observations ──
-    const goodObs = []; // {dx, dy, len} — unit vector * length
-    allFrameLandmarks.forEach(lms => {
+    const N = allFrameLandmarks.length;
+
+    // ── Step 1: Collect ALL high-confidence tibia observations with frame index ──
+    // We learn tibia direction PER-FRAME rather than using a single median.
+    // This is critical because the tibia angle varies dramatically:
+    //   Initial contact: ~30° forward
+    //   Midstance:       nearly vertical
+    //   Toe-off:         ~30° backward
+    //   Mid-swing:       steeply forward (foot lifting behind)
+    const goodObs = []; // {fi, dx, dy, len}
+    allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
       const k = lms[KI], a = lms[AI];
       if(!k || !a) return;
       const kc = k.visibility||0, ac = a.visibility||0;
-      if(kc < 0.50 || ac < 0.50) return; // both must be well-tracked
+      if(kc < 0.50 || ac < 0.50) return;
       const dx = a.x - k.x, dy = a.y - k.y;
       const len = Math.hypot(dx, dy);
       if(len < 0.01) return;
-      goodObs.push({ dx: dx/len, dy: dy/len, len });
+      // Hard reject: ankle can NEVER be above the knee (Y increases downward in image)
+      // dy < 0 means ankle is above knee — anatomically impossible in any gait phase
+      if(dy < -0.01) return;
+      goodObs.push({ fi, dx: dx/len, dy: dy/len, len });
     });
 
     if(goodObs.length < 3) {
@@ -2637,34 +2648,45 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       continue;
     }
 
-    // ── Step 2: Median tibia length and direction ──
+    // ── Step 2: Learn tibia length (fairly stable across gait cycle) ──
     const lens = goodObs.map(o => o.len).sort((a,b)=>a-b);
     const medLen = lens[Math.floor(lens.length/2)];
 
-    // Median direction: average of unit vectors (robust to outliers)
-    const medDx = goodObs.reduce((s,o)=>s+o.dx,0) / goodObs.length;
-    const medDy = goodObs.reduce((s,o)=>s+o.dy,0) / goodObs.length;
-    const medDirLen = Math.hypot(medDx, medDy);
-    if(medDirLen < 0.01) continue;
-    const unitDx = medDx / medDirLen;
-    const unitDy = medDy / medDirLen;
+    // ── Step 3: Per-frame direction interpolation ──────────────────────────────
+    // For each frame, estimate tibia direction by interpolating from the nearest
+    // good observations on each side (weighted by temporal proximity).
+    // This gives us a smoothly-varying tibia direction that follows the gait cycle.
+    const getInterpolatedDir = (fi) => {
+      if(goodObs.length === 0) return null;
+      // Find the two nearest good observations (one before, one after)
+      let before = null, after = null;
+      for(const obs of goodObs) {
+        if(obs.fi <= fi) { if(!before || obs.fi > before.fi) before = obs; }
+        if(obs.fi >= fi) { if(!after  || obs.fi < after.fi)  after  = obs; }
+      }
+      if(before && after && before.fi !== after.fi) {
+        const t = (fi - before.fi) / (after.fi - before.fi);
+        // Slerp between the two unit vectors
+        const dx = before.dx + t * (after.dx - before.dx);
+        const dy = before.dy + t * (after.dy - before.dy);
+        const len = Math.hypot(dx, dy);
+        return len > 0.001 ? {dx: dx/len, dy: dy/len} : null;
+      }
+      return before || after; // nearest available
+    };
 
-    // Sanity check: tibia should point DOWNWARD (positive dy in image coords where y↓)
-    // If median direction is upward, something is wrong — skip
-    if(unitDy < -0.1) {
-      console.log(`[TibiaReproj] ${name}: median direction pointing up (dy=${unitDy.toFixed(2)}) — skipping`);
-      continue;
-    }
-
-    console.log(`[TibiaReproj] ${name}: medLen=${(medLen*100).toFixed(1)}%, dir=(${unitDx.toFixed(2)},${unitDy.toFixed(2)}), from ${goodObs.length} frames`);
-
-    // ── Step 3: Reproject ankles where knee is good but ankle is suspicious ──
-    // Threshold for replacement: ankle is >18% of normalized width off projection
-    const REPLACE_THRESH = 0.18;
-    const LOW_CONF_THRESH = 0.35;
-    const KNEE_MIN_CONF = 0.40;
+    // ── Step 4: Y-above-knee hard rejection ───────────────────────────────────
+    // Any detected ankle that is at or above the knee Y-coordinate is anatomically
+    // impossible and must be replaced regardless of confidence score.
+    // This catches the most common failure: MediaPipe placing the ankle at knee height
+    // during swing when the foot is behind the body and partially occluded.
+    const LOW_CONF_THRESH  = 0.35;
+    const KNEE_MIN_CONF    = 0.40;
+    const REPLACE_THRESH   = 0.16; // normalized distance to trigger blend/replace
+    const ABOVE_KNEE_MARGIN = 0.03; // ankle must be at least 3% of frame BELOW knee
 
     let reprojCount = 0;
+
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
       const k = lms[KI], a = lms[AI];
@@ -2672,93 +2694,106 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       const kc = k.visibility||0, ac = a?.visibility||0;
       if(kc < KNEE_MIN_CONF) return;
 
-      // Projected ankle position from tibia direction
-      const projX = k.x + unitDx * medLen;
-      const projY = k.y + unitDy * medLen;
+      // Get the per-frame tibia direction (phase-appropriate)
+      const dir = getInterpolatedDir(fi);
+      if(!dir) return;
 
-      // ── World Z-depth validation (new with PoseLandmarker API) ──────────────
-      // worldLandmarks._wz gives metric depth relative to body center.
-      // In side-view running: the near-side ankle has |_wz| < 0.15m (near body plane).
-      // A misplaced ankle on the belt would have |_wz| >> 0.2m (implausibly far).
-      // If available, use this to boost confidence in the correction decision.
+      // Sanity check: interpolated direction must point downward
+      if(dir.dy < 0.05) return;
+
+      // Projected ankle from knee + per-frame tibia direction
+      const projX = k.x + dir.dx * medLen;
+      const projY = k.y + dir.dy * medLen;
+
+      // ── Hard rejection 1: Ankle above knee ──────────────────────────────────
+      // dy = ankle.y - knee.y; if negative, ankle is above knee in image — reject.
+      const aboveKnee = a && (a.y < k.y - ABOVE_KNEE_MARGIN);
+
+      // ── Hard rejection 2: World Z depth mismatch ───────────────────────────
       const worldAnkleZ = a?._wz ?? null;
       const worldKneeZ  = k?._wz ?? null;
       let worldSuggestsMisplaced = false;
       if(worldAnkleZ !== null && worldKneeZ !== null) {
-        // Ankle should be within ~0.25m of knee in depth for a side-view camera
         const zDiff = Math.abs(worldAnkleZ - worldKneeZ);
-        if(zDiff > 0.35) {
+        if(zDiff > 0.48) {
           worldSuggestsMisplaced = true;
-          console.log(`[TibiaReproj] ${name} frame ${fi+1}: world Z diff=${zDiff.toFixed(2)}m — ankle likely misplaced`);
+          console.log(`[TibiaReproj] ${name} f${fi+1}: worldZ diff=${zDiff.toFixed(2)}m → misplaced`);
         }
       }
 
-      if(!a || ac < LOW_CONF_THRESH || worldSuggestsMisplaced) {
+      // ── Hard rejection 3: Ankle more than 2× tibia length from knee ────────
+      // Catches cases where MediaPipe has jumped to a completely wrong body part.
+      const ankleDistFromKnee = a ? Math.hypot(a.x - k.x, a.y - k.y) : Infinity;
+      const tooFarFromKnee = ankleDistFromKnee > medLen * 2.0;
+
+      const mustReplace = !a || ac < LOW_CONF_THRESH
+                       || aboveKnee || worldSuggestsMisplaced || tooFarFromKnee;
+
+      if(mustReplace) {
+        const reason = !a ? 'missing'
+          : aboveKnee           ? `above-knee(dy=${((a.y-k.y)*100).toFixed(1)}%)`
+          : worldSuggestsMisplaced ? 'worldZ'
+          : tooFarFromKnee      ? `too-far(${(ankleDistFromKnee/medLen).toFixed(1)}×tibia)`
+          : 'low-conf';
         lms[AI] = {
           x: projX, y: projY,
-          visibility: Math.min(kc * 0.65, 0.45),
-          source: 'tibia-projected', tibiaProjFi: fi
+          visibility: Math.min(kc * 0.60, 0.42),
+          presence: Math.min(kc * 0.60, 0.42),
+          source: `tibia-projected(${reason})`,
         };
+        if(a?._wz !== undefined) lms[AI]._wz = (worldKneeZ ?? 0);
         reprojCount++;
+        if(aboveKnee || tooFarFromKnee) {
+          console.log(`[TibiaReproj] ${name} f${fi+1}: HARD REJECT (${reason}) → reprojected`);
+        }
       } else {
+        // Soft correction: blend toward projection if ankle is too far off
         const dist = Math.hypot(a.x - projX, a.y - projY);
         if(dist > REPLACE_THRESH) {
-          const blendToProj = Math.min(1.0, (dist - REPLACE_THRESH) / 0.15 + 0.5);
-          const newX = a.x + blendToProj * (projX - a.x);
-          const newY = a.y + blendToProj * (projY - a.y);
+          const blendToProj = Math.min(1.0, (dist - REPLACE_THRESH) / 0.12 + 0.4);
           lms[AI] = {
             ...a,
-            x: newX, y: newY,
-            visibility: Math.max(ac, kc * 0.55),
-            source: 'tibia-blended', origDist: dist, blendToProj
+            x: a.x + blendToProj * (projX - a.x),
+            y: a.y + blendToProj * (projY - a.y),
+            visibility: Math.max(ac, kc * 0.50),
+            source: 'tibia-blended',
           };
-          console.log(`[TibiaReproj] ${name} frame ${fi+1}: ankle ${(dist*100).toFixed(1)}% off → blended ${(blendToProj*100).toFixed(0)}% toward proj`);
           reprojCount++;
         }
       }
     });
-    console.log(`[TibiaReproj] ${name}: reprojected/blended ${reprojCount}/${allFrameLandmarks.length} frames`);
+
+    console.log(`[TibiaReproj] ${name}: corrected ${reprojCount}/${N} frames (${goodObs.length} reference obs)`);
   }
 
-  // ── Step 4: Ground-plane constraint ──────────────────────────────────────────
-  // In side-view treadmill running, the lowest well-tracked ankle Y across all frames
-  // gives us the treadmill belt level. Stance-phase ankles should be AT this level.
-  // Swing-phase ankles will be above it — that's fine and expected.
-  // We only correct ankles that are TOO HIGH when they should be at ground level
-  // (indicated by confidence being decent but position clearly elevated).
+  // ── Step 5: Ground-plane Y-floor constraint ──────────────────────────────────
+  // Stance-phase ankles must be near treadmill level. We estimate ground Y from the
+  // highest (most floor-level) well-tracked ankle positions.
   if(isSide) {
-    for(const {ankle:AI, name} of sides) {
-      // Collect minimum (most floor-level) Y across all frames with decent confidence
+    for(const {ankle:AI, knee:KI, name} of sides) {
       let groundY = -Infinity;
       allFrameLandmarks.forEach(lms => {
         if(!lms) return;
         const a = lms[AI];
         if(a && (a.visibility||0) > 0.45 && a.y > groundY) groundY = a.y;
       });
-      if(groundY < 0.3) continue; // degenerate — ground not found
+      if(groundY < 0.3) continue;
 
-      // The belt is at groundY. Any stance-phase ankle that's more than 12% of frame
-      // height ABOVE groundY when it has low confidence is suspicious.
-      // We don't blindly move everything to groundY — swing ankles are legitimately high.
-      // We only correct frames where the projected ankle from tibia-reproj also suggests
-      // the ankle should be near ground (projY within 10% of groundY).
       allFrameLandmarks.forEach((lms, fi) => {
         if(!lms) return;
-        const a = lms[AI], k = lms[sides.find(s=>s.ankle===AI)?.knee ?? AI];
+        const a = lms[AI], k = lms[KI];
         if(!a || !k) return;
         const ac = a.visibility||0;
-        if(ac > 0.55) return; // confident reading — trust it
-        const gapAboveGround = groundY - a.y; // positive = ankle is above ground
-        if(gapAboveGround > 0.12) {
-          // Ankle is suspiciously high and has low confidence
-          // Move it toward ground level proportionally
-          const correctionStrength = Math.min(1.0, (gapAboveGround - 0.12) / 0.10);
+        if(ac > 0.55) return; // confident — trust it
+        // Only push DOWN toward ground (never pull up) — swing ankles are legitimately high
+        const gapAboveGround = groundY - a.y;
+        if(gapAboveGround > 0.10) {
+          const strength = Math.min(1.0, (gapAboveGround - 0.10) / 0.10);
           lms[AI] = {
             ...a,
-            y: a.y + correctionStrength * gapAboveGround * 0.7,
-            source: (a.source||'') + '+ground-corrected',
+            y: a.y + strength * gapAboveGround * 0.65,
+            source: (a.source||'') + '+ground',
           };
-          console.log(`[GroundPlane] ${name} frame ${fi+1}: ankle ${(gapAboveGround*100).toFixed(1)}% above ground → corrected`);
         }
       });
     }
