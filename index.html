@@ -2649,12 +2649,31 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       goodObs.push({ fi, dx: dx/len, dy: dy/len, len });
     });
 
+    // ── Step 1b: Filter goodObs to only include anatomically plausible observations ──
+    // Critical: a landmark on the mid-tibia has high confidence BUT is anatomically wrong.
+    // We filter goodObs to only include frames where the knee→ankle distance is within
+    // a plausible tibia range. We don't know medLen yet, so we use the DISTRIBUTION:
+    // collect all lengths, take the 70th percentile as the reference, then reject
+    // observations where the length is < 60% of that reference (mid-tibia placements
+    // are typically 45–65% of true tibia length from the knee).
+    if(goodObs.length >= 5) {
+      const allLens = goodObs.map(o => o.len).sort((a,b) => a-b);
+      const p70Len  = allLens[Math.floor(allLens.length * 0.70)]; // 70th percentile
+      const minPlausibleLen = p70Len * 0.72; // below 72% of p70 = too short = on tibia not ankle
+      const beforeFilter = goodObs.length;
+      // Filter in-place: remove mid-tibia observations
+      const filtered = goodObs.filter(o => o.len >= minPlausibleLen);
+      if(filtered.length >= 3) {
+        goodObs.length = 0;
+        filtered.forEach(o => goodObs.push(o));
+        const removed = beforeFilter - goodObs.length;
+        if(removed > 0) console.log(`[TibiaReproj] ${name}: filtered ${removed} short-tibia obs (< ${(minPlausibleLen*100).toFixed(1)}% frame width)`);
+      }
+    }
     if(goodObs.length < 3) {
-      console.log(`[TibiaReproj] ${name}: not enough high-conf frames (${goodObs.length}) — skipping`);
+      console.log(`[TibiaReproj] ${name}: insufficient good observations after filtering (${goodObs.length}) — skipping`);
       continue;
     }
-
-    // ── Step 2: Learn tibia length (fairly stable across gait cycle) ──
     const lens = goodObs.map(o => o.len).sort((a,b)=>a-b);
     const medLen = lens[Math.floor(lens.length/2)];
 
@@ -2732,14 +2751,43 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       const ankleDistFromKnee = a ? Math.hypot(a.x - k.x, a.y - k.y) : Infinity;
       const tooFarFromKnee = ankleDistFromKnee > medLen * 2.0;
 
+      // ── Hard rejection 4: Ankle too CLOSE to knee (mid-tibia placement) ─────
+      // If the ankle is less than 65% of expected tibia length from the knee,
+      // it's sitting on the tibia shaft rather than at the malleolus.
+      // This catches the most common remaining failure: ankle_1 and ankle_3 type
+      // where the landmark is placed at 50–65% of the way down the tibia.
+      const tooCloseToKnee = a != null && ankleDistFromKnee < medLen * 0.65;
+
+      // ── Hard rejection 5: Ankle near hip level (posterior view confusion) ───
+      // In posterior view during fast running, MediaPipe sometimes confuses hip
+      // landmarks (23/24) with ankle landmarks (27/28). If an ankle landmark
+      // appears within 20% of frame height of a hip landmark, it's almost
+      // certainly wrong — the ankle should be at least 50% of frame height below hip.
+      let nearHip = false;
+      if(!isSide) {
+        const hipI = name === 'L' ? 23 : 24;
+        const hip = lms[hipI];
+        if(hip && a && (hip.visibility||0) > 0.4) {
+          const hipToAnkleDy = a.y - hip.y; // positive = ankle below hip (correct)
+          // Ankle must be at least 35% of frame height below the hip
+          if(hipToAnkleDy < 0.35) {
+            nearHip = true;
+            console.log(`[TibiaReproj] ${name} f${fi+1}: ankle near hip (dy=${(hipToAnkleDy*100).toFixed(1)}%) → misplaced`);
+          }
+        }
+      }
+
       const mustReplace = !a || ac < LOW_CONF_THRESH
-                       || aboveKnee || worldSuggestsMisplaced || tooFarFromKnee;
+                       || aboveKnee || worldSuggestsMisplaced
+                       || tooFarFromKnee || tooCloseToKnee || nearHip;
 
       if(mustReplace) {
         const reason = !a ? 'missing'
           : aboveKnee           ? `above-knee(dy=${((a.y-k.y)*100).toFixed(1)}%)`
           : worldSuggestsMisplaced ? 'worldZ'
           : tooFarFromKnee      ? `too-far(${(ankleDistFromKnee/medLen).toFixed(1)}×tibia)`
+          : tooCloseToKnee      ? `mid-tibia(${(ankleDistFromKnee/medLen).toFixed(2)}×tibia)`
+          : nearHip             ? 'near-hip'
           : 'low-conf';
         lms[AI] = {
           x: projX, y: projY,
@@ -2749,7 +2797,7 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
         };
         if(a?._wz !== undefined) lms[AI]._wz = (worldKneeZ ?? 0);
         reprojCount++;
-        if(aboveKnee || tooFarFromKnee) {
+        if(aboveKnee || tooFarFromKnee || tooCloseToKnee || nearHip) {
           console.log(`[TibiaReproj] ${name} f${fi+1}: HARD REJECT (${reason}) → reprojected`);
         }
       } else {
