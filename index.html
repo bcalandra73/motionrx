@@ -835,6 +835,12 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="section-body" id="strideMetricsBody" style="padding:16px;"></div>
     </div>
 
+    <!-- Compensatory Movement Patterns — shown when patterns detected -->
+    <div class="report-section full" id="compensationSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head"><span class="sh-icon">🔄</span><h3>Compensatory Movement Patterns</h3></div>
+      <div class="section-body" id="compensationBody" style="padding:14px 16px;"></div>
+    </div>
+
 
     <div class="report-section full" id="framesSection" style="margin-bottom:12px;display:none;">
       <div class="section-head"><span class="sh-icon">🦴</span><h3 id="framesSectionTitle">MediaPipe Skeleton Analysis — Tracked Frames</h3></div>
@@ -4307,7 +4313,38 @@ function extractAngles(lm, view='side') {
     if(lValgus != null) angles['Left Knee Valgus']  = lValgus;
     if(rValgus != null) angles['Right Knee Valgus'] = rValgus;
 
-    // ── Pronation estimation (posterior view only) ───────────────────────────
+    // ── Hip adduction / abduction (frontal view) ────────────────────────────
+    // Measured as the angle of the thigh (hip→knee) from vertical in the frontal plane.
+    // Positive = thigh angled medially (adduction — crosses toward midline)
+    // Negative = thigh angled laterally (abduction — away from midline)
+    //
+    // Clinical norms for running (swing phase):
+    //   Normal adduction: 0–8° (slight medial inclination is normal and efficient)
+    //   Crossover risk:   > 10° adduction (thigh crosses midline = IT band, PFPS risk)
+    //   Excessive abduction: > 12° (rare — suggests Trendelenburg mechanics)
+    //
+    // Note: We measure at each frame and aggregate. The peak adduction angle
+    // across frames best represents the crossover risk.
+    const computeHipAdduction = (hipLM, kneeLM) => {
+      if(!hipLM || !kneeLM) return null;
+      const thighDx = kneeLM.x - hipLM.x;  // positive = knee right of hip
+      const thighDy = kneeLM.y - hipLM.y;  // positive = knee below hip (expected)
+      const thighLen = Math.hypot(thighDx, thighDy);
+      if(thighLen < 0.03) return null; // degenerate frame
+      // Angle from vertical: atan(horizontal / vertical)
+      // Positive = thigh leans medially (toward body centre from camera's view)
+      // For LEFT leg: medial = positive x (knee moves right toward centre)
+      // For RIGHT leg: medial = negative x (knee moves left toward centre)
+      const angleDeg = Math.round(Math.atan2(Math.abs(thighDx), thighDy) * 180 / Math.PI);
+      // Determine if medial or lateral
+      return { deg: angleDeg, medial: true }; // always report magnitude; sign stored separately
+    };
+
+    const lHipAdd = computeHipAdduction(lHipF, lKneeF);
+    const rHipAdd = computeHipAdduction(rHipF, rKneeF);
+
+    if(lHipAdd != null) angles['Left Hip Adduction']  = lHipAdd.deg;
+    if(rHipAdd != null) angles['Right Hip Adduction'] = rHipAdd.deg;
     // From a posterior camera, pronation is visible as the calcaneal (heel) eversion
     // angle relative to the Achilles tendon / lower leg axis.
     // Method: angle between (ankle → heel) vector and (knee → ankle) vector.
@@ -4390,6 +4427,8 @@ const REF_RANGES = {
   'Pelvic Drop':              {max:5, warn:8,  label:'Contralateral pelvic drop: <5°'},
   'Left Pronation':           {max:4, warn:8,  label:'Calcaneal eversion: neutral 0-4°, mild 5-10°, significant >10°'},
   'Right Pronation':          {max:4, warn:8,  label:'Calcaneal eversion: neutral 0-4°, mild 5-10°, significant >10°'},
+  'Left Hip Adduction':       {max:8, warn:10, label:'Hip adduction swing: 0-8° normal; >10° = crossover risk (frontal view)'},
+  'Right Hip Adduction':      {max:8, warn:10, label:'Hip adduction swing: 0-8° normal; >10° = crossover risk (frontal view)'},
 };
 
 // ── PROMs Data & Logic ──
@@ -4740,12 +4779,148 @@ function calcAsymmetryPct(leftVal, rightVal, minMagnitude) {
   return Math.round(Math.abs(L - R) / denom * 100);
 }
 
+// ── Compensatory Movement Detection ──────────────────────────────────────────
+// Detects when multiple metrics deviate together in clinically meaningful patterns.
+// Each pattern has: a name, the metrics it checks, the condition, severity, and
+// a clinical explanation. These are the patterns HumanTrak calls out explicitly.
+function detectCompensations(aggregated, movement, strideMetrics) {
+  if(!aggregated || Object.keys(aggregated).length === 0) return [];
+  const isRunning = /running|gait|walk/i.test(movement);
+  const get = (key) => {
+    const v = aggregated[key];
+    if(!v) return null;
+    // Use gaitDisplayVal-style logic: hip uses max, knee uses min
+    if(key.includes('Hip Flexion')) return v.max ?? v.avg;
+    if(key.includes('Knee Flexion')) return v.min ?? v.avg;
+    return v.avg;
+  };
+
+  const patterns = [];
+
+  if(isRunning) {
+    const hipL = get('Left Hip Flexion'), hipR = get('Right Hip Flexion');
+    const kneeL = get('Left Knee Flexion'), kneeR = get('Right Knee Flexion');
+    const trunkLean = get('Trunk Lean');
+    const pelvicDrop = get('Pelvic Drop');
+    const valgusL = get('Left Knee Valgus'), valgusR = get('Right Knee Valgus');
+    const ankleL = get('Left Ankle Dorsiflexion'), ankleR = get('Right Ankle Dorsiflexion');
+    const hipAddL = get('Left Hip Adduction'), hipAddR = get('Right Hip Adduction');
+    const cadence = strideMetrics?.cadenceSpm;
+
+    // Pattern 1: Lumbar compensation for restricted hip flexion
+    // Hip flexion below 35° BUT trunk lean above 15° suggests the runner is
+    // achieving apparent forward lean via lumbar flexion rather than true hip flexion.
+    const hipAvg = (hipL != null && hipR != null) ? (hipL + hipR) / 2 : (hipL ?? hipR);
+    if(hipAvg != null && hipAvg < 38 && trunkLean != null && trunkLean > 14) {
+      patterns.push({
+        severity: 'warn',
+        title: 'Lumbar compensation for hip restriction',
+        metrics: `Hip flexion ${Math.round(hipAvg)}° (low) · Trunk lean ${Math.round(trunkLean)}° (elevated)`,
+        detail: 'Low hip flexion combined with elevated trunk lean suggests the runner may be achieving stride length through lumbar flexion rather than true hip mobility. This increases lumbar disc loading. Assess hip flexor length and mobility before addressing trunk lean in isolation.'
+      });
+    }
+
+    // Pattern 2: Hip abductor weakness cascade
+    // Pelvic drop >5° AND ipsilateral knee valgus — classic Trendelenburg cascade
+    // where weak glute med allows the pelvis to drop, causing the stance-side knee to cave.
+    if(pelvicDrop != null && pelvicDrop > 5) {
+      const valgusElevated = (valgusL != null && valgusL > 8) || (valgusR != null && valgusR > 8);
+      if(valgusElevated) {
+        const side = (valgusL != null && valgusL > (valgusR ?? 0)) ? 'left' : 'right';
+        patterns.push({
+          severity: 'high',
+          title: 'Hip abductor weakness cascade',
+          metrics: `Pelvic drop ${Math.round(pelvicDrop)}° · ${side === 'left' ? 'L' : 'R'} knee valgus ${Math.round(side==='left'?valgusL:valgusR)}°`,
+          detail: `Elevated pelvic drop (${Math.round(pelvicDrop)}°, normal <5°) combined with ${side}-sided knee valgus is consistent with weak hip abductors (gluteus medius). The pelvic drop on the swing side during stance creates an adduction moment at the stance knee. Prioritise hip abductor strengthening before addressing knee alignment.`
+        });
+      }
+    }
+
+    // Pattern 3: Stiff-leg compensation with cadence elevation
+    // Knee flexion below normal (both <85°) AND cadence elevated (>182 spm)
+    // suggests compensatory "shuffling" — shorter, faster steps to avoid the
+    // loading that comes with normal knee flexion in swing.
+    const kneeAvg = (kneeL != null && kneeR != null) ? (kneeL + kneeR) / 2 : (kneeL ?? kneeR);
+    if(kneeAvg != null && kneeAvg < 85 && cadence != null && cadence > 182) {
+      patterns.push({
+        severity: 'warn',
+        title: 'Stiff-leg running with compensatory cadence',
+        metrics: `Knee flexion ${Math.round(kneeAvg)}° avg (normal 90–130°) · Cadence ${cadence} spm (elevated)`,
+        detail: `Restricted swing-phase knee flexion (${Math.round(kneeAvg)}°) with elevated cadence (${cadence} spm) suggests the runner has adopted shorter, quicker steps to reduce the quadriceps demand that comes with normal knee flexion. This is a protective compensation that increases ground reaction force rate. Address knee flexion mobility and eccentric quadriceps strength before reducing cadence.`
+      });
+    }
+
+    // Pattern 4: Ankle restriction driving trunk compensation
+    // Ankle DF below 5° (or absent/plantarflexed) AND trunk lean above 14°
+    // Classic compensation: restricted ankle DF leads to forward trunk lean to
+    // maintain centre of mass over foot during loading.
+    const ankleAvg = (ankleL != null && ankleR != null) ? (ankleL + ankleR) / 2 : (ankleL ?? ankleR);
+    if(ankleAvg != null && ankleAvg < 5 && trunkLean != null && trunkLean > 13) {
+      patterns.push({
+        severity: 'warn',
+        title: 'Trunk compensation for ankle restriction',
+        metrics: `Ankle DF ${Math.round(ankleAvg)}° (restricted) · Trunk lean ${Math.round(trunkLean)}° (elevated)`,
+        detail: `Restricted ankle dorsiflexion combined with elevated trunk lean is a recognised compensation pattern. When the ankle cannot dorsiflex normally during loading, the trunk leans forward to maintain centre of mass over the foot. Verify ankle DF with manual assessment — if confirmed, address calf/soleus mobility before prescribing posture correction.`
+      });
+    }
+
+    // Pattern 5: Contralateral lateral shift — hip adduction crossing midline
+    // Hip adduction > 10° suggests the thigh is crossing the midline during swing
+    // (crossover gait). This correlates with ITBS and patellofemoral pain.
+    if(hipAddL != null && hipAddL > 10) {
+      patterns.push({
+        severity: 'warn',
+        title: 'Left hip crossover pattern',
+        metrics: `Left hip adduction ${Math.round(hipAddL)}° (normal 0–8°)`,
+        detail: `Excessive left hip adduction during swing (${Math.round(hipAddL)}°) indicates the thigh is crossing the body's midline. This narrows the base of support and is associated with IT band syndrome and patellofemoral pain. Address hip abductor strength and gait retraining for foot placement width.`
+      });
+    }
+    if(hipAddR != null && hipAddR > 10) {
+      patterns.push({
+        severity: 'warn',
+        title: 'Right hip crossover pattern',
+        metrics: `Right hip adduction ${Math.round(hipAddR)}° (normal 0–8°)`,
+        detail: `Excessive right hip adduction during swing (${Math.round(hipAddR)}°) indicates the thigh is crossing the body's midline. This is associated with IT band syndrome and patellofemoral pain. Address hip abductor strength and gait retraining for foot placement width.`
+      });
+    }
+  }
+
+  return patterns;
+}
+
+function renderCompensations(aggregated, movement, strideMetrics) {
+  const section = document.getElementById('compensationSection');
+  const body    = document.getElementById('compensationBody');
+  if(!section || !body) return;
+
+  const patterns = detectCompensations(aggregated, movement, strideMetrics);
+  if(patterns.length === 0) { section.style.display = 'none'; return; }
+
+  const sevColor = {
+    high: 'var(--red)', warn: 'var(--amber)', info: 'var(--teal)'
+  };
+  const sevLabel = { high: 'High priority', warn: 'Monitor', info: 'Note' };
+
+  body.innerHTML = patterns.map(p => `
+    <div style="border-left:3px solid ${sevColor[p.severity]||'var(--amber)'};padding:10px 14px;margin-bottom:10px;background:var(--surface);border-radius:0 6px 6px 0;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+        <span style="font-size:.72rem;font-weight:700;color:${sevColor[p.severity]};text-transform:uppercase;letter-spacing:.05em;">${sevLabel[p.severity]||'Monitor'}</span>
+        <span style="font-size:.84rem;font-weight:700;color:var(--navy);">${p.title}</span>
+      </div>
+      <div style="font-size:.75rem;color:var(--teal);font-weight:600;margin-bottom:5px;">${p.metrics}</div>
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.55;">${p.detail}</div>
+    </div>`).join('');
+
+  section.style.display = 'block';
+}
+
 function renderASI(aggregated, movement) {
   const pairs = [
     {label:'Knee Flexion',       left:'Left Knee Flexion',         right:'Right Knee Flexion',         minMag: 10},
     {label:'Hip Flexion',        left:'Left Hip Flexion',          right:'Right Hip Flexion',           minMag: 5},
     {label:'Ankle Dorsiflexion', left:'Left Ankle Dorsiflexion',   right:'Right Ankle Dorsiflexion',    minMag: 5},
-    {label:'Knee Valgus',        left:'Left Knee Valgus',          right:'Right Knee Valgus',           minMag: 3},
+    {label:'Hip Adduction',      left:'Left Hip Adduction',         right:'Right Hip Adduction',          minMag: 3},
+    {label:'Knee Valgus',        left:'Left Knee Valgus',           right:'Right Knee Valgus',            minMag: 3},
     {label:'Pronation',          left:'Left Pronation',             right:'Right Pronation',              minMag: 2},
     // Shoulder excluded for running side-view (arm swing phase mismatch = always asymmetric)
     ...(/running|gait|walk/i.test(movement) && (cameraView === 'side' || cameraView2 !== 'front')
@@ -4885,7 +5060,8 @@ const MOVEMENT_NORMS = {
     'Trunk Lean':              {ideal:[5,15],  warn:20, label:'Forward trunk lean: 5-15° from vertical'},
     'Trunk Lateral Lean':      {max:5, warn:8,          label:'Lateral trunk lean: <5° per step (Trendelenburg)'},
     'Pelvic Drop':             {max:5, warn:8,          label:'Contralateral pelvic drop: <5° (hip abductor strength)'},
-    'Left Knee Valgus':        {max:5, warn:10,         label:'Dynamic valgus: <5° (frontal view — requires front camera)'},
+    'Left Hip Adduction':      {max:8, warn:10,          label:'Hip adduction: 0-8° normal, >10° crossover risk (frontal view)'},
+    'Right Hip Adduction':     {max:8, warn:10,          label:'Hip adduction: 0-8° normal, >10° crossover risk (frontal view)'},
     'Right Knee Valgus':       {max:5, warn:10,         label:'Dynamic valgus: <5° (frontal view — requires front camera)'},
     'Left Pronation':          {max:4, warn:8,           label:'Calcaneal eversion: neutral 0-4°, mild 5-10° (posterior view)'},
     'Right Pronation':         {max:4, warn:8,           label:'Calcaneal eversion: neutral 0-4°, mild 5-10° (posterior view)'},
@@ -5443,7 +5619,28 @@ function renderStrideMetrics(metrics) {
   const badge   = document.getElementById('strideMetricsBadge');
   if(!section||!body||!metrics) return;
 
-  badge.textContent = `${metrics.stridesDetected} strides detected · ${metrics.videoDurationS.toFixed(1)}s clip`;
+  // ── Reliability rating from stride count ─────────────────────────────────
+  // For running, each complete stride is a "trial". Published evidence (Collings 2024,
+  // Dingenen & Staes 2015) shows reliability improves with trial count and plateaus
+  // at ~4 trials for spatiotemporal metrics. In a continuous running clip, 10+ strides
+  // provides equivalent reliability to 3-4 separate trials.
+  const n = metrics.stridesDetected;
+  let reliabilityLabel, reliabilityColor;
+  if(n >= 12) {
+    reliabilityLabel = 'Excellent reliability';
+    reliabilityColor = '#34d399';
+  } else if(n >= 6) {
+    reliabilityLabel = 'Good reliability';
+    reliabilityColor = '#fbbf24';
+  } else if(n >= 3) {
+    reliabilityLabel = 'Acceptable — longer clip improves accuracy';
+    reliabilityColor = '#fb923c';
+  } else {
+    reliabilityLabel = 'Low — capture 10+ strides for reliable results';
+    reliabilityColor = '#f87171';
+  }
+
+  badge.innerHTML = `${metrics.stridesDetected} strides &nbsp;·&nbsp; ${metrics.videoDurationS.toFixed(1)}s &nbsp;·&nbsp; <span style="color:${reliabilityColor};font-weight:700;" title="Each stride = one trial. 10+ strides equivalent to 3–4 separate test trials per Collings et al. 2024.">${reliabilityLabel}</span>`;
   section.style.display = 'block';
 
   const flagColor = (level) =>
@@ -6002,7 +6199,7 @@ async function runAnalysis() {
   // Sagittal-dominant: hip flexion, knee flexion, ankle DF, trunk lean, elbow
   // Frontal-dominant: hip abduction, valgus, pelvic tilt, shoulder abduction
   const SAGITTAL_ANGLES = ['Hip Flexion','Knee Flexion','Ankle Dorsiflexion','Trunk Lean','Elbow Flexion','Shoulder Flexion'];
-  const FRONTAL_ANGLES  = ['Hip Abduction','Knee Valgus','Pelvic Tilt','Pelvic Drop','Trunk Lateral Lean','Shoulder Abduction','Pronation'];
+  const FRONTAL_ANGLES  = ['Hip Abduction','Hip Adduction','Knee Valgus','Pelvic Tilt','Pelvic Drop','Trunk Lateral Lean','Shoulder Abduction','Pronation'];
 
   let mergedAggregated = {...aggregated};
   let mergeNotes = [];
@@ -6081,6 +6278,8 @@ ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Shoulder Flexion: arm forward from body. 0° = arm at side; 90° = arm horizontal forward. NOTE: In running from a SIDE-VIEW camera, shoulder asymmetry reflects timing (one arm forward, one back) not ROM — do NOT flag shoulder asymmetry as clinically significant unless the front/posterior view also shows it.
 - Pelvic Drop: measured from FRONT view as pelvis tilt angle during single-leg stance. Normal <5°. Values >5° suggest weak hip abductors (Trendelenburg sign). Only valid from frontal camera.
 - Knee Valgus (Left/Right): measured from FRONT view as knee deviation from hip-ankle axis. Normal <5°. Values >10° suggest dynamic valgus collapse. Only valid from frontal camera. Side-view knee valgus data is not reliable — ignore if only side view available.
+- Hip Adduction (Left/Right): measured from FRONT view as the medial inclination angle of the thigh (hip→knee) from vertical during swing phase. Normal 0–8° (slight medial inclination is normal and efficient). Values >10° indicate the thigh is crossing the body midline (crossover gait) — associated with IT band syndrome and patellofemoral pain. Only valid from frontal camera.
+- Compensatory patterns: The report may include a "Compensatory Movement Patterns" section flagging when multiple metrics deviate together in clinically meaningful ways (e.g. low hip flexion + high trunk lean = lumbar compensation; pelvic drop + knee valgus = hip abductor weakness cascade; restricted knee flexion + elevated cadence = stiff-leg shuffling). If this section is present, these patterns should anchor your clinical impressions.
 - Knee Flexion: when a stride engine peak value is available (from dense 64-128 frame analysis), it supersedes gallery-frame estimates for the reference leg. The stride engine value is more accurate as it averages across 10-15+ strides.
 ${(() => {
   // Running context from manual inputs
@@ -6383,6 +6582,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     // Render ASI
     if(Object.keys(aggregated).length > 0) {
       renderASI(aggregated, movement);
+      renderCompensations(aggregated, movement, window_strideMetrics);
     }
 
     // Render angle table
@@ -6429,7 +6629,8 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           {label:'Hip Ext at Toe-off',  L:'Left Hip Extension',        R:'Right Hip Extension'},
           {label:'Knee Flexion',         L:'Left Knee Flexion',         R:'Right Knee Flexion'},
           {label:'Knee Extension',       L:'Left Knee Extension',       R:'Right Knee Extension'},
-          {label:'Knee Valgus (frontal)',L:'Left Knee Valgus',          R:'Right Knee Valgus'},
+          {label:'Hip Adduction (frontal)',L:'Left Hip Adduction',       R:'Right Hip Adduction'},
+          {label:'Knee Valgus (frontal)',  L:'Left Knee Valgus',          R:'Right Knee Valgus'},
           {label:'Pronation (posterior)',L:'Left Pronation',             R:'Right Pronation'},
           {label:'Ankle Dorsiflexion',   L:'Left Ankle Dorsiflexion',   R:'Right Ankle Dorsiflexion'},
           {label:'Trunk Lean',           L:'Trunk Lean',                R:null},
@@ -6496,6 +6697,16 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         tableHtml += '</tbody></table>';
         if(window_strideMetrics?.hipExtAtToeoff != null) {
           tableHtml += `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">† Hip Ext at Toe-off: bilateral estimate from stride engine (averaged across ${window_strideMetrics.stridesDetected} strides). Per-side values require 60fps+.</div>`;
+        }
+        // Reliability footnote for running
+        if(window_strideMetrics) {
+          const n = window_strideMetrics.stridesDetected;
+          const iccNote = n >= 12
+            ? `High reliability — ${n} strides averaged (equivalent to 3–4 separate trials)`
+            : n >= 6
+            ? `Moderate reliability — ${n} strides. Capture 12+ strides for maximum ICC.`
+            : `Low reliability — only ${n} strides detected. Extend clip to 10+ seconds for reliable measurements.`;
+          tableHtml += `<div style="font-size:.67rem;color:var(--muted);margin-top:4px;border-top:1px solid var(--border);padding-top:5px;">📊 ${iccNote} (MDC reference: Collings et al. 2024)</div>`;
         }
       } else {
         tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
@@ -6612,7 +6823,8 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     {label:'Knee',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
     {label:'Hip',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
     {label:'Ankle',    left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion',  minMag:5},
-    {label:'Knee Valgus', left:'Left Knee Valgus',     right:'Right Knee Valgus',         minMag:3},
+    {label:'Hip Adduction', left:'Left Hip Adduction',      right:'Right Hip Adduction',        minMag:3},
+    {label:'Knee Valgus',   left:'Left Knee Valgus',        right:'Right Knee Valgus',          minMag:3},
     {label:'Pronation',   left:'Left Pronation',        right:'Right Pronation',            minMag:2},
     // Shoulder asymmetry excluded for running side-view: alternating arm swing means
     // one arm is always forward and one back at any given frame — pure timing artifact.
@@ -6785,6 +6997,8 @@ function buildSessionSnapshot() {
       'Pelvic Drop':         getVal('Pelvic Drop'),
       'Knee Valgus L':       getVal('Left Knee Valgus'),
       'Knee Valgus R':       getVal('Right Knee Valgus'),
+      'Hip Adduction L':     getVal('Left Hip Adduction'),
+      'Hip Adduction R':     getVal('Right Hip Adduction'),
       'Pronation L':         getVal('Left Pronation'),
       'Pronation R':         getVal('Right Pronation'),
     }
@@ -6866,44 +7080,98 @@ function renderComparisonTable() {
   const sA = sessions[iA], sB = sessions[iB];
   if(!sA || !sB) return;
 
-  const keys = Object.keys(sA.metrics).filter(k =>
+  // ── MDC values (Minimal Detectable Change) ────────────────────────────────
+  // Based on VALD/Azure Kinect validation (Collings et al. 2024, J Biomechanics 170:112160)
+  // and published running biomechanics literature.
+  // Changes below MDC are within instrument noise — not clinically meaningful.
+  // Changes ≥ MDC are likely real. Changes ≥ 2×MDC are clearly meaningful.
+  const MDC = {
+    'Hip Flexion L':     8,   // ICC 0.87, MAE ~4.8° → MDC ~8°
+    'Hip Flexion R':     8,
+    'Knee Flexion L':    6,   // Knee flex/ext: highest reliability (ICC 0.93)
+    'Knee Flexion R':    6,
+    'Ankle DF L':        12,  // Ankle: lowest reliability due to distal occlusion
+    'Ankle DF R':        12,
+    'Hip Ext Toe-off':   8,
+    'Peak Knee Flex':    6,
+    'Cadence (spm)':     4,   // Spatiotemporal: high repeatability
+    'Step Asym (%)':     3,
+    'Trunk Lean':        5,
+    'Pelvic Drop':       4,
+    'Knee Valgus L':     5,
+    'Knee Valgus R':     5,
+    'Hip Adduction L':   7,
+    'Hip Adduction R':   7,
+    'Pronation L':       6,
+    'Pronation R':       6,
+    'Quality Score':     1,   // 1 point on 10-pt scale
+  };
+
+  const getMDC = (key) => MDC[key] ?? 5; // default 5° if not specified
+
+  // Three-tier interpretation:
+  //   |change| < MDC          → grey "within noise"
+  //   MDC ≤ |change| < 2×MDC → amber "likely real"
+  //   |change| ≥ 2×MDC       → green/red "meaningful"
+  const changeInterp = (a, b, key, higherIsBetter) => {
+    if(a == null || b == null) return { label:'—', style:'color:var(--muted)', badge:'' };
+    const d = b - a;
+    const mdc = getMDC(key);
+    const abs = Math.abs(d);
+    const sign = d > 0 ? '+' : '';
+    const improved = higherIsBetter ? d > 0 : d < 0;
+    const arrow = improved ? '↑' : '↓';
+
+    if(abs < mdc) {
+      return {
+        label: `${sign}${Math.round(d)} ≈`,
+        style: 'color:var(--muted);font-size:.75rem',
+        badge: `<span title="Within measurement noise (MDC=${mdc})" style="font-size:.65rem;color:var(--muted);display:block">within noise</span>`
+      };
+    } else if(abs < mdc * 2) {
+      return {
+        label: `${arrow} ${sign}${Math.round(d)}`,
+        style: `color:${improved?'#d97706':'#dc2626'};font-weight:600`,
+        badge: `<span title="Likely real change (≥MDC of ${mdc})" style="font-size:.65rem;color:${improved?'#d97706':'#dc2626'};display:block">likely real</span>`
+      };
+    } else {
+      return {
+        label: `${arrow} ${sign}${Math.round(d)}`,
+        style: `color:${improved?'#16a34a':'#dc2626'};font-weight:700`,
+        badge: `<span title="Meaningful change (≥2×MDC of ${mdc})" style="font-size:.65rem;color:${improved?'#16a34a':'#dc2626'};display:block">meaningful</span>`
+      };
+    }
+  };
+
+  const higherBetter = new Set(['Hip Flexion L','Hip Flexion R','Peak Knee Flex','Ankle DF L','Ankle DF R','Quality Score']);
+
+  const keys = Object.keys({...sA.metrics, ...sB.metrics}).filter(k =>
     sA.metrics[k] != null || sB.metrics[k] != null
   );
 
-  const fmt = (v) => v != null ? v + (typeof v === 'number' && !Number.isInteger(v) ? '' : '°') : '—';
-  const deltaColor = (a, b, higherIsBetter=false) => {
-    if(a == null || b == null) return 'color:var(--muted)';
-    const d = b - a;
-    if(Math.abs(d) < 2) return 'color:var(--muted)'; // within noise
-    const improved = higherIsBetter ? d > 0 : d < 0;
-    return improved ? 'color:#16a34a;font-weight:600' : 'color:#dc2626;font-weight:600';
+  const fmtV = (v, k) => {
+    if(v == null) return '—';
+    return v + (k.includes('Cadence') ? '' : k.includes('Asym') ? '%' : '°');
   };
-  const deltaArrow = (a, b, higherIsBetter=false) => {
-    if(a == null || b == null) return '';
-    const d = b - a;
-    if(Math.abs(d) < 2) return '';
-    const improved = higherIsBetter ? d > 0 : d < 0;
-    return (improved ? '↑ ' : '↓ ') + (d > 0 ? '+' : '') + Math.round(d);
-  };
-  // For these metrics, higher value = better
-  const higherBetter = new Set(['Hip Flexion L','Hip Flexion R','Peak Knee Flex','Ankle DF L','Ankle DF R']);
 
   const rows = keys.map(k => {
     const a = sA.metrics[k], b = sB.metrics[k];
-    const hb = higherBetter.has(k);
-    const dColor = deltaColor(a, b, hb);
-    const dArrow = deltaArrow(a, b, hb);
-    const unit = k.includes('spm') || k.includes('Asym') ? '' : '°';
-    const fmtV = (v) => v != null ? v + (k.includes('Cadence') || k.includes('Asym') ? (k.includes('spm')?'':' %') : '°') : '—';
+    const interp = changeInterp(a, b, k, higherBetter.has(k));
+    const mdc = getMDC(k);
     return `<tr>
-      <td style="padding:6px 10px;font-size:.8rem;font-weight:600;color:var(--navy);">${k}</td>
-      <td style="padding:6px 10px;font-size:.8rem;text-align:center;">${fmtV(a)}</td>
-      <td style="padding:6px 10px;font-size:.8rem;text-align:center;">${fmtV(b)}</td>
-      <td style="padding:6px 10px;font-size:.8rem;text-align:center;${dColor}">${dArrow || '—'}</td>
+      <td style="padding:6px 10px;font-size:.8rem;font-weight:600;color:var(--navy);">${k}
+        <span style="font-size:.65rem;font-weight:400;color:var(--muted);margin-left:4px;">MDC ${mdc}</span>
+      </td>
+      <td style="padding:6px 10px;font-size:.8rem;text-align:center;">${fmtV(a,k)}</td>
+      <td style="padding:6px 10px;font-size:.8rem;text-align:center;">${fmtV(b,k)}</td>
+      <td style="padding:6px 10px;font-size:.8rem;text-align:center;${interp.style}">
+        ${interp.label}${interp.badge}
+      </td>
     </tr>`;
   }).join('');
 
-  const scoreRow = (s) => s.score != null
+  const scoreInterp = changeInterp(sA.score, sB.score, 'Quality Score', true);
+  const scoreCell = (s) => s.score != null
     ? `<span style="font-size:.95rem;font-weight:700;color:${s.score>=7?'#16a34a':s.score>=5?'#d97706':'#dc2626'}">${s.score}/10</span>`
     : '<span style="color:var(--muted)">—</span>';
 
@@ -6911,7 +7179,7 @@ function renderComparisonTable() {
     <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
       <thead>
         <tr style="background:var(--navy);color:#fff;">
-          <th style="padding:7px 10px;text-align:left;font-size:.72rem;letter-spacing:.05em;">Metric</th>
+          <th style="padding:7px 10px;text-align:left;font-size:.72rem;letter-spacing:.05em;">Metric <span style="font-weight:400;opacity:.7">(MDC = min detectable change)</span></th>
           <th style="padding:7px 10px;text-align:center;font-size:.72rem;">${sA.date}</th>
           <th style="padding:7px 10px;text-align:center;font-size:.72rem;">${sB.date}</th>
           <th style="padding:7px 10px;text-align:center;font-size:.72rem;">Change</th>
@@ -6919,16 +7187,20 @@ function renderComparisonTable() {
       </thead>
       <tbody>
         <tr style="background:var(--surface);">
-          <td style="padding:6px 10px;font-size:.8rem;font-weight:600;">Quality Score</td>
-          <td style="padding:6px 10px;text-align:center;">${scoreRow(sA)}</td>
-          <td style="padding:6px 10px;text-align:center;">${scoreRow(sB)}</td>
-          <td style="padding:6px 10px;text-align:center;${sA.score!=null&&sB.score!=null?deltaColor(sA.score,sB.score,true):'color:var(--muted)'}">
-            ${sA.score!=null&&sB.score!=null?deltaArrow(sA.score,sB.score,true)||'—':'—'}
+          <td style="padding:6px 10px;font-size:.8rem;font-weight:600;">Quality Score
+            <span style="font-size:.65rem;font-weight:400;color:var(--muted);margin-left:4px;">MDC 1</span>
           </td>
+          <td style="padding:6px 10px;text-align:center;">${scoreCell(sA)}</td>
+          <td style="padding:6px 10px;text-align:center;">${scoreCell(sB)}</td>
+          <td style="padding:6px 10px;text-align:center;${scoreInterp.style}">${scoreInterp.label}${scoreInterp.badge}</td>
         </tr>
         ${rows}
       </tbody>
-    </table>`;
+    </table>
+    <div style="font-size:.71rem;color:var(--muted);margin-top:8px;line-height:1.5;">
+      MDC values based on Collings et al. (2024) <em>J Biomechanics</em> 170:112160 (Azure Kinect validation).
+      ≈ within noise · amber = likely real (≥MDC) · green/red = meaningful (≥2×MDC)
+    </div>`;
 }
 
 function clearSavedSessions() {
