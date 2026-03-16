@@ -1818,17 +1818,22 @@ function startFrameExtraction(file, vid) {
                 }
                 // Third pass: allow phase repeats only as last resort to prevent empty gallery
                 // slots (an empty slot in a dual-view pair is worse than a repeated phase).
-                // Requires minimum gap, prefers frames from the identified stride cycle,
-                // and labels repeated frames with a cycle number to distinguish them.
+                // Even here, we prefer phases not already represented — sort cycle frames
+                // by how "new" their baseId is before picking evenly distributed ones.
                 if(dedupedFrames.length < 8) {
-                  // Pick evenly-distributed frames from the cycle that haven't been used
                   const remainingNeeded = 8 - dedupedFrames.length;
                   const cycleFrames = perFrame.filter(fd =>
                     fd.fi >= cycleFrameMin && fd.fi <= cycleFrameMax && !usedFis.has(fd.fi)
                   );
+                  // Sort: frames with new (unseen) baseIds first, then by position in cycle
+                  cycleFrames.sort((a, b) => {
+                    const aNew = !usedBaseIds.has(asgn[perFrame.indexOf(a)]?._baseId) ? 0 : 1;
+                    const bNew = !usedBaseIds.has(asgn[perFrame.indexOf(b)]?._baseId) ? 0 : 1;
+                    if(aNew !== bNew) return aNew - bNew; // new baseIds first
+                    return perFrame.indexOf(a) - perFrame.indexOf(b); // then by time
+                  });
                   if(cycleFrames.length >= remainingNeeded) {
-                    // Distribute evenly across the cycle
-                    const step = Math.floor(cycleFrames.length / remainingNeeded);
+                    const step = Math.max(1, Math.floor(cycleFrames.length / remainingNeeded));
                     for(let ri = 0; ri < remainingNeeded && dedupedFrames.length < 8; ri++) {
                       const fd = cycleFrames[Math.min(ri * step, cycleFrames.length - 1)];
                       const li = perFrame.indexOf(fd);
@@ -1836,12 +1841,11 @@ function startFrameExtraction(file, vid) {
                         const lbl = asgn[li];
                         usedFis.add(fd.fi);
                         usedFrameNums.add(fd.fi);
-                        // Mark as a coverage frame so gallery doesn't treat it as a key event
+                        if(lbl._baseId) usedBaseIds.add(lbl._baseId);
                         dedupedFrames.push({...frames[fd.fi], phase: {...lbl, _coverage: true}});
                       }
                     }
                   } else {
-                    // Cycle exhausted — use any unused frame with a gap
                     for(const fd of perFrame) {
                       if(dedupedFrames.length >= 8) break;
                       const li = perFrame.indexOf(fd);
@@ -2634,6 +2638,18 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
     //   Toe-off:         ~30° backward
     //   Mid-swing:       steeply forward (foot lifting behind)
     const goodObs = []; // {fi, dx, dy, len}
+    // First pass: collect all plausible high-confidence observations
+    // Also estimate the approximate belt Y (max ankle Y across confident frames)
+    // so we can exclude observations where the ankle is at belt level
+    let approxBeltY = 0;
+    allFrameLandmarks.forEach((lms, fi) => {
+      if(!lms) return;
+      const a = lms[AI];
+      if(a && (a.visibility||0) > 0.55 && a.y > approxBeltY) approxBeltY = a.y;
+    });
+    // Malleolus should be at least 3% of frame height above belt
+    const minMalleolY = approxBeltY > 0 ? approxBeltY - 0.03 : 1.0;
+
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
       const k = lms[KI], a = lms[AI];
@@ -2643,8 +2659,10 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       const dx = a.x - k.x, dy = a.y - k.y;
       const len = Math.hypot(dx, dy);
       if(len < 0.01) return;
-      // Hard reject: ankle can NEVER be above the knee (Y increases downward in image)
-      // dy < 0 means ankle is above knee — anatomically impossible in any gait phase
+      // Reject if ankle is at or below approximate belt level — these are belt-level
+      // artefacts that corrupt medLen by making it too long (knee→belt distance)
+      if(approxBeltY > 0 && a.y > minMalleolY) return;
+      // Hard reject: ankle can NEVER be above the knee
       if(dy < -0.01) return;
       goodObs.push({ fi, dx: dx/len, dy: dy/len, len });
     });
@@ -2820,34 +2838,50 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
     console.log(`[TibiaReproj] ${name}: corrected ${reprojCount}/${N} frames (${goodObs.length} reference obs)`);
   }
 
-  // ── Step 5: Ground-plane Y-floor constraint ──────────────────────────────────
-  // Stance-phase ankles must be near treadmill level. We estimate ground Y from the
-  // highest (most floor-level) well-tracked ankle positions.
+  // ── Step 5: Anatomical height constraint ─────────────────────────────────────
+  // The ground-plane correction previously pushed ankles DOWN toward belt level.
+  // This was wrong: the lateral malleolus (MediaPipe landmark 27/28) is the ankle
+  // JOINT CENTER, which sits 5-8cm ABOVE the floor — never at floor level.
+  // Belt level = where the heel contacts, which is landmark 29/30 (heel), not 27/28.
+  //
+  // Corrected constraint: the ankle must be at least MALLEOLUS_OFFSET above the
+  // detected belt level. If the projection placed it below this line, move it up.
+  // This is rare but prevents perspective-angle artefacts from placing the ankle
+  // literally on the treadmill belt.
+  //
+  // We also keep the inverse constraint: the ankle cannot be unreasonably HIGH
+  // during stance (>30% of frame height above belt = clearly wrong).
   if(isSide) {
-    for(const {ankle:AI, knee:KI, name} of sides) {
-      let groundY = -Infinity;
+    for(const {ankle:AI, heel:HI, knee:KI, name} of sides.map(s => ({...s, heel: s.ankle===27?29:30}))) {
+      // Estimate belt level from heel landmarks (more reliable ground indicator than ankle)
+      let beltY = -Infinity;
       allFrameLandmarks.forEach(lms => {
         if(!lms) return;
-        const a = lms[AI];
-        if(a && (a.visibility||0) > 0.45 && a.y > groundY) groundY = a.y;
+        const h = lms[HI], a = lms[AI];
+        // Use highest (most floor-level) heel OR ankle
+        if(h && (h.visibility||0) > 0.40 && h.y > beltY) beltY = h.y;
+        if(a && (a.visibility||0) > 0.50 && a.y > beltY) beltY = a.y;
       });
-      if(groundY < 0.3) continue;
+      if(beltY < 0.3) continue;
+
+      // Malleolus offset: lateral malleolus is ~5-8cm above floor.
+      // For a typical frame where the runner occupies ~80% of frame height,
+      // 6cm offset ≈ 0.04 of normalised frame height.
+      const MALLEOLUS_MIN_ABOVE_BELT = 0.03; // ankle must be at least 3% frame height above belt
+      const minAnkleY = beltY - MALLEOLUS_MIN_ABOVE_BELT;  // ankle cannot be BELOW this Y
+      const maxAnkleY = beltY - 0.35;  // ankle cannot be more than 35% frame height above belt (that's a knee, not ankle)
 
       allFrameLandmarks.forEach((lms, fi) => {
         if(!lms) return;
-        const a = lms[AI], k = lms[KI];
-        if(!a || !k) return;
+        const a = lms[AI];
+        if(!a) return;
         const ac = a.visibility||0;
-        if(ac > 0.55) return; // confident — trust it
-        // Only push DOWN toward ground (never pull up) — swing ankles are legitimately high
-        const gapAboveGround = groundY - a.y;
-        if(gapAboveGround > 0.10) {
-          const strength = Math.min(1.0, (gapAboveGround - 0.10) / 0.10);
-          lms[AI] = {
-            ...a,
-            y: a.y + strength * gapAboveGround * 0.65,
-            source: (a.source||'') + '+ground',
-          };
+        if(ac > 0.60) return; // high confidence — trust it
+
+        // Push up if ankle is below belt level (anatomically impossible for malleolus)
+        if(a.y > minAnkleY) {
+          lms[AI] = { ...a, y: minAnkleY, source: (a.source||'') + '+above-belt' };
+          console.log(`[AnatomyConstr] ${name} f${fi+1}: ankle below belt (y=${a.y.toFixed(3)}) → raised to ${minAnkleY.toFixed(3)}`);
         }
       });
     }
@@ -4278,7 +4312,11 @@ function extractAngles(lm, view='side') {
     const raw = calcAngle(lKneeP, lAnkleP, lDistalPick.lm);
     if(raw != null) {
       const df = raw - 90;
-      if(df >= -35 && df <= 40) {
+      // Running stance clamp: −15° to +35°
+      // Values below −15° (>15° PF at stance) are tracking artefacts at running speed.
+      // Push-off PF in swing can reach −30° but those frames are excluded at aggregation.
+      // The old −35° clamp was too permissive — allowing artefactual deep PF into averages.
+      if(df >= -15 && df <= 35) {
         angles['Left Ankle Dorsiflexion'] = df;
         angles['_lAnkleSrc'] = lDistalPick.src;
         angles['_lAnkleConf'] = Math.round(combinedConf(lDistalPick.lm) * 100);
@@ -4289,7 +4327,7 @@ function extractAngles(lm, view='side') {
     const raw = calcAngle(rKneeP, rAnkleP, rDistalPick.lm);
     if(raw != null) {
       const df = raw - 90;
-      if(df >= -35 && df <= 40) {
+      if(df >= -15 && df <= 35) {
         angles['Right Ankle Dorsiflexion'] = df;
         angles['_rAnkleSrc'] = rDistalPick.src;
         angles['_rAnkleConf'] = Math.round(combinedConf(rDistalPick.lm) * 100);
@@ -4988,6 +5026,15 @@ function renderASI(aggregated, movement) {
   // Ankle DF values near 0° (e.g. -4° vs +1°) are within 30fps noise (±5°)
   // and produce astronomically high asymmetry percentages from tiny absolute differences.
 
+  const ASYM_NORMAL_RANGES = {
+    'Knee Flexion':    {min:90, max:130},
+    'Hip Flexion':     {min:35, max:65},
+    'Hip Adduction':   {min:0,  max:8},
+    'Knee Valgus':     {min:0,  max:5},
+    'Pronation':       {min:0,  max:4},
+    'Ankle Dorsiflexion': {min:5, max:25},
+  };
+
   const cards = [];
   pairs.forEach(pair => {
     const L = aggregated[pair.left];
@@ -4997,7 +5044,13 @@ function renderASI(aggregated, movement) {
     const rAvg = gaitDisplayVal(pair.right, R, movement);
     const lsi = calcLSI(lAvg, rAvg, pair.minMag);
     const asymPct = calcAsymmetryPct(lAvg, rAvg, pair.minMag);
-    if(lsi === null || asymPct === null) return; // suppressed — values within noise floor
+    if(lsi === null || asymPct === null) return;
+    // Suppress ASI card when both sides are within normal range — only flag when
+    // at least one side is abnormal (prevents normal-but-asymmetric false alarms)
+    const nr = ASYM_NORMAL_RANGES[pair.label];
+    if(nr && lAvg != null && rAvg != null &&
+       lAvg >= nr.min && lAvg <= nr.max &&
+       rAvg >= nr.min && rAvg <= nr.max) return;
 
     const flag = asymPct < 10 ? 'ok' : asymPct < 15 ? 'warn' : 'poor';
     const flagClass = `asi-${flag}`;
@@ -6092,10 +6145,22 @@ function aggregateAngles(allFrameAngles, framePhases) {
   });
   const result = {};
   Object.entries(combined).forEach(([k,vals]) => {
+    // For Ankle Dorsiflexion: use median instead of mean.
+    // The mean is pulled toward outlier frames where the ankle is misplaced.
+    // The median is robust — if half the stance frames have correct readings,
+    // the median will reflect them even if the other half are artefacts.
+    const isAnkleDf = k.includes('Ankle Dorsiflexion');
+    let avg;
+    if(isAnkleDf && vals.length >= 3) {
+      const sorted = [...vals].sort((a,b) => a-b);
+      avg = sorted[Math.floor(sorted.length / 2)]; // true median
+    } else {
+      avg = Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
+    }
     result[k] = {
       min: Math.min(...vals),
       max: Math.max(...vals),
-      avg: Math.round(vals.reduce((a,b)=>a+b,0)/vals.length)
+      avg: Math.round(avg)
     };
   });
   return result;
@@ -6878,6 +6943,24 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   const sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
   const highCount = (r.findings||[]).filter(f=>f.priority==='high').length;
   const isRunningSideView = /running|gait|walk/i.test(movement) && cameraView === 'side';
+  // Per-pair normal ranges for the "both within normal" check.
+  // When both L and R are within normal range, the asymmetry is not clinically significant
+  // regardless of the ratio — e.g. L=3° R=9° hip adduction (both 0-8° normal) → suppress.
+  const NORMAL_RANGES = {
+    'Knee':         {min:90, max:130},  // peak knee flex swing
+    'Hip':          {min:35, max:65},   // peak hip flex swing
+    'Hip Adduction':{min:0,  max:8 },  // frontal thigh angle
+    'Knee Valgus':  {min:0,  max:5 },  // dynamic valgus
+    'Pronation':    {min:0,  max:4 },   // calcaneal eversion
+    'Ankle':        {min:5,  max:25},   // stance DF
+    'Shoulder':     {min:0,  max:50},   // wide range — generally suppress side-view
+  };
+  const bothWithinNormal = (label, lVal, rVal) => {
+    const nr = NORMAL_RANGES[label];
+    if(!nr || lVal == null || rVal == null) return false;
+    return lVal >= nr.min && lVal <= nr.max && rVal >= nr.min && rVal <= nr.max;
+  };
+
   const asiPairsForTile = [
     {label:'Knee',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
     {label:'Hip',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
@@ -6898,7 +6981,10 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     if(!L || !R) return;
     const lDisp = gaitDisplayVal(p.left, L, movement);
     const rDisp = gaitDisplayVal(p.right, R, movement);
-    const a = calcAsymmetryPct(lDisp, rDisp, p.minMag); // minMag suppresses near-zero noise
+    // Suppress asymmetry when both values are within the normal range —
+    // e.g. L=3° R=9° hip adduction (both 0-8° normal) should not be "worst asymmetry"
+    if(bothWithinNormal(p.label, lDisp, rDisp)) return;
+    const a = calcAsymmetryPct(lDisp, rDisp, p.minMag);
     if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; }
   });
   const asiTileFlag = worstAsymPct < 10 ? 'score-good' : worstAsymPct < 15 ? 'score-warn' : 'score-poor';
