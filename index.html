@@ -1536,24 +1536,32 @@ function startFrameExtraction(file, vid) {
                 return peaks;
               };
 
-              const lContacts=localMaxima(lAnkS);
-              const rContacts=localMaxima(rAnkS);
+              // d) Choose reference leg — stabilized with hysteresis margin
+              // ── REF leg stability rule ──────────────────────────────────────
+              // The near leg (typically Left in standard right-side camera setup) is
+              // the default REF. We only switch to Right if Right has MEANINGFULLY
+              // more visible ankle data — at least 20% more frames AND more contacts.
+              // This prevents a single-frame difference from flipping L/R labeling
+              // between sessions of the same patient on the same video setup.
+              const lVis = lAnkS.filter(v=>v!=null).length;
+              const rVis = rAnkS.filter(v=>v!=null).length;
+              const visMargin = 0.20; // R must have >20% more frames than L to become REF
+              const lContacts = localMaxima(lAnkS);
+              const rContacts = localMaxima(rAnkS);
+              const switchToR = (rVis > lVis * (1 + visMargin)) && (rContacts.length > lContacts.length);
+              const REF = switchToR ? 'R' : 'L';
+              const OPP = REF==='L' ? 'R' : 'L';
 
-              // d) Choose reference leg (more visible ankle data)
-              const lVis=lAnkS.filter(v=>v!=null).length;
-              const rVis=rAnkS.filter(v=>v!=null).length;
-              const REF=lVis>=rVis?'L':'R';
-              const OPP=REF==='L'?'R':'L';
-              const refAnkS  =REF==='L'?lAnkS:rAnkS;
-              const refKneeS =REF==='L'?lKneeS:rKneeS;
-              const refHipS  =REF==='L'?lHipS:rHipS;
-              const oppAnkS  =REF==='L'?rAnkS:lAnkS;
-              const oppKneeS =REF==='L'?rKneeS:lKneeS;
-              const oppHipS  =REF==='L'?rHipS:lHipS;
-              const refC     =REF==='L'?lContacts:rContacts;
-              const oppC     =REF==='L'?rContacts:lContacts;
+              const refAnkS  = REF==='L' ? lAnkS  : rAnkS;
+              const refKneeS = REF==='L' ? lKneeS : rKneeS;
+              const refHipS  = REF==='L' ? lHipS  : rHipS;
+              const oppAnkS  = REF==='L' ? rAnkS  : lAnkS;
+              const oppKneeS = REF==='L' ? rKneeS : lKneeS;
+              const oppHipS  = REF==='L' ? rHipS  : lHipS;
+              const refC     = REF==='L' ? lContacts : rContacts;
+              const oppC     = REF==='L' ? rContacts : lContacts;
 
-              console.log(`[GaitFSM v4] REF=${REF} vis=${lVis}L/${rVis}R contacts: ref=[${refC}] opp=[${oppC}]`);
+              console.log(`[GaitFSM v4] REF=${REF} vis=${lVis}L/${rVis}R contacts: L=${lContacts.length} R=${rContacts.length} switchToR=${switchToR}`);
 
               // e) Determine cycle bounds
               // Prefer the best-representative stride from the stride engine if available
@@ -1719,10 +1727,11 @@ function startFrameExtraction(file, vid) {
                     return inCycle;
                   });
 
-                // If no candidates within cycle, allow outside but still no duplicates
+                // If no candidates within cycle, allow outside-cycle frames as fallback
+                // but ONLY if this phase hasn't already been selected (strict dedup)
                 const candsAll = cands.length > 0 ? cands : perFrame
                   .map((fd,li)=>({fd,li,lbl:asgn[li]}))
-                  .filter(c=>c.lbl?._baseId===pid && !usedFis.has(c.fd.fi));
+                  .filter(c => c.lbl?._baseId === pid && !usedFis.has(c.fd.fi) && !usedBaseIds.has(pid));
 
                 if(!candsAll.length) continue;
 
@@ -1762,30 +1771,36 @@ function startFrameExtraction(file, vid) {
                 dedupedFrames.push({...frames[best.fd.fi],phase:enrichedLbl});
               }
 
-              // Pad if needed — only add phases not already represented, spread out
-              if(dedupedFrames.length<8){
-                for(const fd of perFrame){
-                  if(dedupedFrames.length>=8) break;
-                  const li=perFrame.indexOf(fd);
+              // Pad if needed — only add phases not already represented
+              // RULE: usedBaseIds is NEVER bypassed. It is always better to show 6 unique
+              // phases than 8 frames with 2 "Initial Contact" duplicates.
+              if(dedupedFrames.length < 8) {
+                // First pass: unique phases, gap enforced
+                for(const fd of perFrame) {
+                  if(dedupedFrames.length >= 8) break;
+                  const li = perFrame.indexOf(fd);
                   const baseId = asgn[li]?._baseId;
-                  // Don't pad with a phase already represented
-                  if(!usedFis.has(fd.fi)&&asgn[li]&&!tooClose(fd.fi)&&!usedBaseIds.has(baseId)){
+                  if(!usedFis.has(fd.fi) && asgn[li] && !tooClose(fd.fi) && !usedBaseIds.has(baseId)) {
                     usedFis.add(fd.fi);
                     usedFrameNums.add(fd.fi);
                     if(baseId) usedBaseIds.add(baseId);
-                    dedupedFrames.push({...frames[fd.fi],phase:asgn[li]});
+                    dedupedFrames.push({...frames[fd.fi], phase: asgn[li]});
                   }
                 }
-                // Last resort: allow phase repeats only if we still need frames
-                for(const fd of perFrame){
-                  if(dedupedFrames.length>=8) break;
-                  const li=perFrame.indexOf(fd);
-                  if(!usedFis.has(fd.fi)&&asgn[li]){
+                // Second pass: relax gap constraint, but STILL enforce unique phases
+                for(const fd of perFrame) {
+                  if(dedupedFrames.length >= 8) break;
+                  const li = perFrame.indexOf(fd);
+                  const baseId = asgn[li]?._baseId;
+                  if(!usedFis.has(fd.fi) && asgn[li] && !usedBaseIds.has(baseId)) {
                     usedFis.add(fd.fi);
                     usedFrameNums.add(fd.fi);
-                    dedupedFrames.push({...frames[fd.fi],phase:asgn[li]});
+                    if(baseId) usedBaseIds.add(baseId);
+                    dedupedFrames.push({...frames[fd.fi], phase: asgn[li]});
                   }
                 }
+                // Do NOT add a third pass that allows phase repeats.
+                // 6-7 unique phases is a better clinical gallery than 8 with duplicates.
               }
 
               // Sort by source time then replace frames array
@@ -4749,10 +4764,16 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // Float phase detection is now done per-stride inside the strideDetails loop (signal reliability check)
 
   // ── 3. Compute stride-level timing metrics ──
-  // Use the leg with more detected contacts as the reference leg
-  const REF = lContactIdxs.length >= rContactIdxs.length ? 'L' : 'R';
+  // REF leg selection — stabilized with hysteresis margin (mirrors GaitFSM logic)
+  // Only switch to R if it has meaningfully more contacts (>20% margin).
+  // L is default to match standard right-side camera setup where L is near side.
+  const lContactCount = lContactIdxs.length;
+  const rContactCount = rContactIdxs.length;
+  const switchToR_stride = rContactCount > lContactCount * 1.20;
+  const REF = switchToR_stride ? 'R' : 'L';
   const refContacts = REF==='L' ? lContactIdxs : rContactIdxs;
   const oppContacts = REF==='L' ? rContactIdxs : lContactIdxs;
+  console.log(`[StrideEngine] REF=${REF} contacts L=${lContactCount} R=${rContactCount} switchToR=${switchToR_stride}`);
 
   // Convert frame indices to timestamps
   const idxToTime = (idx) => perFrameData[Math.min(idx,N-1)]?.t * videoDuration;
