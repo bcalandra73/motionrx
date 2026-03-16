@@ -4409,35 +4409,42 @@ function extractAngles(lm, view='side') {
         const legDy = ankleLM.y - kneeLM.y;
         const legLen = Math.hypot(legDx, legDy);
         if(legLen < 0.03) return null;
-        // Vector: heel offset from ankle (ankle → heel)
+        // Heel must be reasonably close to ankle (within 1.5× the ankle-knee segment)
+        // and below the ankle Y (heels don't float above the ankle in stance)
         const heelDx = heelLM.x - ankleLM.x;
         const heelDy = heelLM.y - ankleLM.y;
         const heelLen = Math.hypot(heelDx, heelDy);
-        if(heelLen < 0.01) return null;
+        if(heelLen < 0.005) return null;
+        if(heelLen > legLen * 0.8) return null; // heel too far from ankle — misplaced
         // Cross product sign gives eversion direction; magnitude gives angle
         const cross = (legDx / legLen) * (heelDy / heelLen) - (legDy / legLen) * (heelDx / heelLen);
         const dot   = (legDx / legLen) * (heelDx / heelLen) + (legDy / legLen) * (heelDy / heelLen);
-        const angleDeg = Math.round(Math.atan2(Math.abs(cross), dot) * 180 / Math.PI);
-        // cross > 0 in image coords (y↓) typically means eversion (medial heel tilt = pronation)
-        // Store sign for side-specific clinical interpretation
-        return { deg: angleDeg, everted: cross > 0 };
+        const angleDeg = Math.atan2(Math.abs(cross), dot) * 180 / Math.PI;
+        // Physiological clamp: maximum anatomically possible calcaneal eversion is ~20°.
+        // Values beyond this are tracking artefacts — discard entirely.
+        if(angleDeg > 20) return null;
+        return { deg: Math.round(angleDeg), everted: cross > 0 };
       };
 
-      const lKneePost = v(25), lAnkPost = v(27), lHeelPost = vHigh(29);
-      const rKneePost = v(26), rAnkPost = v(28), rHeelPost = vHigh(30);
+      // Use combined confidence (visibility × presence) and require higher threshold
+      // for pronation than for other metrics — heel is the least reliable landmark.
+      const minHeelConf = 0.55; // higher than default vHigh (0.40)
+      const lKneePost = v(25), lAnkPost = v(27);
+      const rKneePost = v(26), rAnkPost = v(28);
+      const lHeelPost = lm[29] && combinedConf(lm[29]) > minHeelConf ? lm[29] : null;
+      const rHeelPost = lm[30] && combinedConf(lm[30]) > minHeelConf ? lm[30] : null;
 
-      const lPron = computePronation(lKneePost, lAnkPost, lHeelPost);
-      const rPron = computePronation(rKneePost, rAnkPost, rHeelPost);
+      // Only compute pronation during stance frames (ankle Y close to ground level).
+      // During swing the heel faces away from camera and the angle is meaningless.
+      // Stance proxy: ankle Y > 0.55 (ankle is in the lower 45% of the frame).
+      const lStance = lAnkPost && lAnkPost.y > 0.55;
+      const rStance = rAnkPost && rAnkPost.y > 0.55;
 
-      // Only report if heel confidence is adequate (posterior heel is usually visible)
-      if(lPron != null && lHeelPost && (lHeelPost.visibility||0) > 0.40) {
-        angles['Left Pronation']  = lPron.deg;
-        angles['_lPronEverted']   = lPron.everted;
-      }
-      if(rPron != null && rHeelPost && (rHeelPost.visibility||0) > 0.40) {
-        angles['Right Pronation'] = rPron.deg;
-        angles['_rPronEverted']   = rPron.everted;
-      }
+      const lPron = lStance ? computePronation(lKneePost, lAnkPost, lHeelPost) : null;
+      const rPron = rStance ? computePronation(rKneePost, rAnkPost, rHeelPost) : null;
+
+      if(lPron != null) { angles['Left Pronation']  = lPron.deg; angles['_lPronEverted'] = lPron.everted; }
+      if(rPron != null) { angles['Right Pronation'] = rPron.deg; angles['_rPronEverted'] = rPron.everted; }
     }
     // More accurate from frontal than sagittal. Trunk lateral deviation angle.
     if(lShoulder && rShoulder && lHipF && rHipF) {
@@ -4804,8 +4811,6 @@ function applyPromsToReport() {
 function calcLSI(leftVal, rightVal, minMagnitude) {
   if(leftVal == null || rightVal == null) return null;
   const L = Math.abs(leftVal), R = Math.abs(rightVal);
-  // Suppress if both values are within measurement noise floor
-  // (e.g. ankle DF at 30fps has ±5° noise — values <5° are not meaningful)
   const noiseFloor = minMagnitude ?? 1;
   if(L < noiseFloor && R < noiseFloor) return null;
   const denom = Math.max(L, R);
@@ -4820,11 +4825,14 @@ function calcAsymmetryPct(leftVal, rightVal, minMagnitude) {
   const meanMag = (L + R) / 2;
   if(meanMag < noiseFloor) return null;
   if(meanMag < 1) return null;
-  // Use max(L,R) as denominator: "% deficit of weaker vs stronger side"
-  // This bounds the result at 100% and prevents inflation when one value is near zero
-  // e.g. L=1°, R=15°: 14/15 = 93% (not 175% which used mean denominator)
+  const diff = Math.abs(L - R);
+  // Additional floor: if the absolute difference is less than the noise floor,
+  // suppress asymmetry entirely regardless of ratio.
+  // Prevents L=4°, R=8° → 50% when both are within normal range and the
+  // absolute difference (4°) is within measurement noise.
+  if(diff < noiseFloor) return null;
   const denom = Math.max(L, R);
-  return Math.round(Math.abs(L - R) / denom * 100);
+  return Math.round(diff / denom * 100);
 }
 
 // ── Compensatory Movement Detection ──────────────────────────────────────────
@@ -4967,7 +4975,7 @@ function renderASI(aggregated, movement) {
     {label:'Knee Flexion',       left:'Left Knee Flexion',         right:'Right Knee Flexion',         minMag: 10},
     {label:'Hip Flexion',        left:'Left Hip Flexion',          right:'Right Hip Flexion',           minMag: 5},
     {label:'Ankle Dorsiflexion', left:'Left Ankle Dorsiflexion',   right:'Right Ankle Dorsiflexion',    minMag: 5},
-    {label:'Hip Adduction',      left:'Left Hip Adduction',         right:'Right Hip Adduction',          minMag: 3},
+    {label:'Hip Adduction',      left:'Left Hip Adduction',         right:'Right Hip Adduction',          minMag: 5},
     {label:'Knee Valgus',        left:'Left Knee Valgus',           right:'Right Knee Valgus',            minMag: 3},
     {label:'Pronation',          left:'Left Pronation',             right:'Right Pronation',              minMag: 2},
     // Shoulder excluded for running side-view (arm swing phase mismatch = always asymmetric)
@@ -5844,8 +5852,11 @@ function renderStrideMetrics(metrics) {
         <span style="font-size:.66rem;">
           Foot landmarks are the hardest to track — they move fastest and are often partially occluded.<br>
           <strong>Lime dots</strong> on skeleton = foot landmarks (verify placement in overlay).<br>
-          <strong>Improve with:</strong> Bright/contrasting footwear, ankle markers (kinesiology tape X), 
-          filming at knee height, 60fps+. Ankle DF >20° asymmetry should always be verified visually.
+          <strong>Improve with:</strong> Bright/contrasting footwear, ankle markers (kinesiology tape X on lateral malleolus), filming at knee height, 60fps+.<br>
+          <strong>240fps slow-mo note:</strong> iPhone 240fps is stored as slow-motion at 30fps playback. 
+          Upload works best when exported at <em>full speed</em> (not slow-mo) — export via Files app or 
+          use a video editor to set playback speed to 8× before uploading. 
+          This gives MediaPipe the native 240 frames/sec density rather than 30fps of slowed motion.
         </span>
       </div>
       <div><strong style="color:var(--navy);">🔬 Upgrade pathways</strong><br>
@@ -6871,7 +6882,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     {label:'Knee',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
     {label:'Hip',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
     {label:'Ankle',    left:'Left Ankle Dorsiflexion', right:'Right Ankle Dorsiflexion',  minMag:5},
-    {label:'Hip Adduction', left:'Left Hip Adduction',      right:'Right Hip Adduction',        minMag:3},
+    {label:'Hip Adduction', left:'Left Hip Adduction',      right:'Right Hip Adduction',        minMag:5},
     {label:'Knee Valgus',   left:'Left Knee Valgus',        right:'Right Knee Valgus',          minMag:3},
     {label:'Pronation',   left:'Left Pronation',        right:'Right Pronation',            minMag:2},
     // Shoulder asymmetry excluded for running side-view: alternating arm swing means
@@ -7585,19 +7596,25 @@ async function exportPDF() {
       y += HEAD_H;
 
       rows.forEach((row, ri) => {
-        // Skip note/caveat rows (colspan rows used for ankle tracking warnings etc.)
-        // These render as garbled text in PDF — render them as a separate note box instead
+        // Detect colspan note rows (ankle tracking warnings, etc.)
         const isNoteRow = row.querySelector('td[colspan]') !== null;
         if(isNoteRow) {
-          const noteText = row.textContent.trim().replace(/\s+/g,' ');
-          if(noteText.length > 5) {
-            if(y + 8 > PAGE_BODY_BOT) newPage();
-            setFill('#fffbf0'); doc.rect(ML, y, CW, 7, 'F');
-            doc.setFont('helvetica','italic'); doc.setFontSize(6.5); setColor(C.amber||'#d97706');
-            doc.text('⚠ ' + noteText.substring(0,120), ML+3, y+4.5, {maxWidth: CW-6});
-            y += 8;
+          // Extract plain text — strip emoji, HTML entities, and extra whitespace
+          let noteText = row.textContent || '';
+          // Remove emoji and non-Latin characters that jsPDF can't render
+          noteText = noteText.replace(/[^\x20-\x7E\xA0-\xFF]/g, ' ');
+          noteText = noteText.replace(/\s+/g, ' ').trim();
+          // Remove leading punctuation artefacts (& ; þ etc.)
+          noteText = noteText.replace(/^[&;þ\s]+/, '').trim();
+          if(noteText.length > 10) {
+            if(y + 10 > PAGE_BODY_BOT) newPage();
+            setFill(C.tealPale); doc.rect(ML, y, CW, 9, 'F');
+            setFill(C.teal); doc.rect(ML, y, 2, 9, 'F');
+            doc.setFont('helvetica','italic'); doc.setFontSize(6.3); setColor(C.teal);
+            doc.text('! ' + noteText.substring(0, 140), ML+5, y+5.5, {maxWidth: CW-8});
+            y += 11;
           }
-          return; // skip normal row rendering
+          return;
         }
 
         // If row would cross footer, start new page and redraw table header
