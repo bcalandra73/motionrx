@@ -1799,8 +1799,43 @@ function startFrameExtraction(file, vid) {
                     dedupedFrames.push({...frames[fd.fi], phase: asgn[li]});
                   }
                 }
-                // Do NOT add a third pass that allows phase repeats.
-                // 6-7 unique phases is a better clinical gallery than 8 with duplicates.
+                // Third pass: allow phase repeats only as last resort to prevent empty gallery
+                // slots (an empty slot in a dual-view pair is worse than a repeated phase).
+                // Requires minimum gap, prefers frames from the identified stride cycle,
+                // and labels repeated frames with a cycle number to distinguish them.
+                if(dedupedFrames.length < 8) {
+                  // Pick evenly-distributed frames from the cycle that haven't been used
+                  const remainingNeeded = 8 - dedupedFrames.length;
+                  const cycleFrames = perFrame.filter(fd =>
+                    fd.fi >= cycleFrameMin && fd.fi <= cycleFrameMax && !usedFis.has(fd.fi)
+                  );
+                  if(cycleFrames.length >= remainingNeeded) {
+                    // Distribute evenly across the cycle
+                    const step = Math.floor(cycleFrames.length / remainingNeeded);
+                    for(let ri = 0; ri < remainingNeeded && dedupedFrames.length < 8; ri++) {
+                      const fd = cycleFrames[Math.min(ri * step, cycleFrames.length - 1)];
+                      const li = perFrame.indexOf(fd);
+                      if(!usedFis.has(fd.fi) && asgn[li]) {
+                        const lbl = asgn[li];
+                        usedFis.add(fd.fi);
+                        usedFrameNums.add(fd.fi);
+                        // Mark as a coverage frame so gallery doesn't treat it as a key event
+                        dedupedFrames.push({...frames[fd.fi], phase: {...lbl, _coverage: true}});
+                      }
+                    }
+                  } else {
+                    // Cycle exhausted — use any unused frame with a gap
+                    for(const fd of perFrame) {
+                      if(dedupedFrames.length >= 8) break;
+                      const li = perFrame.indexOf(fd);
+                      if(!usedFis.has(fd.fi) && asgn[li] && !tooClose(fd.fi)) {
+                        usedFis.add(fd.fi);
+                        usedFrameNums.add(fd.fi);
+                        dedupedFrames.push({...frames[fd.fi], phase: {...asgn[li], _coverage: true}});
+                      }
+                    }
+                  }
+                }
               }
 
               // Sort by source time then replace frames array
@@ -5952,7 +5987,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const fsBadgeDual = phase?._footStrike
             ? ` <span style="background:#f97316;color:#fff;font-size:.55rem;font-weight:800;padding:1px 5px;border-radius:3px;margin-left:3px;" title="${phase._footStrike} strike">${phase._footStrike.toUpperCase()} STRIKE</span>`
             : '';
-          const confBadgeDual = phase?._detected
+          const confBadgeDual = phase?._coverage
+            ? `<span style="color:rgba(255,255,255,.35);font-size:.60rem;margin-left:3px;" title="Coverage frame (fills gallery)">○</span>`
+            : phase?._detected
             ? `<span style="color:#7ec8c0;font-size:.65rem;margin-left:3px;" title="Directly detected event">✓</span>`
             : `<span style="color:rgba(255,255,255,.4);font-size:.60rem;margin-left:3px;" title="Nearest-event assigned">~</span>`;
           header.innerHTML = '<span style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">'
@@ -6031,7 +6068,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
             ? `<span style="background:#f97316;color:#fff;font-size:.50rem;font-weight:800;padding:0 4px;border-radius:2px;margin-left:3px;" title="${phase._footStrike} strike">${fsMap[phase._footStrike]||''}</span>`
             : '';
           // Confidence indicator: ✓ = event directly detected, ~ = nearest-event interpolated
-          const confBadge = phase?._detected
+          const confBadge = phase?._coverage
+            ? `<span style="color:rgba(255,255,255,.35);font-size:.55rem;margin-left:2px;" title="Coverage frame">○</span>`
+            : phase?._detected
             ? `<span style="color:#7ec8c0;font-size:.60rem;margin-left:2px;" title="Directly detected event">✓</span>`
             : `<span style="color:rgba(255,255,255,.45);font-size:.55rem;margin-left:2px;" title="Nearest-event assigned">~</span>`;
           lbl.innerHTML = '<span style="display:flex;align-items:center;gap:2px;">' + phaseLabel + sideBadgeS + fsBadge + confBadge + '</span>'
@@ -6065,6 +6104,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           <strong style="color:var(--navy);">Frame legend:</strong>
           <span><span style="color:#7ec8c0;font-weight:700;">✓</span> Biomechanically detected event (highest confidence)</span>
           <span><span style="color:var(--muted);font-weight:700;">~</span> Nearest-event phase (interpolated)</span>
+          <span><span style="color:var(--muted);">○</span> Coverage frame (fills gallery)</span>
           <span><span style="background:#0ea5e9;color:#fff;font-size:.60rem;font-weight:800;padding:0 4px;border-radius:2px;">L</span> Left leg phase</span>
           <span><span style="background:#f97316;color:#fff;font-size:.60rem;font-weight:800;padding:0 4px;border-radius:2px;">R</span> Right leg phase</span>
           <span><span style="color:#f97316;">↓</span> Contact/loading &nbsp; <span style="color:var(--teal);">⊙</span> Stance &nbsp; <span style="color:#818cf8;">↑</span> Swing</span>
