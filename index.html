@@ -2714,31 +2714,6 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
   }
   return allFrameLandmarks;
 }
-
-  const segments = [
-    { name:'L-femur',  prox:23, dist:25 },
-    { name:'R-femur',  prox:24, dist:26 },
-    { name:'L-tibia',  prox:25, dist:27 },
-    { name:'R-tibia',  prox:26, dist:28 },
-    { name:'L-humerus',prox:11, dist:13 },
-    { name:'R-humerus',prox:12, dist:14 },
-
-// ── Tibia-direction ankle reprojection for running/gait ──────────────────────
-// The #1 MediaPipe failure in treadmill running: the far-side ankle gets placed
-// horizontally along the belt instead of at the end of the tibia. Standard segment
-// length constraint misses this because the distance can be correct while the
-// direction is completely wrong.
-//
-// Strategy:
-//   1. Compute median tibia length from HIGH-CONFIDENCE frames only (both knee+ankle ≥0.55)
-//   2. Compute median tibia direction (unit vector from knee→ankle) from those same frames
-//   3. For any frame where the ankle confidence is LOW (< 0.45) but the knee is GOOD (≥ 0.45):
-//      a. Project a candidate ankle = knee + medianDir * medianTibiaLen
-//      b. If the detected ankle is >15% of frame width away from this projection, replace it
-//   4. Apply ground-plane constraint: the stance-phase ankle Y should not be significantly
-//      ABOVE the detected ground level (lowest reliable ankle Y across all frames)
-//
-// This is a running/gait-specific pass that runs AFTER the general segment constraints.
 function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
   if(allFrameLandmarks.length < 4) return allFrameLandmarks;
   const isSide = (view === 'side');
