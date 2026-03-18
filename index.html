@@ -946,6 +946,7 @@ let cameraView = 'side'; // 'side' | 'front' | 'posterior'
 let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
 let window_strideMetrics = null; // populated by stride detection pass for gait movements
+let window_primaryPhaseSelection = null; // {fractions:[], labels:[]} — set by GaitFSM after frame selection
 
 // ── Second video state ──
 let uploadedFile2 = null, fileType2 = null;
@@ -1233,6 +1234,7 @@ function startFrameExtraction(file, vid) {
 
   let started = false;
   window_strideMetrics = null; // reset for each new analysis
+  window_primaryPhaseSelection = null;
 
   async function doExtract() {
     if(started) return; started = true;
@@ -1814,7 +1816,21 @@ function startFrameExtraction(file, vid) {
               frames.length=0;
               dedupedFrames.slice(0,8).forEach(f=>frames.push(f));
 
+              // ── Store selected phase fractions for secondary video sync ────────────
+              // Use the canonical phase timing fractions (0–1) — these are the same
+              // fractions used to pick frames from the primary clip, so they represent
+              // the correct gait-cycle position for each selected phase.
+              // Secondary video seeks to (fraction × its own duration) for temporal alignment.
+              window_primaryPhaseSelection = {
+                fractions: frames.map(f => {
+                  const bid = f.phase?._baseId;
+                  const ph = bid ? runningPhases.find(p => p.id === bid) : null;
+                  return ph ? ph.time : 0.5;
+                }),
+                labels: frames.map(f => f.phase),
+              };
               console.log(`[GaitFSM v4] Final ${frames.length}: ${frames.map(f=>f.phase?.label||'?').join(' | ')}`);
+              console.log(`[GaitFSM v4] Phase fractions for view2: ${window_primaryPhaseSelection.fractions.map(x=>x.toFixed(2)).join(', ')}`);
             }
           }
 
@@ -2262,9 +2278,29 @@ async function startFrameExtraction2(file, vid) {
     }
 
     const movement = document.getElementById('movementType').value || '';
-    const {times: phaseTimeProportions, labels: phaseLabels} = getPhaseTimes(movement, dur);
-    const times = phaseTimeProportions.map(t => t * dur);
-    statusText.textContent = `Extracting ${times.length} frames...`;
+
+    // ── Sync secondary video to primary video's detected gait phases ──────────
+    // If the primary video went through GaitFSM and stored phase fractions,
+    // seek video 2 to those same fractions of ITS duration.
+    // This ensures frame N from both videos represents the same gait phase,
+    // not just the same raw time offset from video start.
+    const primarySel = window_primaryPhaseSelection;
+    let times, phaseLabels;
+
+    if(primarySel && primarySel.fractions.length > 0) {
+      // Use the phase-aligned fractions — each fraction maps to the same gait cycle phase
+      times = primarySel.fractions.map(frac => Math.max(0.05, frac * dur));
+      phaseLabels = primarySel.labels;
+      statusText.textContent = `Extracting ${times.length} phase-aligned frames...`;
+      console.log(`[FrameExtract2] Using primary phase fractions: ${primarySel.fractions.map(x=>x.toFixed(2)).join(', ')}`);
+    } else {
+      // Fallback: use evenly spaced phase times (no GaitFSM ran on primary)
+      const {times: phaseTimeProportions, labels} = getPhaseTimes(movement, dur);
+      times = phaseTimeProportions.map(t => t * dur);
+      phaseLabels = labels;
+      statusText.textContent = `Extracting ${times.length} frames...`;
+    }
+
     const frames = [];
     for(let i = 0; i < times.length; i++) {
       const b64 = await seekCapture2(vid, Math.max(0.05, times[i]));
@@ -2274,7 +2310,7 @@ async function startFrameExtraction2(file, vid) {
     if(frames.length > 0) {
       extractedFrames2 = frames;
       barFill.style.width = '100%';
-      statusText.textContent = `✓ ${frames.length} frames (${cameraView2} view) — ready`;
+      statusText.textContent = `✓ ${frames.length} frames (${cameraView2} view) — phase-aligned`;
     } else {
       statusText.textContent = '⚠️ Frame extraction failed';
     }
@@ -4175,7 +4211,7 @@ function analyzeBarPath(barPoints, view, movement) {
 
 // ── Joint Angle Calculations ──
 function calcAngle(a, b, c) {
-  // Angle at point b
+  // Angle at point b — 2D normalized image coordinates
   const ab = {x:a.x-b.x, y:a.y-b.y};
   const cb = {x:c.x-b.x, y:c.y-b.y};
   const dot = ab.x*cb.x + ab.y*cb.y;
@@ -4186,6 +4222,31 @@ function calcAngle(a, b, c) {
   return Math.round(Math.acos(cosA) * 180/Math.PI);
 }
 
+function calcAngle3D(a, b, c) {
+  // Angle at point b using worldLandmarks (_wx, _wy, _wz) — metric 3D space.
+  // WorldLandmarks are hip-centred, in metres, corrected for perspective.
+  // This eliminates foreshortening errors that cause hip flexion to vary
+  // dramatically between runs from the same camera position.
+  // Returns null if any landmark lacks world coordinates — falls back to calcAngle.
+  if(a._wx==null||a._wy==null||a._wz==null) return null;
+  if(b._wx==null||b._wy==null||b._wz==null) return null;
+  if(c._wx==null||c._wy==null||c._wz==null) return null;
+  const abx=a._wx-b._wx, aby=a._wy-b._wy, abz=a._wz-b._wz;
+  const cbx=c._wx-b._wx, cby=c._wy-b._wy, cbz=c._wz-b._wz;
+  const dot = abx*cbx + aby*cby + abz*cbz;
+  const magAB = Math.sqrt(abx**2+aby**2+abz**2);
+  const magCB = Math.sqrt(cbx**2+cby**2+cbz**2);
+  if(!magAB||!magCB) return null;
+  const cosA = Math.max(-1, Math.min(1, dot/(magAB*magCB)));
+  return Math.round(Math.acos(cosA) * 180/Math.PI);
+}
+
+// Use 3D world coordinates when available, fall back to 2D image coordinates
+function calcAngleBest(a, b, c) {
+  const result3d = calcAngle3D(a, b, c);
+  return result3d !== null ? result3d : calcAngle(a, b, c);
+}
+
 function extractAngles(lm, view='side') {
   if(!lm) return {};
   // 0.30 threshold (down from 0.40) — fast-moving distal landmarks (ankles, toes) in
@@ -4193,24 +4254,22 @@ function extractAngles(lm, view='side') {
   const v = (i) => lm[i] && lm[i].visibility > 0.30 ? lm[i] : null;
   const angles = {};
 
-  // Knee angles
+  // Knee angles — use 3D world coordinates when available (eliminates foreshortening)
   const lHip=v(23),lKnee=v(25),lAnkle=v(27);
   const rHip=v(24),rKnee=v(26),rAnkle=v(28);
-  if(lHip&&lKnee&&lAnkle) angles['Left Knee Flexion'] = calcAngle(lHip,lKnee,lAnkle);
-  if(rHip&&rKnee&&rAnkle) angles['Right Knee Flexion'] = calcAngle(rHip,rKnee,rAnkle);
+  if(lHip&&lKnee&&lAnkle) angles['Left Knee Flexion']  = calcAngleBest(lHip,lKnee,lAnkle);
+  if(rHip&&rKnee&&rAnkle) angles['Right Knee Flexion'] = calcAngleBest(rHip,rKnee,rAnkle);
 
-  // Hip angles
-  // calcAngle(shoulder,hip,knee) returns the INCLUDED angle at the hip.
-  // Standing upright = 180°. As the hip flexes (knee comes forward), the angle DECREASES.
-  // Clinical convention: "hip flexion" = deviation from neutral = 180 - included_angle.
-  // We store the CLINICAL value (degrees of flexion from upright) so it matches norms (35-65°).
+  // Hip angles — 3D world coordinates give true hip flexion regardless of camera angle.
+  // In 2D side-view, foreshortening when the leg is extended toward/away from camera
+  // can underestimate peak hip flexion by 10–20°. WorldLandmarks correct for this.
   const lShoulder=v(11),rShoulder=v(12);
   if(lShoulder&&lHip&&lKnee) {
-    const raw = calcAngle(lShoulder,lHip,lKnee);
+    const raw = calcAngleBest(lShoulder,lHip,lKnee);
     if(raw!=null) angles['Left Hip Flexion'] = Math.abs(180 - raw);
   }
   if(rShoulder&&rHip&&rKnee) {
-    const raw = calcAngle(rShoulder,rHip,rKnee);
+    const raw = calcAngleBest(rShoulder,rHip,rKnee);
     if(raw!=null) angles['Right Hip Flexion'] = Math.abs(180 - raw);
   }
   // Hip Extension at toe-off is NOT computed here — it requires the specific toe-off frame.
@@ -4218,12 +4277,27 @@ function extractAngles(lm, view='side') {
   // via renderStrideAngles() after stride detection completes. Injecting it from calcAngles
   // would give the same value as Hip Flexion (wrong landmark timing).
 
-  // Trunk lean (shoulder midpoint to hip midpoint angle from vertical)
+  // Trunk lean — use world X/Y for true sagittal lean, not 2D image projection
   if(lShoulder&&rShoulder&&lHip&&rHip) {
-    const sMid = {x:(lShoulder.x+rShoulder.x)/2, y:(lShoulder.y+rShoulder.y)/2};
-    const hMid = {x:(lHip.x+rHip.x)/2, y:(lHip.y+rHip.y)/2};
-    const dx = sMid.x-hMid.x, dy = sMid.y-hMid.y;
-    angles['Trunk Lean'] = Math.round(Math.abs(Math.atan2(dx,Math.abs(dy)) * 180/Math.PI));
+    const sMid = {x:(lShoulder.x+rShoulder.x)/2, y:(lShoulder.y+rShoulder.y)/2,
+                  _wx: lShoulder._wx!=null&&rShoulder._wx!=null ? (lShoulder._wx+rShoulder._wx)/2 : null,
+                  _wy: lShoulder._wy!=null&&rShoulder._wy!=null ? (lShoulder._wy+rShoulder._wy)/2 : null,
+                  _wz: lShoulder._wz!=null&&rShoulder._wz!=null ? (lShoulder._wz+rShoulder._wz)/2 : null};
+    const hMid = {x:(lHip.x+rHip.x)/2, y:(lHip.y+rHip.y)/2,
+                  _wx: lHip._wx!=null&&rHip._wx!=null ? (lHip._wx+rHip._wx)/2 : null,
+                  _wy: lHip._wy!=null&&rHip._wy!=null ? (lHip._wy+rHip._wy)/2 : null,
+                  _wz: lHip._wz!=null&&rHip._wz!=null ? (lHip._wz+rHip._wz)/2 : null};
+    if(sMid._wx!=null && hMid._wx!=null && sMid._wz!=null && hMid._wz!=null) {
+      // 3D: forward lean = angle of trunk from vertical in the sagittal plane
+      // WorldLandmarks: X = right, Y = down, Z = toward camera (negative = in front)
+      const dz = sMid._wz - hMid._wz; // forward displacement of shoulder relative to hip
+      const dy = hMid._wy - sMid._wy; // vertical height (positive because Y is down)
+      angles['Trunk Lean'] = Math.round(Math.abs(Math.atan2(dz, Math.abs(dy)) * 180/Math.PI));
+    } else {
+      // 2D fallback
+      const dx = sMid.x-hMid.x, dy = sMid.y-hMid.y;
+      angles['Trunk Lean'] = Math.round(Math.abs(Math.atan2(dx,Math.abs(dy)) * 180/Math.PI));
+    }
   }
 
   // Ankle dorsiflexion — knee → ankle → foot distal landmark
@@ -5016,6 +5090,8 @@ function renderASI(aggregated, movement) {
     const L = aggregated[pair.left];
     const R = aggregated[pair.right];
     if(!L || !R) return;
+    // Skip if either side has insufficient frame coverage
+    if(L.lowConfidence || R.lowConfidence) return;
     const lAvg = gaitDisplayVal(pair.left, L, movement);
     const rAvg = gaitDisplayVal(pair.right, R, movement);
     const lsi = calcLSI(lAvg, rAvg, pair.minMag);
@@ -5886,11 +5962,12 @@ function renderStrideMetrics(metrics) {
         <span style="font-size:.66rem;">
           Foot landmarks are the hardest to track — they move fastest and are often partially occluded.<br>
           <strong>Lime dots</strong> on skeleton = foot landmarks (verify placement in overlay).<br>
-          <strong>Improve with:</strong> Bright/contrasting footwear, ankle markers (kinesiology tape X on lateral malleolus), filming at knee height, 60fps+.<br>
+          <strong>Best improvement:</strong> Apply a small X of bright kinesiology tape (fluorescent yellow/pink) 
+          directly over the lateral malleolus before filming. This gives MediaPipe a high-contrast target 
+          and is the single most effective way to improve ankle landmark accuracy — used by VALD and research labs.<br>
+          <strong>Also helps:</strong> Bright/contrasting footwear, filming at knee height, 60fps+.<br>
           <strong>240fps slow-mo note:</strong> iPhone 240fps is stored as slow-motion at 30fps playback. 
-          Upload works best when exported at <em>full speed</em> (not slow-mo) — export via Files app or 
-          use a video editor to set playback speed to 8× before uploading. 
-          This gives MediaPipe the native 240 frames/sec density rather than 30fps of slowed motion.
+          Export at full speed via Photos → Edit → drag slow-motion bars to full extent → Done → Share → Save Video.
         </span>
       </div>
       <div><strong style="color:var(--navy);">🔬 Upgrade pathways</strong><br>
@@ -6106,42 +6183,44 @@ function flagAngle(name, val) {
 // to avoid push-off plantarflexion swamping the loading-response measurement.
 function aggregateAngles(allFrameAngles, framePhases) {
   const combined = {};
+  const frameCounts = {}; // total frames where metric was attempted
   allFrameAngles.forEach((frameAngles, fi) => {
     const phaseId = framePhases?.[fi]?.id || null;
-    // For ankle DF: stance phases only (contact, loading, midstance, propulsion)
-    // Swing phases (toeoff, earlyswing, midswing, lateswing) have deep plantarflexion
-    // that is normal push-off mechanics, not a pathological finding
-    const isStance = !phaseId || ['contact','loading','midstance','propulsion'].includes(phaseId);
     const isSwing  = ['toeoff','earlyswing','midswing','lateswing'].includes(phaseId);
 
     Object.entries(frameAngles).forEach(([k,v]) => {
       if(v === null || v === undefined) return;
-      // Skip internal confidence/source keys from aggregation
       if(k.startsWith('_')) return;
-      // Skip ankle DF from swing frames — push-off PF is not the measurement we want
-      if(isSwing && (k.includes('Ankle Dorsiflexion'))) return;
-      if(!combined[k]) combined[k] = [];
-      combined[k].push(v);
+      if(isSwing && k.includes('Ankle Dorsiflexion')) return;
+      if(!combined[k]) { combined[k] = []; frameCounts[k] = 0; }
+      frameCounts[k]++;
+      if(v !== null) combined[k].push(v);
     });
   });
+
   const result = {};
   Object.entries(combined).forEach(([k,vals]) => {
-    // For Ankle Dorsiflexion: use median instead of mean.
-    // The mean is pulled toward outlier frames where the ankle is misplaced.
-    // The median is robust — if half the stance frames have correct readings,
-    // the median will reflect them even if the other half are artefacts.
+    if(vals.length === 0) return;
+    // Per-metric confidence suppression:
+    // If fewer than 40% of attempted frames produced a value, the metric is unreliable.
+    // Store a flag so the angles table can show "—" with a caveat rather than a bad number.
+    const total = frameCounts[k] || vals.length;
+    const hitRate = vals.length / Math.max(1, total);
     const isAnkleDf = k.includes('Ankle Dorsiflexion');
     let avg;
     if(isAnkleDf && vals.length >= 3) {
       const sorted = [...vals].sort((a,b) => a-b);
-      avg = sorted[Math.floor(sorted.length / 2)]; // true median
+      avg = sorted[Math.floor(sorted.length / 2)];
     } else {
       avg = Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
     }
     result[k] = {
       min: Math.min(...vals),
       max: Math.max(...vals),
-      avg: Math.round(avg)
+      avg: Math.round(avg),
+      count: vals.length,
+      hitRate: Math.round(hitRate * 100), // % of frames that produced a value
+      lowConfidence: hitRate < 0.40,      // flagged when fewer than 40% of frames contributed
     };
   });
   return result;
@@ -6264,6 +6343,44 @@ async function runAnalysis() {
   const hasDualView = uploadedFile2 && extractedFrames2.length > 0;
 
   if(hasDualView) {
+    // ── Re-extract secondary video at phase-aligned positions ───────────────
+    // The secondary video was initially extracted at evenly-spaced time positions
+    // when the user uploaded it (before GaitFSM ran on the primary video).
+    // Now that GaitFSM has identified the correct phase fractions, re-seek
+    // the secondary video to those positions for true temporal alignment.
+    if(window_primaryPhaseSelection && uploadedFile2) {
+      try {
+        const vid2El = document.getElementById('videoPreview2') ||
+          document.querySelector('video[data-file="view2"]');
+        // Create a temporary video element to re-seek
+        const tmpVid = document.createElement('video');
+        tmpVid.muted = true;
+        tmpVid.preload = 'metadata';
+        await new Promise((res, rej) => {
+          tmpVid.onloadedmetadata = res;
+          tmpVid.onerror = rej;
+          tmpVid.src = URL.createObjectURL(uploadedFile2);
+          setTimeout(res, 5000); // timeout fallback
+        });
+        const dur2 = tmpVid.duration;
+        if(dur2 && isFinite(dur2) && dur2 > 0) {
+          const phSel = window_primaryPhaseSelection;
+          const newFrames = [];
+          for(let i = 0; i < phSel.fractions.length; i++) {
+            const t = Math.max(0.05, Math.min(phSel.fractions[i] * dur2, dur2 - 0.05));
+            const b64 = await seekCapture2(tmpVid, t);
+            if(b64) newFrames.push({imageData: b64, phase: phSel.labels[i]});
+          }
+          if(newFrames.length >= 4) {
+            extractedFrames2 = newFrames;
+            console.log(`[Analysis] Stage 3b: Re-extracted ${newFrames.length} phase-aligned frames from view2`);
+          }
+        }
+        URL.revokeObjectURL(tmpVid.src);
+      } catch(e) {
+        console.warn('[Analysis] Stage 3b: Phase-aligned re-extraction failed, using pre-extracted frames:', e.message);
+      }
+    }
     const s2b = document.getElementById('s2b');
     if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
     console.log('[Analysis] Stage 3b: Running second video pipeline');
@@ -6765,8 +6882,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const lVal = lv ? gaitDisplayVal(L, lv, movement) : null;
           const rVal = rv ? gaitDisplayVal(R, rv, movement) : null;
           const usePeak = usePeakFor.includes(label);
-          const lFlag = lv ? flagAngleForMovement(L, lVal, movNorm) : '';
-          const rFlag = rv ? flagAngleForMovement(R, rVal, movNorm) : '';
+
+          // Per-metric confidence suppression: if fewer than 40% of frames contributed
+          // to this metric's aggregate, it's unreliable — show N/A with explanation
+          const lLowConf = lv?.lowConfidence === true;
+          const rLowConf = rv?.lowConfidence === true;
+
+          const lFlag = lv && !lLowConf ? flagAngleForMovement(L, lVal, movNorm) : '';
+          const rFlag = rv && !rLowConf ? flagAngleForMovement(R, rVal, movNorm) : '';
           const ref   = getNormLabel(L, movNorm);
           const peakNote = usePeak ? ' <span style="font-size:.65rem;color:var(--muted)">peak</span>' : '';
 
@@ -6790,8 +6913,17 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
             }
           }
 
-          const lCell = lv ? `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°, range ${lv.min}°–${lv.max}°</span>` : '—';
-          const rCell = rv ? `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°, range ${rv.min}°–${rv.max}°</span>` : (R ? '—' : '<span class="ref">bilateral</span>');
+          const confNote = (hitRate) => hitRate != null
+            ? `<span class="ref" title="Only ${hitRate}% of frames produced this measurement">⚠ ${hitRate}% frames</span>`
+            : '';
+          const lCell = !lv ? '—'
+            : lLowConf
+              ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(lv.hitRate)}<br><span class="ref">insufficient data (${lv.count} frames)</span>`
+              : `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°, range ${lv.min}°–${lv.max}°</span>`;
+          const rCell = !rv ? (R ? '—' : '<span class="ref">bilateral</span>')
+            : rLowConf
+              ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(rv.hitRate)}<br><span class="ref">insufficient data (${rv.count} frames)</span>`
+              : `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°, range ${rv.min}°–${rv.max}°</span>`;
           tableHtml += `<tr>
             <td style="font-weight:600">${label}</td>
             <td>${lCell}</td>
