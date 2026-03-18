@@ -1717,161 +1717,92 @@ function startFrameExtraction(file, vid) {
                 return false;
               };
 
-              // Clinical priority order for running — initial contact is #1 (foot strike pattern)
-              // Propulsion added between midstance and toeoff (push-off is high value)
-              const clinicalPriority=['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'];
-              // Track which _baseId labels have already been selected — prevents the same
-              // phase (e.g. "contact") appearing multiple times because there are multiple
-              // contact events across 15 strides all labeled 'contact' in the dense pool.
-              const usedBaseIds = new Set();
+              // ── Gallery frame selection: position-based ────────────────────
+              // Problem with label-search: nearest-event assignment collapses all frames
+              // into however many events the FSM detected (often just 4 on treadmill).
+              // Phases like 'loading', 'midstance', 'propulsion' are never assigned,
+              // so label-search always fails for them → falls through to third pass → duplicates.
+              //
+              // Solution: divide the stride cycle into 8 timed windows using the canonical
+              // phase timing fractions, then pick the best frame from each window.
+              // Label each selected frame with the canonical phase for that window.
+              // This guarantees 8 unique phases regardless of FSM detection count.
+              const runningPhases = PHASE_MAPS['Running'] || [];
+              const phases8 = runningPhases.filter(p =>
+                ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'].includes(p.id)
+              );
+              // If movement doesn't have all 8, use what's available
+              const phaseList = phases8.length >= 6 ? phases8
+                : ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing']
+                    .map(id => gaitPhaseMap[REF]?.find(p=>p.id===id) || {id, label:id, time:0.5, desc:''});
 
-              // Identify the frame index range for the best stride (within cycle bounds)
-              // Candidates are restricted to this range so we don't accidentally pick
-              // a contact frame from a different stride cycle.
-              const cycleFrameMin = cycleStart;
-              const cycleFrameMax = cycleEnd;
+              // Build cycle frame windows
+              // Each phase gets a window from its time to the next phase's time
+              const cycleFrameN = cycleEnd - cycleStart + 1;
+              const usedFisGal = new Set();
 
-              for(const pid of clinicalPriority){
-                if(dedupedFrames.length>=8) break;
-                const cands=perFrame
-                  .map((fd,li)=>({fd,li,lbl:asgn[li]}))
-                  .filter(c=>{
-                    if(c.lbl?._baseId !== pid) return false;
-                    if(usedFis.has(c.fd.fi)) return false;
-                    // Prefer frames within the identified stride cycle
-                    // Allow a 20% overshoot for phases that naturally fall near cycle edges
-                    const inCycle = c.li >= cycleFrameMin && c.li <= cycleFrameMax;
-                    return inCycle;
-                  });
+              for(let pi = 0; pi < phaseList.length && dedupedFrames.length < 8; pi++) {
+                const ph = phaseList[pi];
+                const nextPh = phaseList[pi + 1];
 
-                // If no candidates within cycle, allow outside-cycle frames as fallback
-                // but ONLY if this phase hasn't already been selected (strict dedup)
-                const candsAll = cands.length > 0 ? cands : perFrame
-                  .map((fd,li)=>({fd,li,lbl:asgn[li]}))
-                  .filter(c => c.lbl?._baseId === pid && !usedFis.has(c.fd.fi) && !usedBaseIds.has(pid));
+                // Window: from this phase's time to the next phase's time (or 1.0)
+                const winStart = ph.time;
+                const winEnd   = nextPh ? nextPh.time : 1.05;
+                const winMid   = (winStart + winEnd) / 2; // ideal pick point
 
-                if(!candsAll.length) continue;
+                // Map to frame indices within cycle
+                const fMin = cycleStart + Math.floor(winStart * cycleFrameN);
+                const fMax = cycleStart + Math.ceil(winEnd   * cycleFrameN);
 
-                // Strongly prefer directly detected event frames (from timeline)
-                const detectedCands=candsAll.filter(c=>keySet.has(c.li)&&!tooClose(c.fd.fi));
-                const nearbyKeysCands=candsAll.filter(c=>keySet.has(c.li));
-                const allNonClose=candsAll.filter(c=>!tooClose(c.fd.fi));
-                const pool = detectedCands.length>0 ? detectedCands
-                           : allNonClose.length>0 ? allNonClose
-                           : nearbyKeysCands.length>0 ? nearbyKeysCands
-                           : candsAll;
+                // Gather candidate frames in this window
+                const windowCands = perFrame
+                  .map((fd, li) => ({fd, li}))
+                  .filter(({fd, li}) => li >= fMin && li <= fMax && !usedFisGal.has(fd.fi));
 
-                const idealFrac=gaitPhaseMap[pid]?.time??0.5;
-                const best=pool.reduce((acc,cur)=>{
-                  const acyc=((perFrame[cur.li]?.t??0)-cycleStartT)/cycleDur;
-                  const bcyc=((perFrame[acc.li]?.t??0)-cycleStartT)/cycleDur;
-                  return Math.abs(acyc-idealFrac)<Math.abs(bcyc-idealFrac)?cur:acc;
-                });
+                if(windowCands.length === 0) {
+                  // Window empty — try nearest frame in the whole cycle not yet used
+                  const idealLi = cycleStart + Math.round(winMid * cycleFrameN);
+                  const nearest = perFrame
+                    .map((fd,li) => ({fd,li,dist:Math.abs(li-idealLi)}))
+                    .filter(c => c.li >= cycleStart && c.li <= cycleEnd && !usedFisGal.has(c.fd.fi))
+                    .sort((a,b) => a.dist-b.dist)[0];
+                  if(!nearest) continue;
+                  windowCands.push(nearest);
+                }
 
-                // Enrich Initial Contact frame with foot strike pattern from stride engine
-                let enrichedLbl = best.lbl;
-                if(pid==='contact' && window_strideMetrics?.fsConsensus && window_strideMetrics.fsConsensus !== 'unknown') {
+                // Prefer detected event frames over interpolated
+                const detected = windowCands.filter(c => keySet.has(c.li));
+                const pool = detected.length > 0 ? detected : windowCands;
+
+                // Within pool, pick frame closest to the ideal cycle fraction
+                const idealLi = cycleStart + Math.round(winMid * cycleFrameN);
+                const best = pool.reduce((acc, cur) =>
+                  Math.abs(cur.li - idealLi) < Math.abs(acc.li - idealLi) ? cur : acc
+                );
+
+                // Build label from canonical phase definition
+                const sideStr = REF === 'L' ? 'Left' : 'Right';
+                const phLabel  = phases8.find(p=>p.id===ph.id) || ph;
+                let lbl = {
+                  ...phLabel,
+                  label: `${sideStr} ${phLabel.label}`,
+                  desc:  `${sideStr} leg — ${phLabel.desc}`,
+                  _side: REF,
+                  _baseId: ph.id,
+                  _detected: keySet.has(best.li),
+                };
+
+                // Enrich contact frame with foot strike info
+                if(ph.id === 'contact' && window_strideMetrics?.fsConsensus && window_strideMetrics.fsConsensus !== 'unknown') {
                   const fsMap = {heel:'🦶 Heel Strike', midfoot:'🦶 Midfoot Strike', forefoot:'🦶 Forefoot Strike'};
                   const fsLabel = fsMap[window_strideMetrics.fsConsensus] || '';
-                  enrichedLbl = {...best.lbl,
-                    label: best.lbl.label,
-                    desc: best.lbl.desc + (fsLabel ? ` · ${fsLabel}` : ''),
-                    _footStrike: window_strideMetrics.fsConsensus
-                  };
+                  if(fsLabel) lbl = {...lbl, desc: lbl.desc + ` · ${fsLabel}`, _footStrike: window_strideMetrics.fsConsensus};
                 }
-                // Mark detected vs interpolated frames for gallery display
-                if(asgn[best.li]?._detected) enrichedLbl = {...enrichedLbl, _detected:true};
 
+                usedFisGal.add(best.fd.fi);
                 usedFis.add(best.fd.fi);
                 usedFrameNums.add(best.fd.fi);
-                usedBaseIds.add(pid); // mark this phase as selected — prevents duplicates
-                dedupedFrames.push({...frames[best.fd.fi],phase:enrichedLbl});
-              }
-
-              // Pad if needed — only add phases not already represented
-              // RULE: usedBaseIds is NEVER bypassed. It is always better to show 6 unique
-              // phases than 8 frames with 2 "Initial Contact" duplicates.
-              if(dedupedFrames.length < 8) {
-                // First pass: unique phases, gap enforced
-                for(const fd of perFrame) {
-                  if(dedupedFrames.length >= 8) break;
-                  const li = perFrame.indexOf(fd);
-                  const baseId = asgn[li]?._baseId;
-                  if(!usedFis.has(fd.fi) && asgn[li] && !tooClose(fd.fi) && !usedBaseIds.has(baseId)) {
-                    usedFis.add(fd.fi);
-                    usedFrameNums.add(fd.fi);
-                    if(baseId) usedBaseIds.add(baseId);
-                    dedupedFrames.push({...frames[fd.fi], phase: asgn[li]});
-                  }
-                }
-                // Second pass: relax gap constraint, but STILL enforce unique phases
-                for(const fd of perFrame) {
-                  if(dedupedFrames.length >= 8) break;
-                  const li = perFrame.indexOf(fd);
-                  const baseId = asgn[li]?._baseId;
-                  if(!usedFis.has(fd.fi) && asgn[li] && !usedBaseIds.has(baseId)) {
-                    usedFis.add(fd.fi);
-                    usedFrameNums.add(fd.fi);
-                    if(baseId) usedBaseIds.add(baseId);
-                    dedupedFrames.push({...frames[fd.fi], phase: asgn[li]});
-                  }
-                }
-                // Third pass: fill remaining slots from cycle frames.
-                // Strategy: iterate the sorted array in order (never skip with step),
-                // prefer unseen baseIds first, allow a second appearance of a phase
-                // only after all unique phases have been exhausted.
-                // RULE: Never show more than 2 of any single phase.
-                if(dedupedFrames.length < 8) {
-                  const remainingNeeded = 8 - dedupedFrames.length;
-                  const cycleFrames = perFrame.filter(fd =>
-                    fd.fi >= cycleFrameMin && fd.fi <= cycleFrameMax && !usedFis.has(fd.fi)
-                  );
-                  // Sort: frames with new (unseen) baseIds first, then by time position
-                  cycleFrames.sort((a, b) => {
-                    const ai = perFrame.indexOf(a), bi = perFrame.indexOf(b);
-                    const aNew = !usedBaseIds.has(asgn[ai]?._baseId) ? 0 : 1;
-                    const bNew = !usedBaseIds.has(asgn[bi]?._baseId) ? 0 : 1;
-                    if(aNew !== bNew) return aNew - bNew;
-                    return ai - bi;
-                  });
-
-                  // Track how many times each baseId appears in this pass
-                  const phaseCount = {};
-
-                  // First sub-pass: only pick frames with unseen baseIds
-                  for(const fd of cycleFrames) {
-                    if(dedupedFrames.length >= 8) break;
-                    const li = perFrame.indexOf(fd);
-                    if(!usedFis.has(fd.fi) && asgn[li]) {
-                      const lbl = asgn[li];
-                      const bid = lbl._baseId;
-                      if(bid && usedBaseIds.has(bid)) continue; // skip already-seen phases
-                      usedFis.add(fd.fi);
-                      usedFrameNums.add(fd.fi);
-                      if(bid) usedBaseIds.add(bid);
-                      phaseCount[bid] = (phaseCount[bid]||0) + 1;
-                      dedupedFrames.push({...frames[fd.fi], phase: {...lbl, _coverage: true}});
-                    }
-                  }
-
-                  // Second sub-pass: allow duplicates ONLY if still short, max 2 per phase
-                  if(dedupedFrames.length < 8) {
-                    for(const fd of cycleFrames) {
-                      if(dedupedFrames.length >= 8) break;
-                      const li = perFrame.indexOf(fd);
-                      if(!usedFis.has(fd.fi) && asgn[li]) {
-                        const lbl = asgn[li];
-                        const bid = lbl._baseId;
-                        const count = phaseCount[bid] || 0;
-                        if(count >= 2) continue; // hard cap: max 2 of any phase
-                        usedFis.add(fd.fi);
-                        usedFrameNums.add(fd.fi);
-                        phaseCount[bid] = count + 1;
-                        dedupedFrames.push({...frames[fd.fi], phase: {...lbl, _coverage: true}});
-                      }
-                    }
-                  }
-                }
+                dedupedFrames.push({...frames[best.fd.fi], phase: lbl});
               }
 
               // Sort by source time then replace frames array
