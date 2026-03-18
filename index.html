@@ -947,6 +947,7 @@ let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
 let window_strideMetrics = null; // populated by stride detection pass for gait movements
 let window_primaryPhaseSelection = null; // {fractions:[], labels:[]} — set by GaitFSM after frame selection
+// window._denseAnglesFrames — set on window object by GaitFSM for cross-scope access
 
 // ── Second video state ──
 let uploadedFile2 = null, fileType2 = null;
@@ -1235,6 +1236,7 @@ function startFrameExtraction(file, vid) {
   let started = false;
   window_strideMetrics = null; // reset for each new analysis
   window_primaryPhaseSelection = null;
+  window._denseAnglesFrames = null;
 
   async function doExtract() {
     if(started) return; started = true;
@@ -1733,28 +1735,46 @@ function startFrameExtraction(file, vid) {
               const phases8 = runningPhases.filter(p =>
                 ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing'].includes(p.id)
               );
-              // If movement doesn't have all 8, use what's available
+              // Fallback: build from gaitPhaseMap (keyed by phase ID, not by REF side)
               const phaseList = phases8.length >= 6 ? phases8
                 : ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing']
-                    .map(id => gaitPhaseMap[REF]?.find(p=>p.id===id) || {id, label:id, time:0.5, desc:''});
+                    .map(id => gaitPhaseMap[id] || {id, label:id, time:({'contact':0.04,'loading':0.12,'midstance':0.22,'propulsion':0.36,'toeoff':0.50,'earlyswing':0.62,'midswing':0.75,'lateswing':0.90})[id]||0.5, desc:''});
 
               // Build cycle frame windows
               // Each phase gets a window from its time to the next phase's time
               const cycleFrameN = cycleEnd - cycleStart + 1;
               const usedFisGal = new Set();
 
+              // Build detected event position map: phaseId → frame index within cycle
+              // This anchors windows to actual biomechanical events when available
+              const eventIndexMap = {};
+              for(const ev of timeline) {
+                if(!eventIndexMap[ev.phaseId] && ev.i >= cycleStart && ev.i <= cycleEnd) {
+                  eventIndexMap[ev.phaseId] = ev.i;
+                }
+              }
+
               for(let pi = 0; pi < phaseList.length && dedupedFrames.length < 8; pi++) {
                 const ph = phaseList[pi];
                 const nextPh = phaseList[pi + 1];
 
-                // Window: from this phase's time to the next phase's time (or 1.0)
-                const winStart = ph.time;
-                const winEnd   = nextPh ? nextPh.time : 1.05;
-                const winMid   = (winStart + winEnd) / 2; // ideal pick point
-
-                // Map to frame indices within cycle
-                const fMin = cycleStart + Math.floor(winStart * cycleFrameN);
-                const fMax = cycleStart + Math.ceil(winEnd   * cycleFrameN);
+                // If this phase was directly detected, snap the ideal pick to that frame
+                // and use a narrow ±8% window around it.
+                // For undetected phases (loading, propulsion), use canonical timing window.
+                const detectedIdx = eventIndexMap[ph.id];
+                let idealLi, fMin, fMax;
+                if(detectedIdx != null) {
+                  const halfWin = Math.max(1, Math.round(cycleFrameN * 0.08));
+                  fMin    = Math.max(cycleStart, detectedIdx - halfWin);
+                  fMax    = Math.min(cycleEnd,   detectedIdx + halfWin);
+                  idealLi = detectedIdx;
+                } else {
+                  const winStart = ph.time;
+                  const winEnd   = nextPh ? nextPh.time : 1.05;
+                  fMin    = cycleStart + Math.floor(winStart * cycleFrameN);
+                  fMax    = cycleStart + Math.ceil(winEnd   * cycleFrameN);
+                  idealLi = cycleStart + Math.round(((winStart + (nextPh?.time ?? 1.0)) / 2) * cycleFrameN);
+                }
 
                 // Gather candidate frames in this window
                 const windowCands = perFrame
@@ -1762,8 +1782,7 @@ function startFrameExtraction(file, vid) {
                   .filter(({fd, li}) => li >= fMin && li <= fMax && !usedFisGal.has(fd.fi));
 
                 if(windowCands.length === 0) {
-                  // Window empty — try nearest frame in the whole cycle not yet used
-                  const idealLi = cycleStart + Math.round(winMid * cycleFrameN);
+                  // Window empty — find nearest unused frame in whole cycle
                   const nearest = perFrame
                     .map((fd,li) => ({fd,li,dist:Math.abs(li-idealLi)}))
                     .filter(c => c.li >= cycleStart && c.li <= cycleEnd && !usedFisGal.has(c.fd.fi))
@@ -1776,8 +1795,7 @@ function startFrameExtraction(file, vid) {
                 const detected = windowCands.filter(c => keySet.has(c.li));
                 const pool = detected.length > 0 ? detected : windowCands;
 
-                // Within pool, pick frame closest to the ideal cycle fraction
-                const idealLi = cycleStart + Math.round(winMid * cycleFrameN);
+                // Within pool, pick frame closest to the ideal position
                 const best = pool.reduce((acc, cur) =>
                   Math.abs(cur.li - idealLi) < Math.abs(acc.li - idealLi) ? cur : acc
                 );
@@ -1804,17 +1822,64 @@ function startFrameExtraction(file, vid) {
                 usedFisGal.add(best.fd.fi);
                 usedFis.add(best.fd.fi);
                 usedFrameNums.add(best.fd.fi);
-                dedupedFrames.push({...frames[best.fd.fi], phase: lbl});
+                dedupedFrames.push({...frames[best.fd.fi], phase: lbl, _fi: best.li});
               }
 
-              // Sort by source time then replace frames array
-              dedupedFrames.sort((a,b)=>{
-                const at=perFrame.find(f=>frames.indexOf(a)===f.fi)?.t??0;
-                const bt=perFrame.find(f=>frames.indexOf(b)===f.fi)?.t??0;
-                return at-bt;
+              // Sort by frame index (fi stored during selection)
+              dedupedFrames.sort((a, b) => (a._fi ?? 0) - (b._fi ?? 0));
+              frames.length = 0;
+              dedupedFrames.slice(0, 8).forEach(f => {
+                const {_fi, ...rest} = f; // strip temp _fi before storing
+                frames.push(rest);
               });
-              frames.length=0;
-              dedupedFrames.slice(0,8).forEach(f=>frames.push(f));
+
+              // ── Pose-validate gallery labels ───────────────────────────────────────
+              // The position-based selection assigns labels based on cycle timing windows.
+              // Validate each selected frame against the actual skeleton to catch cases where
+              // the cycle offset is wrong (e.g. a "Loading Response" frame that shows swing).
+              //
+              // Key heuristic: stance phases (contact/loading/midstance/propulsion/toeoff) 
+              // require the ref ankle to be near belt level (high Y in image).
+              // Swing phases require the ref ankle to be elevated (low Y).
+              // If the pose contradicts the label, mark it with a warning in the description.
+              const stancePhases = new Set(['contact','loading','midstance','propulsion','toeoff']);
+              const swingPhases  = new Set(['earlyswing','midswing','lateswing']);
+              const refAnkI = REF === 'L' ? 27 : 28;
+
+              // Compute approximate belt Y from all dense frames
+              let beltYest = 0;
+              quickFused.forEach(lms => {
+                if(!lms) return;
+                const la = lms[27], ra = lms[28];
+                if(la && (la.visibility||0) > 0.5 && la.y > beltYest) beltYest = la.y;
+                if(ra && (ra.visibility||0) > 0.5 && ra.y > beltYest) beltYest = ra.y;
+              });
+
+              frames.forEach((f, fi) => {
+                if(!f.phase?._baseId) return;
+                const bid = f.phase._baseId;
+                const isStanceLabel = stancePhases.has(bid);
+                const isSwingLabel  = swingPhases.has(bid);
+                if(!isStanceLabel && !isSwingLabel) return;
+
+                // Find the dense frame for this gallery frame
+                const denseIdx = Math.round((window_primaryPhaseSelection.fractions[fi] ?? 0.5) * (quickFused.length - 1));
+                const lms = quickFused[Math.min(denseIdx, quickFused.length - 1)];
+                if(!lms) return;
+                const ank = lms[refAnkI];
+                if(!ank || (ank.visibility||0) < 0.3) return;
+
+                const ankleIsLow    = beltYest > 0 && ank.y > beltYest - 0.08; // near ground
+                const ankleIsHigh   = beltYest > 0 && ank.y < beltYest - 0.20; // clearly elevated
+
+                if(isStanceLabel && ankleIsHigh) {
+                  // Label says stance but ankle is elevated — likely swing
+                  f.phase = {...f.phase, desc: f.phase.desc + ' ⚠ pose mismatch — verify', _poseConflict: true};
+                } else if(isSwingLabel && ankleIsLow) {
+                  // Label says swing but ankle is grounded — likely stance
+                  f.phase = {...f.phase, desc: f.phase.desc + ' ⚠ pose mismatch — verify', _poseConflict: true};
+                }
+              });
 
               // ── Store selected phase fractions for secondary video sync ────────────
               // Use the canonical phase timing fractions (0–1) — these are the same
@@ -1831,6 +1896,16 @@ function startFrameExtraction(file, vid) {
               };
               console.log(`[GaitFSM v4] Final ${frames.length}: ${frames.map(f=>f.phase?.label||'?').join(' | ')}`);
               console.log(`[GaitFSM v4] Phase fractions for view2: ${window_primaryPhaseSelection.fractions.map(x=>x.toFixed(2)).join(', ')}`);
+
+              // ── Store dense landmarks for angle computation ────────────────────────
+              // extractAngles only runs on the 8 gallery frames, missing the true peak
+              // hip/knee flexion moments. Store all dense fused landmarks + their phase
+              // assignments so the main analysis loop can compute angles on 64-128 frames
+              // instead of just 8, giving correct .max/.min for aggregation.
+              window._denseAnglesFrames = quickFused.map((lms, fi) => ({
+                landmarks: lms,
+                phase: asgn[fi] || null,
+              }));
             }
           }
 
@@ -2506,6 +2581,8 @@ function fuseLandmarks(mpLandmarks, mnNormalized, view='side') {
           x: (mpLM.x*wMP + mnLM.x*wMN) / wSum,
           y: (mpLM.y*wMP + mnLM.y*wMN) / wSum,
           visibility: Math.max(mpConf, mnConf),
+          // Preserve world coords from MP — MoveNet doesn't provide them
+          _wx: mpLM._wx ?? null, _wy: mpLM._wy ?? null, _wz: mpLM._wz ?? null,
           source: 'fused', agreement: dist
         };
       } else {
@@ -2515,11 +2592,15 @@ function fuseLandmarks(mpLandmarks, mnNormalized, view='side') {
           : (mpConf >= mnConf ? {...mpLM} : {...mnLM});         // side: higher confidence wins
         winner.disagreement = dist;
         winner.source = isFrontal ? 'mn-frontal' : (mpConf >= mnConf ? 'mp-won' : 'mn-won');
+        // Always preserve world coords from MP (MoveNet doesn't have them)
+        if(!winner._wx && mpLM._wx != null) { winner._wx = mpLM._wx; winner._wy = mpLM._wy; winner._wz = mpLM._wz; }
         fused[mpIdx] = winner;
         if(dist > 0.12) console.log(`[Fusion] LM${mpIdx}: disagree by ${(dist*100).toFixed(1)}%`);
       }
     } else if(mnConf > mpConf + 0.15) {
-      fused[mpIdx] = {...mnLM, source:'mn-override'};
+      // MoveNet override — still preserve world coords from MP
+      fused[mpIdx] = {...mnLM, source:'mn-override',
+        _wx: mpLM._wx ?? null, _wy: mpLM._wy ?? null, _wz: mpLM._wz ?? null};
     }
   }
 
@@ -2824,8 +2905,11 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
           visibility: Math.min(kc * 0.60, 0.42),
           presence: Math.min(kc * 0.60, 0.42),
           source: `tibia-projected(${reason})`,
+          // Preserve world coords from knee as best estimate for projected ankle
+          _wx: k._wx ?? null,
+          _wy: k._wy ?? null,
+          _wz: worldKneeZ ?? null,
         };
-        if(a?._wz !== undefined) lms[AI]._wz = (worldKneeZ ?? 0);
         reprojCount++;
         if(aboveKnee || tooFarFromKnee || tooCloseToKnee || nearHip) {
           console.log(`[TibiaReproj] ${name} f${fi+1}: HARD REJECT (${reason}) → reprojected`);
@@ -5631,19 +5715,66 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // Step length asymmetry (from horizontal ankle offset at contact, average across strides)
   // Find opposite leg contacts within each stride for step symmetry
   const stepLengthAsym = (() => {
-    const stepsL = [], stepsR = [];
-    // Use detected contacts for both legs
-    lContactIdxs.forEach(ci => {
-      const x = perFrameData[ci]?.lAnkX;
-      if(x!=null) stepsL.push(x);
+    // On a treadmill, step length asymmetry is best measured from STEP TIMING
+    // (time between alternating foot contacts), not spatial X position.
+    // Spatial X on a treadmill reflects foot placement width, not step length.
+    //
+    // Method: for each stride cycle, measure:
+    //   Left step time  = time from REF contact to next OPP contact
+    //   Right step time = time from OPP contact to next REF contact
+    // Asymmetry = |mean(L) - mean(R)| / mean(both) * 100
+    //
+    // This matches the clinical definition and is treadmill-appropriate.
+    if(strideCycles.length < 2) return null;
+
+    const leftStepTimes  = [];
+    const rightStepTimes = [];
+
+    strideCycles.forEach(sc => {
+      const refT = idxToTime(sc.startIdx);
+      const endT = idxToTime(sc.endIdx);
+
+      // Find the first OPP contact within this stride
+      const oppArr = REF==='L' ? rContactIdxs : lContactIdxs;
+      const oppInStride = oppArr
+        .map(idx => idxToTime(idx))
+        .filter(t => t > refT && t < endT);
+
+      if(oppInStride.length === 0) return;
+      const firstOpp = oppInStride[0];
+
+      const stepTimeA = firstOpp - refT;       // REF→OPP step
+      const stepTimeB = endT - firstOpp;       // OPP→REF step
+
+      // Sanity: each step should be 30-70% of stride
+      const strideDur = endT - refT;
+      const ratioA = stepTimeA / strideDur;
+      const ratioB = stepTimeB / strideDur;
+      if(ratioA < 0.25 || ratioA > 0.75) return;
+
+      if(REF === 'L') {
+        leftStepTimes.push(stepTimeA);
+        rightStepTimes.push(stepTimeB);
+      } else {
+        rightStepTimes.push(stepTimeA);
+        leftStepTimes.push(stepTimeB);
+      }
     });
-    rContactIdxs.forEach(ci => {
-      const x = perFrameData[ci]?.rAnkX;
-      if(x!=null) stepsR.push(x);
-    });
-    if(!stepsL.length || !stepsR.length) return null;
-    const lm = mean(stepsL), rm = mean(stepsR);
-    return Math.round(Math.abs(lm - rm) / ((lm + rm) / 2) * 100);
+
+    if(leftStepTimes.length < 2 || rightStepTimes.length < 2) {
+      // Fall back to spatial method if timing insufficient
+      const stepsL = [], stepsR = [];
+      lContactIdxs.forEach(ci => { const x = perFrameData[ci]?.lAnkX; if(x!=null) stepsL.push(x); });
+      rContactIdxs.forEach(ci => { const x = perFrameData[ci]?.rAnkX; if(x!=null) stepsR.push(x); });
+      if(!stepsL.length || !stepsR.length) return null;
+      const lm = mean(stepsL), rm = mean(stepsR);
+      return Math.round(Math.abs(lm - rm) / ((lm + rm) / 2) * 100);
+    }
+
+    const lMean = mean(leftStepTimes);
+    const rMean = mean(rightStepTimes);
+    if(lMean <= 0 || rMean <= 0) return null;
+    return Math.round(Math.abs(lMean - rMean) / ((lMean + rMean) / 2) * 100);
   })();
 
   // ── 6. Find best representative stride (median duration) ──
@@ -6187,11 +6318,25 @@ function aggregateAngles(allFrameAngles, framePhases) {
   allFrameAngles.forEach((frameAngles, fi) => {
     const phaseId = framePhases?.[fi]?.id || null;
     const isSwing  = ['toeoff','earlyswing','midswing','lateswing'].includes(phaseId);
+    const isStance = ['contact','loading','midstance','propulsion'].includes(phaseId);
 
     Object.entries(frameAngles).forEach(([k,v]) => {
       if(v === null || v === undefined) return;
       if(k.startsWith('_')) return;
+      // Ankle DF: stance frames only (swing push-off PF is not the clinical measurement)
       if(isSwing && k.includes('Ankle Dorsiflexion')) return;
+      // Hip Flexion: swing frames only for .max peak.
+      // During stance the hip is near-neutral (10-20°). Including stance frames
+      // depresses .max and makes peak hip flexion appear lower than it really is.
+      // We still collect stance values for .avg but tag them for gaitDisplayVal.
+      if(isStance && (k === 'Left Hip Flexion' || k === 'Right Hip Flexion')) {
+        // Store separately as stance hip values — not counted toward swing peak
+        const stanceKey = k + '__stance';
+        if(!combined[stanceKey]) { combined[stanceKey] = []; frameCounts[stanceKey] = 0; }
+        frameCounts[stanceKey]++;
+        combined[stanceKey].push(v);
+        return; // don't add to main pool (which .max reads from)
+      }
       if(!combined[k]) { combined[k] = []; frameCounts[k] = 0; }
       frameCounts[k]++;
       if(v !== null) combined[k].push(v);
@@ -6201,6 +6346,8 @@ function aggregateAngles(allFrameAngles, framePhases) {
   const result = {};
   Object.entries(combined).forEach(([k,vals]) => {
     if(vals.length === 0) return;
+    // Skip internal stance-tagged keys (used only for hip flexion phase separation)
+    if(k.endsWith('__stance')) return;
     // Per-metric confidence suppression:
     // If fewer than 40% of attempted frames produced a value, the metric is unreliable.
     // Store a flag so the angles table can show "—" with a caveat rather than a bad number.
@@ -6329,8 +6476,22 @@ async function runAnalysis() {
 
   // Step 3: Aggregate angles — pass frame phases so ankle DF uses stance frames only
   console.log('[Analysis] Stage 3: Aggregating angles, allAngles:', allAngles.length);
-  const framePhases = extractedFrames.map(f => f.phase || null);
+
+  // ── Use dense frames for angle aggregation when available ─────────────────
+  // For running: GaitFSM computed MediaPipe on 64-128 dense frames and stored them.
+  // Using these gives correct .max (peak hip flexion) and .min (peak knee flexion)
+  // rather than the max/min across only 8 gallery frames.
+  if(window._denseAnglesFrames && window._denseAnglesFrames.length > allAngles.length && /running|gait|walk/i.test(movement)) {
+    const denseAngles = window._denseAnglesFrames
+      .filter(f => f.landmarks)
+      .map(f => extractAngles(f.landmarks, cameraView));
+    const densePhases = window._denseAnglesFrames.map(f => f.phase || null);
+    aggregated = aggregateAngles(denseAngles, densePhases);
+    console.log(`[Analysis] Stage 3: Using ${denseAngles.length} dense frames for angle aggregation (was ${allAngles.length})`);
+  } else {
+    const framePhases = extractedFrames.map(f => f.phase || null);
     aggregated = allAngles.length > 0 ? aggregateAngles(allAngles, framePhases) : {};
+  }
   const angleLines = Object.entries(aggregated).map(([k,v]) =>
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
@@ -6350,20 +6511,23 @@ async function runAnalysis() {
     // the secondary video to those positions for true temporal alignment.
     if(window_primaryPhaseSelection && uploadedFile2) {
       try {
-        const vid2El = document.getElementById('videoPreview2') ||
-          document.querySelector('video[data-file="view2"]');
-        // Create a temporary video element to re-seek
         const tmpVid = document.createElement('video');
         tmpVid.muted = true;
-        tmpVid.preload = 'metadata';
-        await new Promise((res, rej) => {
-          tmpVid.onloadedmetadata = res;
-          tmpVid.onerror = rej;
-          tmpVid.src = URL.createObjectURL(uploadedFile2);
-          setTimeout(res, 5000); // timeout fallback
+        tmpVid.preload = 'auto'; // auto needed for seekability, not just 'metadata'
+        const objUrl = URL.createObjectURL(uploadedFile2);
+        tmpVid.src = objUrl;
+
+        // Wait for canplay (seekable) rather than loadedmetadata (duration may be 0)
+        await new Promise((res) => {
+          tmpVid.oncanplay = res;
+          tmpVid.oncanplaythrough = res;
+          tmpVid.onloadeddata = res;
+          tmpVid.onerror = res; // don't reject — fall through gracefully
+          setTimeout(res, 8000); // hard timeout
         });
-        const dur2 = tmpVid.duration;
-        if(dur2 && isFinite(dur2) && dur2 > 0) {
+
+        const dur2 = isFinite(tmpVid.duration) && tmpVid.duration > 0 ? tmpVid.duration : null;
+        if(dur2) {
           const phSel = window_primaryPhaseSelection;
           const newFrames = [];
           for(let i = 0; i < phSel.fractions.length; i++) {
@@ -6373,12 +6537,12 @@ async function runAnalysis() {
           }
           if(newFrames.length >= 4) {
             extractedFrames2 = newFrames;
-            console.log(`[Analysis] Stage 3b: Re-extracted ${newFrames.length} phase-aligned frames from view2`);
+            console.log(`[Analysis] Stage 3b: Re-extracted ${newFrames.length} phase-aligned frames from view2 (dur=${dur2.toFixed(2)}s)`);
           }
         }
-        URL.revokeObjectURL(tmpVid.src);
+        URL.revokeObjectURL(objUrl);
       } catch(e) {
-        console.warn('[Analysis] Stage 3b: Phase-aligned re-extraction failed, using pre-extracted frames:', e.message);
+        console.warn('[Analysis] Stage 3b: Phase-aligned re-extraction failed:', e.message);
       }
     }
     const s2b = document.getElementById('s2b');
@@ -6673,13 +6837,16 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const fsBadgeDual = phase?._footStrike
             ? ` <span style="background:#f97316;color:#fff;font-size:.55rem;font-weight:800;padding:1px 5px;border-radius:3px;margin-left:3px;" title="${phase._footStrike} strike">${phase._footStrike.toUpperCase()} STRIKE</span>`
             : '';
+          const poseConflictBadge = phase?._poseConflict
+            ? ` <span style="background:#dc2626;color:#fff;font-size:.55rem;font-weight:800;padding:1px 5px;border-radius:3px;margin-left:3px;" title="Skeleton pose inconsistent with phase label — verify manually">VERIFY</span>`
+            : '';
           const confBadgeDual = phase?._coverage
             ? `<span style="color:rgba(255,255,255,.35);font-size:.60rem;margin-left:3px;" title="Coverage frame (fills gallery)">○</span>`
             : phase?._detected
             ? `<span style="color:#7ec8c0;font-size:.65rem;margin-left:3px;" title="Directly detected event">✓</span>`
             : `<span style="color:rgba(255,255,255,.4);font-size:.60rem;margin-left:3px;" title="Nearest-event assigned">~</span>`;
           header.innerHTML = '<span style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;">'
-            + phaseLabel + dirIcon + sideBadge + fsBadgeDual + confBadgeDual
+            + phaseLabel + dirIcon + sideBadge + fsBadgeDual + poseConflictBadge + confBadgeDual
             + (phaseDesc ? '<span style="font-weight:400;opacity:.7;font-size:.63rem;display:block;width:100%;margin-top:1px;text-transform:none;letter-spacing:0;">' + phaseDesc + '</span>' : '')
             + '</span><span class="phase-badge phase-' + phaseId + '" style="flex-shrink:0;">#' + (i+1) + '</span>';
           group.appendChild(header);
@@ -6753,13 +6920,16 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const fsBadge = phase?._footStrike
             ? `<span style="background:#f97316;color:#fff;font-size:.50rem;font-weight:800;padding:0 4px;border-radius:2px;margin-left:3px;" title="${phase._footStrike} strike">${fsMap[phase._footStrike]||''}</span>`
             : '';
-          // Confidence indicator: ✓ = event directly detected, ~ = nearest-event interpolated
+          // Confidence indicator and pose-conflict badge
+          const poseConflictBadgeS = phase?._poseConflict
+            ? `<span style="background:#dc2626;color:#fff;font-size:.50rem;font-weight:800;padding:0 4px;border-radius:2px;margin-left:2px;" title="Pose inconsistent with label — verify">!</span>`
+            : '';
           const confBadge = phase?._coverage
             ? `<span style="color:rgba(255,255,255,.35);font-size:.55rem;margin-left:2px;" title="Coverage frame">○</span>`
             : phase?._detected
             ? `<span style="color:#7ec8c0;font-size:.60rem;margin-left:2px;" title="Directly detected event">✓</span>`
             : `<span style="color:rgba(255,255,255,.45);font-size:.55rem;margin-left:2px;" title="Nearest-event assigned">~</span>`;
-          lbl.innerHTML = '<span style="display:flex;align-items:center;gap:2px;">' + phaseLabel + sideBadgeS + fsBadge + confBadge + '</span>'
+          lbl.innerHTML = '<span style="display:flex;align-items:center;gap:2px;">' + phaseLabel + sideBadgeS + fsBadge + poseConflictBadgeS + confBadge + '</span>'
             + '<span class="phase-badge phase-' + phaseId + '">' + (phaseId === 'frame' ? '#'+(i+1) : '#'+(i+1)) + '</span>';
           card.appendChild(imgWrap);
           card.appendChild(lbl);
@@ -7883,7 +8053,7 @@ async function exportPDF() {
         {label:'Foot Strike',      value: sm.fsConsensus.charAt(0).toUpperCase()+sm.fsConsensus.slice(1), sub:'consensus pattern'},
       ];
       if(sm.peakKneeFlex!=null)    kpiDefs.push({label:'Peak Knee Flex', value:`${sm.peakKneeFlex}°`, sub:'swing phase'});
-      if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step length'});
+      if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step timing'});
       if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
       if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'! overstriding':sm.overstrideFlag==='understride'?'! understriding':'optimal range'});
 
