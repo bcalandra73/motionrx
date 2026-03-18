@@ -2550,90 +2550,124 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
     { name:'R-tibia',  prox:26, dist:28 },
     { name:'L-humerus',prox:11, dist:13 },
     { name:'R-humerus',prox:12, dist:14 },
-    // Foot segments — tight tolerances because foot bones are RIGID.
-    // The foot length doesn't change during running — only the angle changes.
-    // Side view: ankle→heel should point backward and down; heel→toe forward and slightly down.
-    // Tight tolerance: ±22% of median (vs the old ±60–80% which was nearly useless).
-    { name:'L-foot-heel', prox:27, dist:29, tolLo:0.78, tolHi:1.22, rigid:true },
-    { name:'R-foot-heel', prox:28, dist:30, tolLo:0.78, tolHi:1.22, rigid:true },
-    { name:'L-foot-toe',  prox:27, dist:31, tolLo:0.75, tolHi:1.28, rigid:true },
-    { name:'R-foot-toe',  prox:28, dist:32, tolLo:0.75, tolHi:1.28, rigid:true },
+    // Foot segments — anchored to tibia length (see below), direction-constrained
+    { name:'L-foot-heel', prox:27, dist:29, rigid:true, tibiaKey:'L-tibia', tibiaRatio:0.42, tolLo:0.78, tolHi:1.22 },
+    { name:'R-foot-heel', prox:28, dist:30, rigid:true, tibiaKey:'R-tibia', tibiaRatio:0.42, tolLo:0.78, tolHi:1.22 },
+    { name:'L-foot-toe',  prox:27, dist:31, rigid:true, tibiaKey:'L-tibia', tibiaRatio:1.02, tolLo:0.75, tolHi:1.28 },
+    { name:'R-foot-toe',  prox:28, dist:32, rigid:true, tibiaKey:'R-tibia', tibiaRatio:1.02, tolLo:0.75, tolHi:1.28 },
   ];
 
   const nFrames = allFrameLandmarks.length;
   if(nFrames < 3) return allFrameLandmarks;
 
-  // ── For rigid foot segments: learn median direction as well as length ──────
-  // The ankle→heel direction in side view is constrained: the heel is always
-  // POSTERIOR (behind) and at/below the ankle. We learn the median direction
-  // from the best frames, then enforce it when the landmark is misplaced.
-  const footDirCache = {}; // segName → {medDx, medDy, medLen}
+  // ── Step A: Learn tibia lengths first ─────────────────────────────────────
+  // Foot segment lengths are anchored to tibia length via anatomical ratios.
+  // This prevents corrupted heel/toe data from inflating the foot medLen.
+  // Ratios (adult running anatomy):
+  //   Ankle→heel (calcaneus projected): ~42% of tibia
+  //   Ankle→toe (full foot projection): ~102% of tibia
+  const tibiaLens = {}; // 'L-tibia' | 'R-tibia' → medLen
+  for(const seg of segments.filter(s => s.name.includes('tibia'))) {
+    const lens = [];
+    allFrameLandmarks.forEach(lms => {
+      if(!lms) return;
+      const p = lms[seg.prox], d = lms[seg.dist];
+      if(p && d && (p.visibility||0) > 0.45 && (d.visibility||0) > 0.35) {
+        const l = Math.hypot(p.x-d.x, p.y-d.y);
+        if(l > 0.02 && l < 0.80) lens.push(l); // sanity bounds
+      }
+    });
+    if(lens.length < 2) continue;
+    lens.sort((a,b)=>a-b);
+    // Use 40th percentile — biased slightly low to avoid outlier-inflated values
+    tibiaLens[seg.name] = lens[Math.floor(lens.length * 0.40)];
+    console.log(`[Segment] ${seg.name}: tibia medLen=${(tibiaLens[seg.name]*100).toFixed(1)}%`);
+  }
 
-  for(const seg of segments) {
-    if(!seg.rigid) continue;
+  // ── Step B: Learn foot directions from clean frames ─────────────────────
+  // The foot direction (ankle→heel angle) varies with gait phase but is learnable.
+  // We only use frames where the heel is within a plausible distance from the ankle
+  // (i.e. within ±25% of the anatomy-derived expected length).
+  const footDirCache = {}; // segName → {medDx, medDy, canonLen}
 
-    // Collect high-confidence direction observations
+  for(const seg of segments.filter(s => s.rigid)) {
+    const tibiaRef = tibiaLens[seg.tibiaKey];
+    const canonLen = tibiaRef ? tibiaRef * seg.tibiaRatio : null;
+
     const dirObs = [];
     allFrameLandmarks.forEach(lms => {
       if(!lms) return;
       const p = lms[seg.prox], d = lms[seg.dist];
       if(!p || !d) return;
       const pc = p.visibility||0, dc = d.visibility||0;
-      if(pc < 0.45 || dc < 0.45) return;
+      if(pc < 0.45 || dc < 0.40) return;
       const dx = d.x - p.x, dy = d.y - p.y;
       const len = Math.hypot(dx, dy);
       if(len < 0.005) return;
 
-      // Side-view sanity: heel must be near/below ankle Y (not above)
-      // Toe must be ahead of ankle in direction of travel
+      // CRITICAL: reject observations where length is implausible relative to anatomy
+      // This prevents corrupted (belt-level) observations from entering dirObs
+      if(canonLen) {
+        if(len < canonLen * 0.60 || len > canonLen * 1.50) return;
+      }
+
+      // Side-view anatomical direction sanity
       if(isSide) {
         const isHeel = seg.name.includes('heel');
-        if(isHeel && dy < -0.02) return; // heel above ankle — impossible at stance
+        if(isHeel && dy < -0.02) return; // heel cannot be above ankle
       }
       dirObs.push({ dx: dx/len, dy: dy/len, len });
     });
 
-    if(dirObs.length < 3) continue;
+    if(dirObs.length < 2) {
+      // Not enough clean observations — fall back to canonical direction
+      if(canonLen) {
+        const fallbackDx = seg.name.includes('heel') ? -0.25 : 0.85; // heel=back, toe=forward
+        const fallbackDy = seg.name.includes('heel') ?  0.30 : 0.25; // both slightly downward
+        const fl = Math.hypot(fallbackDx, fallbackDy);
+        footDirCache[seg.name] = { medDx: fallbackDx/fl, medDy: fallbackDy/fl, canonLen };
+        console.log(`[Segment] ${seg.name}: using fallback direction (only ${dirObs.length} clean obs)`);
+      }
+      continue;
+    }
 
-    const sortedLens = dirObs.map(o => o.len).sort((a,b) => a-b);
-    const medLen = sortedLens[Math.floor(sortedLens.length/2)];
+    // Use median of observed lengths (only from clean frames now)
+    const obsLens = dirObs.map(o => o.len).sort((a,b) => a-b);
+    const obsMedian = obsLens[Math.floor(obsLens.length/2)];
+    const usedLen = canonLen || obsMedian;
 
-    // Only use observations with lengths close to median for direction learning
-    const goodDir = dirObs.filter(o => o.len >= medLen * 0.75 && o.len <= medLen * 1.35);
-    if(goodDir.length < 2) continue;
-
-    const avgDx = goodDir.reduce((s,o) => s+o.dx, 0) / goodDir.length;
-    const avgDy = goodDir.reduce((s,o) => s+o.dy, 0) / goodDir.length;
+    const avgDx = dirObs.reduce((s,o) => s+o.dx, 0) / dirObs.length;
+    const avgDy = dirObs.reduce((s,o) => s+o.dy, 0) / dirObs.length;
     const dirLen = Math.hypot(avgDx, avgDy);
     if(dirLen < 0.01) continue;
 
-    footDirCache[seg.name] = {
-      medDx: avgDx/dirLen,
-      medDy: avgDy/dirLen,
-      medLen
-    };
+    footDirCache[seg.name] = { medDx: avgDx/dirLen, medDy: avgDy/dirLen, canonLen: usedLen };
+    console.log(`[Segment] ${seg.name}: dir=(${(avgDx/dirLen).toFixed(2)},${(avgDy/dirLen).toFixed(2)}) len=${(usedLen*100).toFixed(1)}% from ${dirObs.length} obs`);
   }
 
-  // Compute all segment lengths across frames
+  // ── Step C: Apply segment constraints ──────────────────────────────────
   for(const seg of segments) {
-    const lengths = [];
-    allFrameLandmarks.forEach(lms => {
-      if(!lms) return;
-      const p = lms[seg.prox], d = lms[seg.dist];
-      if(p && d && (p.visibility||0) > 0.3 && (d.visibility||0) > 0.3) {
-        const l = Math.hypot(p.x-d.x, p.y-d.y);
-        // For rigid segments: only include lengths that are plausible for direction-learning
-        if(seg.rigid) {
-          const cached = footDirCache[seg.name];
-          if(cached && (l < cached.medLen * 0.5 || l > cached.medLen * 2.0)) return;
-        }
-        lengths.push(l);
-      }
-    });
-    if(lengths.length < 2) continue;
-    lengths.sort((a,b)=>a-b);
-    const medLen = lengths[Math.floor(lengths.length/2)];
-    if(medLen < 0.01) continue;
+    const cached = footDirCache[seg.name]; // only for rigid foot segments
+
+    // For non-rigid segments: learn medLen from data as before
+    let medLen = null;
+    if(!seg.rigid) {
+      const lengths = [];
+      allFrameLandmarks.forEach(lms => {
+        if(!lms) return;
+        const p = lms[seg.prox], d = lms[seg.dist];
+        if(p && d && (p.visibility||0) > 0.3 && (d.visibility||0) > 0.3)
+          lengths.push(Math.hypot(p.x-d.x, p.y-d.y));
+      });
+      if(lengths.length < 2) continue;
+      lengths.sort((a,b)=>a-b);
+      medLen = lengths[Math.floor(lengths.length/2)];
+      if(medLen < 0.01) continue;
+    } else {
+      // Rigid foot segment: use anatomy-derived canonical length
+      medLen = cached?.canonLen;
+      if(!medLen) continue;
+    }
 
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
@@ -2646,56 +2680,48 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
       const lo = seg.tolLo ?? (isFrontal ? 0.55 : 0.80);
       const hi = seg.tolHi ?? (isFrontal ? 1.60 : 1.20);
 
-      // For rigid foot segments: also check if direction is physiologically valid
-      // If the direction is wrong (e.g. heel placed ABOVE ankle), enforce median direction
-      const cached = footDirCache[seg.name];
+      // For rigid segments: also check direction validity
       let dirWrong = false;
       if(seg.rigid && cached && isSide) {
         const isHeel = seg.name.includes('heel');
-        const curDy = d.y - p.y; // positive = distal below proximal (correct)
-        // Heel must not be above the ankle (dy < 0 = heel above ankle)
-        // Toe can be above ankle during swing (plantarflexed forefoot lift)
+        const curDy = d.y - p.y;
         if(isHeel && curDy < -0.01) dirWrong = true;
-
-        // Also reject if the landmark is nowhere near the expected direction:
-        // dot product with median direction should be > 0.5 (within 60° of expected)
         if(!dirWrong && actualLen > 0.005) {
-          const curDx = (d.x - p.x) / actualLen;
-          const normalDy = curDy / actualLen;
-          const dot = curDx * cached.medDx + normalDy * cached.medDy;
-          if(dot < 0.25) dirWrong = true; // pointing in wrong direction
+          const dot = ((d.x-p.x)/actualLen) * cached.medDx + ((d.y-p.y)/actualLen) * cached.medDy;
+          if(dot < 0.25) dirWrong = true;
         }
       }
 
       if(ratio < lo || ratio > hi || dirWrong) {
-        // Use learned median direction for rigid segments,
-        // otherwise use current direction (just rescale)
         let dx, dy;
-        if(seg.rigid && cached && (dirWrong || ratio < lo * 0.5 || ratio > hi * 1.5)) {
-          // Direction is wrong or length is very far off — use median direction
-          dx = cached.medDx;
-          dy = cached.medDy;
+        if(seg.rigid && cached && (dirWrong || ratio < lo * 0.6 || ratio > hi * 1.5)) {
+          dx = cached.medDx; dy = cached.medDy;
         } else {
-          dx = (d.x - p.x) / actualLen;
-          dy = (d.y - p.y) / actualLen;
+          dx = (d.x-p.x)/actualLen; dy = (d.y-p.y)/actualLen;
         }
-        const targetLen = (seg.rigid && cached) ? cached.medLen : medLen;
         lms[seg.dist] = {
           ...d,
-          x: p.x + dx * targetLen,
-          y: p.y + dy * targetLen,
-          visibility: Math.min(d.visibility||0, 0.50), // cap confidence on corrected landmarks
+          x: p.x + dx * medLen,
+          y: p.y + dy * medLen,
+          visibility: Math.min(d.visibility||0, 0.50),
           reprojected: true,
-          source: `segment-constrained(${seg.name}${dirWrong?',dir-fix':''})`,
+          source: `segment-constrained(${seg.name}${dirWrong?',dir':''},len=${(ratio*100).toFixed(0)}%)`,
         };
-        if(dirWrong) {
-          console.log(`[Segment] ${seg.name} f${fi+1}: direction wrong → corrected to median`);
-        }
+        if(dirWrong || ratio > 1.5 || ratio < 0.5)
+          console.log(`[Segment] ${seg.name} f${fi+1}: ratio=${ratio.toFixed(2)} dir=${dirWrong} → clamped`);
       }
     });
   }
   return allFrameLandmarks;
 }
+
+  const segments = [
+    { name:'L-femur',  prox:23, dist:25 },
+    { name:'R-femur',  prox:24, dist:26 },
+    { name:'L-tibia',  prox:25, dist:27 },
+    { name:'R-tibia',  prox:26, dist:28 },
+    { name:'L-humerus',prox:11, dist:13 },
+    { name:'R-humerus',prox:12, dist:14 },
 
 // ── Tibia-direction ankle reprojection for running/gait ──────────────────────
 // The #1 MediaPipe failure in treadmill running: the far-side ankle gets placed
@@ -2733,17 +2759,44 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
     //   Toe-off:         ~30° backward
     //   Mid-swing:       steeply forward (foot lifting behind)
     const goodObs = []; // {fi, dx, dy, len}
-    // First pass: collect all plausible high-confidence observations
-    // Also estimate the approximate belt Y (max ankle Y across confident frames)
-    // so we can exclude observations where the ankle is at belt level
+    // Pre-scan: estimate belt Y from maximum confident ankle Y
     let approxBeltY = 0;
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
       const a = lms[AI];
       if(a && (a.visibility||0) > 0.55 && a.y > approxBeltY) approxBeltY = a.y;
     });
-    // Malleolus should be at least 3% of frame height above belt
     const minMalleolY = approxBeltY > 0 ? approxBeltY - 0.03 : 1.0;
+
+    // Pre-scan: estimate femur length (hip→knee) as an anatomical reference.
+    // In adults, tibia / femur ≈ 0.88–1.15. A "tibia" that is only 40–65%
+    // of femur length is a mid-tibia placement — not the malleolus.
+    // Hip indices: L=23, R=24  Knee: L=25, R=26
+    const hipI = name === 'L' ? 23 : 24;
+    const femurLens = [];
+    allFrameLandmarks.forEach(lms => {
+      if(!lms) return;
+      const h = lms[hipI], k = lms[KI];
+      if(h && k && (h.visibility||0) > 0.45 && (k.visibility||0) > 0.45) {
+        const fl = Math.hypot(h.x - k.x, h.y - k.y);
+        if(fl > 0.05) femurLens.push(fl); // sanity bound
+      }
+    });
+    femurLens.sort((a,b) => a-b);
+    // Use 40th percentile of femur — biased slightly conservative
+    const femurMed = femurLens.length >= 3
+      ? femurLens[Math.floor(femurLens.length * 0.40)]
+      : null;
+
+    // Tibia/femur ratio bounds based on published human anatomy:
+    // Min: 0.85 (short-tibia individuals); Max: 1.18 (long-tibia)
+    // Mid-tibia placements produce ratios of ~0.40–0.65 → rejected
+    const TIBIA_FEMUR_MIN = 0.82;
+    const TIBIA_FEMUR_MAX = 1.20;
+
+    if(femurMed) {
+      console.log(`[TibiaReproj] ${name}: femurMed=${(femurMed*100).toFixed(1)}% → expect tibia ${(femurMed*TIBIA_FEMUR_MIN*100).toFixed(1)}–${(femurMed*TIBIA_FEMUR_MAX*100).toFixed(1)}%`);
+    }
 
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
@@ -2754,35 +2807,23 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       const dx = a.x - k.x, dy = a.y - k.y;
       const len = Math.hypot(dx, dy);
       if(len < 0.01) return;
-      // Reject if ankle is at or below approximate belt level — these are belt-level
-      // artefacts that corrupt medLen by making it too long (knee→belt distance)
+      // Reject belt-level artefacts
       if(approxBeltY > 0 && a.y > minMalleolY) return;
-      // Hard reject: ankle can NEVER be above the knee
+      // Hard reject: ankle cannot be above the knee
       if(dy < -0.01) return;
+      // ── Key fix: femur cross-validation ──────────────────────────────────
+      // If we have a reliable femur reference, only accept tibia observations
+      // where tibia length is within the anatomical tibia/femur ratio range.
+      // This directly rejects mid-tibia placements regardless of confidence.
+      if(femurMed && len > 0.005) {
+        const ratio = len / femurMed;
+        if(ratio < TIBIA_FEMUR_MIN || ratio > TIBIA_FEMUR_MAX) {
+          console.log(`[TibiaReproj] ${name} f${fi+1}: tibia/femur=${ratio.toFixed(2)} → rejected (mid-tibia or too long)`);
+          return;
+        }
+      }
       goodObs.push({ fi, dx: dx/len, dy: dy/len, len });
     });
-
-    // ── Step 1b: Filter goodObs to only include anatomically plausible observations ──
-    // Critical: a landmark on the mid-tibia has high confidence BUT is anatomically wrong.
-    // We filter goodObs to only include frames where the knee→ankle distance is within
-    // a plausible tibia range. We don't know medLen yet, so we use the DISTRIBUTION:
-    // collect all lengths, take the 70th percentile as the reference, then reject
-    // observations where the length is < 60% of that reference (mid-tibia placements
-    // are typically 45–65% of true tibia length from the knee).
-    if(goodObs.length >= 5) {
-      const allLens = goodObs.map(o => o.len).sort((a,b) => a-b);
-      const p70Len  = allLens[Math.floor(allLens.length * 0.70)]; // 70th percentile
-      const minPlausibleLen = p70Len * 0.72; // below 72% of p70 = too short = on tibia not ankle
-      const beforeFilter = goodObs.length;
-      // Filter in-place: remove mid-tibia observations
-      const filtered = goodObs.filter(o => o.len >= minPlausibleLen);
-      if(filtered.length >= 3) {
-        goodObs.length = 0;
-        filtered.forEach(o => goodObs.push(o));
-        const removed = beforeFilter - goodObs.length;
-        if(removed > 0) console.log(`[TibiaReproj] ${name}: filtered ${removed} short-tibia obs (< ${(minPlausibleLen*100).toFixed(1)}% frame width)`);
-      }
-    }
     if(goodObs.length < 3) {
       console.log(`[TibiaReproj] ${name}: insufficient good observations after filtering (${goodObs.length}) — skipping`);
       continue;
@@ -2865,11 +2906,12 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       const tooFarFromKnee = ankleDistFromKnee > medLen * 2.0;
 
       // ── Hard rejection 4: Ankle too CLOSE to knee (mid-tibia placement) ─────
-      // If the ankle is less than 65% of expected tibia length from the knee,
-      // it's sitting on the tibia shaft rather than at the malleolus.
-      // This catches the most common remaining failure: ankle_1 and ankle_3 type
-      // where the landmark is placed at 50–65% of the way down the tibia.
-      const tooCloseToKnee = a != null && ankleDistFromKnee < medLen * 0.65;
+      // Use femur length as absolute reference when available — more reliable than
+      // medLen which may itself be learned from mid-tibia observations.
+      // Min tibia = 82% of femur (TIBIA_FEMUR_MIN); a landmark at < 65% of femur
+      // is clearly mid-tibia regardless of what medLen thinks.
+      const minTibiaRef = femurMed ? femurMed * 0.72 : medLen * 0.65;
+      const tooCloseToKnee = a != null && ankleDistFromKnee < minTibiaRef;
 
       // ── Hard rejection 5: Ankle near hip level (posterior view confusion) ───
       // In posterior view during fast running, MediaPipe sometimes confuses hip
