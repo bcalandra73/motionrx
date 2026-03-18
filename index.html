@@ -2540,6 +2540,9 @@ function fuseLandmarks(mpLandmarks, mnNormalized, view='side') {
 // ── Segment length consistency — reproject drifted distal landmarks ──
 // Computes median segment length across all frames, then clamps outliers
 function applySegmentConstraints(allFrameLandmarks, view='side') {
+  const isFrontal = (view === 'front' || view === 'posterior');
+  const isSide    = (view === 'side');
+
   const segments = [
     { name:'L-femur',  prox:23, dist:25 },
     { name:'R-femur',  prox:24, dist:26 },
@@ -2547,15 +2550,69 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
     { name:'R-tibia',  prox:26, dist:28 },
     { name:'L-humerus',prox:11, dist:13 },
     { name:'R-humerus',prox:12, dist:14 },
-    // Foot segments — keep heel/toe from drifting relative to ankle
-    { name:'L-foot-heel', prox:27, dist:29, tolLo:0.40, tolHi:1.80 },
-    { name:'R-foot-heel', prox:28, dist:30, tolLo:0.40, tolHi:1.80 },
-    { name:'L-foot-toe',  prox:27, dist:31, tolLo:0.35, tolHi:2.00 },
-    { name:'R-foot-toe',  prox:28, dist:32, tolLo:0.35, tolHi:2.00 },
+    // Foot segments — tight tolerances because foot bones are RIGID.
+    // The foot length doesn't change during running — only the angle changes.
+    // Side view: ankle→heel should point backward and down; heel→toe forward and slightly down.
+    // Tight tolerance: ±22% of median (vs the old ±60–80% which was nearly useless).
+    { name:'L-foot-heel', prox:27, dist:29, tolLo:0.78, tolHi:1.22, rigid:true },
+    { name:'R-foot-heel', prox:28, dist:30, tolLo:0.78, tolHi:1.22, rigid:true },
+    { name:'L-foot-toe',  prox:27, dist:31, tolLo:0.75, tolHi:1.28, rigid:true },
+    { name:'R-foot-toe',  prox:28, dist:32, tolLo:0.75, tolHi:1.28, rigid:true },
   ];
 
   const nFrames = allFrameLandmarks.length;
   if(nFrames < 3) return allFrameLandmarks;
+
+  // ── For rigid foot segments: learn median direction as well as length ──────
+  // The ankle→heel direction in side view is constrained: the heel is always
+  // POSTERIOR (behind) and at/below the ankle. We learn the median direction
+  // from the best frames, then enforce it when the landmark is misplaced.
+  const footDirCache = {}; // segName → {medDx, medDy, medLen}
+
+  for(const seg of segments) {
+    if(!seg.rigid) continue;
+
+    // Collect high-confidence direction observations
+    const dirObs = [];
+    allFrameLandmarks.forEach(lms => {
+      if(!lms) return;
+      const p = lms[seg.prox], d = lms[seg.dist];
+      if(!p || !d) return;
+      const pc = p.visibility||0, dc = d.visibility||0;
+      if(pc < 0.45 || dc < 0.45) return;
+      const dx = d.x - p.x, dy = d.y - p.y;
+      const len = Math.hypot(dx, dy);
+      if(len < 0.005) return;
+
+      // Side-view sanity: heel must be near/below ankle Y (not above)
+      // Toe must be ahead of ankle in direction of travel
+      if(isSide) {
+        const isHeel = seg.name.includes('heel');
+        if(isHeel && dy < -0.02) return; // heel above ankle — impossible at stance
+      }
+      dirObs.push({ dx: dx/len, dy: dy/len, len });
+    });
+
+    if(dirObs.length < 3) continue;
+
+    const sortedLens = dirObs.map(o => o.len).sort((a,b) => a-b);
+    const medLen = sortedLens[Math.floor(sortedLens.length/2)];
+
+    // Only use observations with lengths close to median for direction learning
+    const goodDir = dirObs.filter(o => o.len >= medLen * 0.75 && o.len <= medLen * 1.35);
+    if(goodDir.length < 2) continue;
+
+    const avgDx = goodDir.reduce((s,o) => s+o.dx, 0) / goodDir.length;
+    const avgDy = goodDir.reduce((s,o) => s+o.dy, 0) / goodDir.length;
+    const dirLen = Math.hypot(avgDx, avgDy);
+    if(dirLen < 0.01) continue;
+
+    footDirCache[seg.name] = {
+      medDx: avgDx/dirLen,
+      medDy: avgDy/dirLen,
+      medLen
+    };
+  }
 
   // Compute all segment lengths across frames
   for(const seg of segments) {
@@ -2564,7 +2621,13 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
       if(!lms) return;
       const p = lms[seg.prox], d = lms[seg.dist];
       if(p && d && (p.visibility||0) > 0.3 && (d.visibility||0) > 0.3) {
-        lengths.push(Math.hypot(p.x-d.x, p.y-d.y));
+        const l = Math.hypot(p.x-d.x, p.y-d.y);
+        // For rigid segments: only include lengths that are plausible for direction-learning
+        if(seg.rigid) {
+          const cached = footDirCache[seg.name];
+          if(cached && (l < cached.medLen * 0.5 || l > cached.medLen * 2.0)) return;
+        }
+        lengths.push(l);
       }
     });
     if(lengths.length < 2) continue;
@@ -2580,22 +2643,54 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
       const actualLen = Math.hypot(p.x-d.x, p.y-d.y);
       if(actualLen < 0.001) return;
       const ratio = actualLen / medLen;
-      const isFrontal = (view === 'front' || view === 'posterior');
       const lo = seg.tolLo ?? (isFrontal ? 0.55 : 0.80);
       const hi = seg.tolHi ?? (isFrontal ? 1.60 : 1.20);
-      if(ratio < lo || ratio > hi) {
-        const dx = (d.x - p.x) / actualLen;
-        const dy = (d.y - p.y) / actualLen;
-        const newD = {
+
+      // For rigid foot segments: also check if direction is physiologically valid
+      // If the direction is wrong (e.g. heel placed ABOVE ankle), enforce median direction
+      const cached = footDirCache[seg.name];
+      let dirWrong = false;
+      if(seg.rigid && cached && isSide) {
+        const isHeel = seg.name.includes('heel');
+        const curDy = d.y - p.y; // positive = distal below proximal (correct)
+        // Heel must not be above the ankle (dy < 0 = heel above ankle)
+        // Toe can be above ankle during swing (plantarflexed forefoot lift)
+        if(isHeel && curDy < -0.01) dirWrong = true;
+
+        // Also reject if the landmark is nowhere near the expected direction:
+        // dot product with median direction should be > 0.5 (within 60° of expected)
+        if(!dirWrong && actualLen > 0.005) {
+          const curDx = (d.x - p.x) / actualLen;
+          const normalDy = curDy / actualLen;
+          const dot = curDx * cached.medDx + normalDy * cached.medDy;
+          if(dot < 0.25) dirWrong = true; // pointing in wrong direction
+        }
+      }
+
+      if(ratio < lo || ratio > hi || dirWrong) {
+        // Use learned median direction for rigid segments,
+        // otherwise use current direction (just rescale)
+        let dx, dy;
+        if(seg.rigid && cached && (dirWrong || ratio < lo * 0.5 || ratio > hi * 1.5)) {
+          // Direction is wrong or length is very far off — use median direction
+          dx = cached.medDx;
+          dy = cached.medDy;
+        } else {
+          dx = (d.x - p.x) / actualLen;
+          dy = (d.y - p.y) / actualLen;
+        }
+        const targetLen = (seg.rigid && cached) ? cached.medLen : medLen;
+        lms[seg.dist] = {
           ...d,
-          x: p.x + dx * medLen,
-          y: p.y + dy * medLen,
+          x: p.x + dx * targetLen,
+          y: p.y + dy * targetLen,
+          visibility: Math.min(d.visibility||0, 0.50), // cap confidence on corrected landmarks
           reprojected: true,
-          originalLen: actualLen,
-          medianLen: medLen
+          source: `segment-constrained(${seg.name}${dirWrong?',dir-fix':''})`,
         };
-        lms[seg.dist] = newD;
-        console.log(`[Segment] ${seg.name} frame ${fi+1}: len=${(actualLen*100).toFixed(1)}% → reprojected`);
+        if(dirWrong) {
+          console.log(`[Segment] ${seg.name} f${fi+1}: direction wrong → corrected to median`);
+        }
       }
     });
   }
@@ -4520,8 +4615,8 @@ const REF_RANGES = {
   'Pelvic Drop':              {max:5, warn:8,  label:'Contralateral pelvic drop: <5°'},
   'Left Pronation':           {max:4, warn:8,  label:'Calcaneal eversion: neutral 0-4°, mild 5-10°, significant >10°'},
   'Right Pronation':          {max:4, warn:8,  label:'Calcaneal eversion: neutral 0-4°, mild 5-10°, significant >10°'},
-  'Left Hip Adduction':       {max:8, warn:10, label:'Hip adduction swing: 0-8° normal; >10° = crossover risk (frontal view)'},
-  'Right Hip Adduction':      {max:8, warn:10, label:'Hip adduction swing: 0-8° normal; >10° = crossover risk (frontal view)'},
+  'Left Hip Adduction':       {max:10, warn:12, label:'Hip adduction swing: 0-10° normal; >10° = crossover risk (frontal view)'},
+  'Right Hip Adduction':      {max:10, warn:12, label:'Hip adduction swing: 0-10° normal; >10° = crossover risk (frontal view)'},
 };
 
 // ── PROMs Data & Logic ──
@@ -5029,7 +5124,7 @@ function renderASI(aggregated, movement) {
   const ASYM_NORMAL_RANGES = {
     'Knee Flexion':    {min:90, max:130},
     'Hip Flexion':     {min:35, max:65},
-    'Hip Adduction':   {min:0,  max:8},
+    'Hip Adduction':   {min:0,  max:10},
     'Knee Valgus':     {min:0,  max:5},
     'Pronation':       {min:0,  max:4},
     'Ankle Dorsiflexion': {min:5, max:25},
@@ -5169,8 +5264,8 @@ const MOVEMENT_NORMS = {
     'Trunk Lean':              {ideal:[5,15],  warn:20, label:'Forward trunk lean: 5-15° from vertical'},
     'Trunk Lateral Lean':      {max:5, warn:8,          label:'Lateral trunk lean: <5° per step (Trendelenburg)'},
     'Pelvic Drop':             {max:5, warn:8,          label:'Contralateral pelvic drop: <5° (hip abductor strength)'},
-    'Left Hip Adduction':      {max:8, warn:10,          label:'Hip adduction: 0-8° normal, >10° crossover risk (frontal view)'},
-    'Right Hip Adduction':     {max:8, warn:10,          label:'Hip adduction: 0-8° normal, >10° crossover risk (frontal view)'},
+    'Left Hip Adduction':      {max:10, warn:12,          label:'Hip adduction: 0-10° normal, >10° = crossover risk (frontal view)'},
+    'Right Hip Adduction':     {max:10, warn:12,          label:'Hip adduction: 0-10° normal, >10° = crossover risk (frontal view)'},
     'Right Knee Valgus':       {max:5, warn:10,         label:'Dynamic valgus: <5° (frontal view — requires front camera)'},
     'Left Pronation':          {max:4, warn:8,           label:'Calcaneal eversion: neutral 0-4°, mild 5-10° (posterior view)'},
     'Right Pronation':         {max:4, warn:8,           label:'Calcaneal eversion: neutral 0-4°, mild 5-10° (posterior view)'},
@@ -6949,7 +7044,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   const NORMAL_RANGES = {
     'Knee':         {min:90, max:130},  // peak knee flex swing
     'Hip':          {min:35, max:65},   // peak hip flex swing
-    'Hip Adduction':{min:0,  max:8 },  // frontal thigh angle
+    'Hip Adduction':{min:0,  max:10},  // frontal thigh angle — crossover threshold is 10°
     'Knee Valgus':  {min:0,  max:5 },  // dynamic valgus
     'Pronation':    {min:0,  max:4 },   // calcaneal eversion
     'Ankle':        {min:5,  max:25},   // stance DF
