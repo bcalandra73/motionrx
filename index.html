@@ -1312,16 +1312,27 @@ function startFrameExtraction(file, vid) {
       // Only if MediaPipe is ready and movement has a meaningful bottom/peak
       const needsSmartLabel = /squat|lunge|deadlift|hinge|sit/i.test(movement);
       const needsGaitLabel  = /running|gait|walk/i.test(movement);
-      if(mpReady && poseInstance && (needsSmartLabel || needsGaitLabel) && frames.length >= 4) {
+      // For running/gait: MoveNet coarse scan (fast) → phase detection → MediaPipe only on 8 selected frames.
+      // For other movements (squats/deadlifts): MediaPipe needed for smart bottom/lockout detection.
+      const canRunGaitScan  = needsGaitLabel && moveNetReady;
+      const canRunSmartScan = (needsSmartLabel || (needsGaitLabel && !moveNetReady)) && mpReady && poseInstance;
+      if((canRunGaitScan || canRunSmartScan) && frames.length >= 4) {
         try {
-          const quickResults = await runMediaPipeOnFrames(frames);
-          // Apply fusion pipeline to smart phase detection frames too
-          const quickFused = await fusedLandmarkPipeline(
-            quickResults,
-            frames.map(f => f.imageData),
-            movement,
-            cameraView
-          );
+          let quickFused;
+          if(canRunGaitScan) {
+            // ── MoveNet-first gait scan ───────────────────────────────────────
+            // Scan all dense frames with MoveNet Lightning to identify gait events.
+            // This is the fast pre-analysis pass. MediaPipe Heavy runs later (in runAnalysis)
+            // on only the 8 phase-selected frames — at the right biomechanical moments.
+            quickFused = await coarseScanWithMoveNet(frames, statusText);
+          } else {
+            // ── MediaPipe fallback (squats/deadlifts, or MoveNet unavailable) ─
+            statusText.textContent = 'Detecting phase events with pose model...';
+            const quickResults = await runMediaPipeOnFrames(frames);
+            quickFused = await fusedLandmarkPipeline(
+              quickResults, frames.map(f => f.imageData), movement, cameraView
+            );
+          }
           const fusedForPhase = quickFused.map(lms => ({ poseLandmarks: lms }));
           const isFlexion = /squat|lunge|sit/i.test(movement);
           const isHinge   = /deadlift|hinge/i.test(movement);
@@ -1434,8 +1445,8 @@ function startFrameExtraction(file, vid) {
                 // causing toeoff/midswing detection to fail. Thigh-from-vertical is
                 // independent of arm position and gives correct ~35-60° peak in swing.
                 // Formula: atan2(|dx|, dy) where dy = knee.y - hip.y (image coords, Y-down)
-                lHip: (lH&&lK && lK.y-lH.y > 0.02) ? Math.round(Math.atan2(Math.abs(lK.x-lH.x), lK.y-lH.y)*180/Math.PI) : null,
-                rHip: (rH&&rK && rK.y-rH.y > 0.02) ? Math.round(Math.atan2(Math.abs(rK.x-rH.x), rK.y-rH.y)*180/Math.PI) : null,
+                lHip: (lH&&lK && lK.y-lH.y > -0.10) ? Math.min(90, Math.round(Math.atan2(Math.abs(lK.x-lH.x), lK.y-lH.y)*180/Math.PI)) : null,
+                rHip: (rH&&rK && rK.y-rH.y > -0.10) ? Math.min(90, Math.round(Math.atan2(Math.abs(rK.x-rH.x), rK.y-rH.y)*180/Math.PI)) : null,
               };
             }).filter(Boolean);
 
@@ -4345,6 +4356,57 @@ function calcAngleBest(a, b, c) {
   return result3d !== null ? result3d : calcAngle(a, b, c);
 }
 
+// ── Coarse gait scan — MoveNet Lightning for fast phase detection ─────────────
+// Implements the "scan-first, analyze-second" architecture for running/gait:
+//   1. Run MoveNet Lightning (~8ms/frame) on all 64-128 dense frames → get ankle/knee/hip signals
+//   2. GaitFSM finds phase events from those signals → selects 8 key frames
+//   3. MediaPipe Pose Landmarker Heavy runs ONLY on those 8 frames in runAnalysis
+//
+// Why this is better than MediaPipe on all dense frames:
+//   • MoveNet is ~10× faster, so phase detection adds <1s instead of ~6s
+//   • Phase events are identified BEFORE running the heavy model, not derived from it
+//   • MediaPipe runs exclusively at biomechanically meaningful moments (contact, toeoff, midswing)
+//     where the foot is in the most anatomically predictable position — improving ankle accuracy
+//   • No more mediocre landmark quality on mid-flight frames contaminating the aggregate
+//
+// Heel (29/30) and toe (31/32) landmarks are not available from MoveNet.
+// Pronation and ankle DF are therefore only measured from the 8 MediaPipe gallery frames.
+// For peak hip/knee flexion (which need dense data), MoveNet provides adequate quality.
+async function coarseScanWithMoveNet(frames, statusEl) {
+  const results = [];
+  const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(null), ms))]);
+  const total = frames.length;
+
+  for (let i = 0; i < total; i++) {
+    if(statusEl) statusEl.textContent = `Scanning for gait phases — frame ${i+1}/${total}...`;
+    try {
+      const img = await withTimeout(new Promise(res => {
+        const im = new Image();
+        im.onload  = () => res(im);
+        im.onerror = () => res(null);
+        im.src = 'data:image/jpeg;base64,' + frames[i].imageData;
+      }), 2000, null);
+
+      if(!img) { results.push(null); continue; }
+
+      const kps = await withTimeout(runMoveNetOnImage(img), 3000, null);
+      if(!kps)  { results.push(null); continue; }
+
+      // Convert MoveNet keypoints → MediaPipe-indexed 33-element array
+      // (MoveNet only provides indices in MOVENET_TO_MP so unfilled slots are null)
+      const mnNorm = moveNetToNormalized(kps, img.width, img.height);
+      const arr = Array.from({length: 33}, (_, i) => mnNorm?.[i] ?? null);
+      results.push(arr);
+    } catch(e) {
+      console.warn('[CoarseScan] Frame', i, 'error:', e.message);
+      results.push(null);
+    }
+  }
+
+  // Light temporal smoothing for a cleaner contact/toeoff signal (same as MediaPipe path)
+  return applyTemporalSmoothing(results);
+}
+
 function extractAngles(lm, view='side', movement='') {
   if(!lm) return {};
   // 0.30 threshold (down from 0.40) — fast-moving distal landmarks (ankles, toes) in
@@ -4384,18 +4446,24 @@ function extractAngles(lm, view='side', movement='') {
   // Thigh-from-vertical — 2D image coords
   const hipFlexV2D = (h, k) => {
     if(!h||!k) return null;
-    const dy = k.y - h.y;
-    if(dy < 0.02) return null; // knee above or level with hip → not a valid standing frame
-    return Math.round(Math.atan2(Math.abs(k.x - h.x), dy) * 180 / Math.PI);
+    const dy = k.y - h.y; // positive = knee lower (standing), negative = knee above hip
+    // Only reject frames where knee is substantially above the hip (anatomically invalid for running).
+    // dy < -0.10 means knee is >10% frame height above hip — this doesn't occur in normal running.
+    // The old dy < 0.02 incorrectly rejected true peak-swing frames where the knee is at hip level
+    // (which happens at ~70-90° hip flexion in well-trained runners, or ~50-60° for restricted runners).
+    if(dy < -0.10) return null;
+    const angle = Math.round(Math.atan2(Math.abs(k.x - h.x), dy) * 180 / Math.PI);
+    return Math.min(90, angle); // clamp to physiological running range
   };
 
   // Thigh-from-vertical — 3D world coords (hip-centred metric space, Y-down convention)
   const hipFlexV3D = (h, k) => {
     if(!h||!k||h._wx==null||k._wx==null) return null;
     const dy = k._wy - h._wy; // positive when knee lower (Y-down)
-    if(dy < 0.02) return null;
+    if(dy < -0.15) return null; // 3D: 15cm above hip = invalid
     const dx = k._wx - h._wx, dz = k._wz - h._wz;
-    return Math.round(Math.atan2(Math.hypot(dx, dz), dy) * 180 / Math.PI);
+    const angle = Math.round(Math.atan2(Math.hypot(dx, dz), dy) * 180 / Math.PI);
+    return Math.min(90, angle);
   };
 
   if(isGaitMov) {
@@ -4655,9 +4723,11 @@ function extractAngles(lm, view='side', movement='') {
         const cross = (legDx / legLen) * (heelDy / heelLen) - (legDy / legLen) * (heelDx / heelLen);
         const dot   = (legDx / legLen) * (heelDx / heelLen) + (legDy / legLen) * (heelDy / heelLen);
         const angleDeg = Math.atan2(Math.abs(cross), dot) * 180 / Math.PI;
-        // Physiological clamp: maximum anatomically possible calcaneal eversion is ~20°.
-        // Values beyond this are tracking artefacts — discard entirely.
-        if(angleDeg > 20) return null;
+        // Physiological clamp: maximum clinically meaningful calcaneal eversion is ~14°.
+        // Values beyond this are almost always MediaPipe heel mis-placement artefacts,
+        // especially in side-view push-off frames where the heel faces away from camera.
+        // (Clinical "significant pronation" threshold is 10-12°; 14° gives a small safety margin.)
+        if(angleDeg > 14) return null;
         return { deg: Math.round(angleDeg), everted: cross > 0 };
       };
 
@@ -6463,7 +6533,10 @@ async function runAnalysis() {
   document.getElementById('loadingState').style.display='block';
   animateSteps();
 
-  // Step 1-2: MediaPipe on all frames + bar detection
+  // Step 1-2: MediaPipe Pose Landmarker Heavy on the 8 phase-selected frames + bar detection.
+  // For running/gait: these frames were selected by GaitFSM from a MoveNet coarse scan,
+  // so MediaPipe runs exactly at the right biomechanical moments (contact, midstance, toeoff, etc.).
+  // This is the "apply MediaPipe at identified phases" step of the scan-first architecture.
   let annotatedFrames = [];
   let allAngles = [];
   // Bar path — use dense pre-extracted points if available, else detect from 8 frames
