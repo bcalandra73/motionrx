@@ -1428,10 +1428,14 @@ function startFrameExtraction(file, vid) {
                 rAnkX: rA?.x ?? null,
                 lKnee: lH&&lK&&lA ? calcAngle(lH,lK,lA) : null,
                 rKnee: rH&&rK&&rA ? calcAngle(rH,rK,rA) : null,
-                // Store hip as degrees-from-upright (0°=standing, positive=flexion)
-                // Raw calcAngle gives included angle (~180° standing); correct to clinical convention
-                lHip:  lS&&lH&&lK ? Math.abs(180 - calcAngle(lS,lH,lK)) : null,
-                rHip:  rS&&rH&&rK ? Math.abs(180 - calcAngle(rS,rH,rK)) : null,
+                // Hip flexion as thigh-from-vertical (degrees from standing neutral).
+                // More reliable than shoulder-hip-knee for gait phase detection —
+                // shoulder drifts with arm swing and depresses the signal by 15-30°,
+                // causing toeoff/midswing detection to fail. Thigh-from-vertical is
+                // independent of arm position and gives correct ~35-60° peak in swing.
+                // Formula: atan2(|dx|, dy) where dy = knee.y - hip.y (image coords, Y-down)
+                lHip: (lH&&lK && lK.y-lH.y > 0.02) ? Math.round(Math.atan2(Math.abs(lK.x-lH.x), lK.y-lH.y)*180/Math.PI) : null,
+                rHip: (rH&&rK && rK.y-rH.y > 0.02) ? Math.round(Math.atan2(Math.abs(rK.x-rH.x), rK.y-rH.y)*180/Math.PI) : null,
               };
             }).filter(Boolean);
 
@@ -1810,6 +1814,11 @@ function startFrameExtraction(file, vid) {
                   _side: REF,
                   _baseId: ph.id,
                   _detected: keySet.has(best.li),
+                  // Actual video fraction for this frame — used by secondary video sync
+                  // to seek to the same moment in the posterior/second camera clip.
+                  // Using the actual position (not canonical ph.time) ensures both views
+                  // are temporally aligned even when the detected stride is mid-clip.
+                  _videoFraction: perFrame[best.li]?.t ?? ph.time,
                 };
 
                 // Enrich contact frame with foot strike info
@@ -1862,8 +1871,10 @@ function startFrameExtraction(file, vid) {
                 const isSwingLabel  = swingPhases.has(bid);
                 if(!isStanceLabel && !isSwingLabel) return;
 
-                // Find the dense frame for this gallery frame
-                const denseIdx = Math.round((window_primaryPhaseSelection.fractions[fi] ?? 0.5) * (quickFused.length - 1));
+                // Use the actual video fraction stored in the phase label (set during selection above)
+                // Falls back to proportional index if not available
+                const vFrac = f.phase._videoFraction ?? (fi / Math.max(1, frames.length - 1));
+                const denseIdx = Math.round(vFrac * (quickFused.length - 1));
                 const lms = quickFused[Math.min(denseIdx, quickFused.length - 1)];
                 if(!lms) return;
                 const ank = lms[refAnkI];
@@ -1882,12 +1893,15 @@ function startFrameExtraction(file, vid) {
               });
 
               // ── Store selected phase fractions for secondary video sync ────────────
-              // Use the canonical phase timing fractions (0–1) — these are the same
-              // fractions used to pick frames from the primary clip, so they represent
-              // the correct gait-cycle position for each selected phase.
-              // Secondary video seeks to (fraction × its own duration) for temporal alignment.
+              // Use the ACTUAL detected video fraction for each gallery frame (_videoFraction
+              // stored above from perFrame[best.li].t). This correctly positions the secondary
+              // camera seek to the same moment in the clip, even if the detected stride is
+              // mid-clip. Falls back to canonical phase time if not available.
               window_primaryPhaseSelection = {
                 fractions: frames.map(f => {
+                  // Prefer actual video fraction (set during gallery frame selection above)
+                  if(f.phase?._videoFraction != null) return f.phase._videoFraction;
+                  // Fallback: canonical phase time (correct only if stride fills the whole clip)
                   const bid = f.phase?._baseId;
                   const ph = bid ? runningPhases.find(p => p.id === bid) : null;
                   return ph ? ph.time : 0.5;
@@ -1927,16 +1941,16 @@ function startFrameExtraction(file, vid) {
                 handY: handLMs.reduce((s,p)=>s+p.y,0) / handLMs.length,
               });
             }
-            // Hip angle: shoulder(11/12) → hip(23/24) → knee(25/26)
-            const lS=v(11),lH=v(23),lK=v(25), rS=v(12),rH=v(24),rK=v(26);
-            const lHip = lS&&lH&&lK ? calcAngle(lS,lH,lK) : null;
-            const rHip = rS&&rH&&rK ? calcAngle(rS,rH,rK) : null;
-            const hipAngle = lHip!=null&&rHip!=null ? (lHip+rHip)/2 : (lHip??rHip);
+            // Hip angle: thigh-from-vertical (matches perFrame convention)
+            const lS2=v(11),lH2=v(23),lK2=v(25), rS2=v(12),rH2=v(24),rK2=v(26);
+            const lA2=v(27), rA2=v(28);
+            const lHip2 = (lH2&&lK2 && lK2.y-lH2.y>0.02) ? Math.round(Math.atan2(Math.abs(lK2.x-lH2.x), lK2.y-lH2.y)*180/Math.PI) : null;
+            const rHip2 = (rH2&&rK2 && rK2.y-rH2.y>0.02) ? Math.round(Math.atan2(Math.abs(rK2.x-rH2.x), rK2.y-rH2.y)*180/Math.PI) : null;
+            const hipAngle = lHip2!=null&&rHip2!=null ? (lHip2+rHip2)/2 : (lHip2??rHip2);
             // Knee angle: hip(23/24) → knee(25/26) → ankle(27/28)
-            const lA=v(27), rA=v(28);
-            const lKnee = lH&&lK&&lA ? calcAngle(lH,lK,lA) : null;
-            const rKnee = rH&&rK&&rA ? calcAngle(rH,rK,rA) : null;
-            const kneeAngle = lKnee!=null&&rKnee!=null ? (lKnee+rKnee)/2 : (lKnee??rKnee);
+            const lKnee2 = lH2&&lK2&&lA2 ? calcAngle(lH2,lK2,lA2) : null;
+            const rKnee2 = rH2&&rK2&&rA2 ? calcAngle(rH2,rK2,rA2) : null;
+            const kneeAngle = lKnee2!=null&&rKnee2!=null ? (lKnee2+rKnee2)/2 : (lKnee2??rKnee2);
             if(hipAngle != null) {
               window._phaseHipData.push({
                 t: phaseFrameTimes[fi] ?? (fi / Math.max(1, frames.length - 1)),
@@ -4331,7 +4345,7 @@ function calcAngleBest(a, b, c) {
   return result3d !== null ? result3d : calcAngle(a, b, c);
 }
 
-function extractAngles(lm, view='side') {
+function extractAngles(lm, view='side', movement='') {
   if(!lm) return {};
   // 0.30 threshold (down from 0.40) — fast-moving distal landmarks (ankles, toes) in
   // running often land between 0.30–0.40 confidence; too-strict threshold drops them all.
@@ -4344,17 +4358,66 @@ function extractAngles(lm, view='side') {
   if(lHip&&lKnee&&lAnkle) angles['Left Knee Flexion']  = calcAngleBest(lHip,lKnee,lAnkle);
   if(rHip&&rKnee&&rAnkle) angles['Right Knee Flexion'] = calcAngleBest(rHip,rKnee,rAnkle);
 
-  // Hip angles — 3D world coordinates give true hip flexion regardless of camera angle.
-  // In 2D side-view, foreshortening when the leg is extended toward/away from camera
-  // can underestimate peak hip flexion by 10–20°. WorldLandmarks correct for this.
+  // ── Hip angles ────────────────────────────────────────────────────────────
+  // RUNNING/GAIT: Use thigh-from-vertical (knee position relative to hip on vertical axis).
+  //   Rationale: the shoulder-hip-knee method is unreliable for running because the shoulder
+  //   landmark drifts with arm swing, making the angle near 180° even when the knee is well
+  //   forward — systematically underestimating peak hip flexion by 15-30°.
+  //   Thigh-from-vertical is independent of arm swing and directly matches clinical definition.
+  //
+  // OTHER MOVEMENTS (squat/deadlift/lunge): Use shoulder-hip-knee because the trunk lean
+  //   IS the clinical reference — a 90° forward lean at the hip with 45° trunk lean means
+  //   the hip flexion is 90° relative to the trunk, not 45° from vertical.
+  //
+  // 3D WORLD LANDMARKS: Used when available for both methods (removes perspective effects).
+  //
+  // THIGH-FROM-VERTICAL FORMULA:
+  //   Angle between the thigh (hip→knee vector) and the vertical.
+  //   Image coords: Y increases downward, so knee.y > hip.y normally.
+  //   angle = atan2(|knee.x - hip.x|, knee.y - hip.y)
+  //   At 0° (full extension): knee directly below hip → angle = 0°
+  //   At 45° swing: knee as far forward as it is below → angle = 45°
+  //   At 60° swing: knee further forward than below → angle = 60°
   const lShoulder=v(11),rShoulder=v(12);
-  if(lShoulder&&lHip&&lKnee) {
-    const raw = calcAngleBest(lShoulder,lHip,lKnee);
-    if(raw!=null) angles['Left Hip Flexion'] = Math.abs(180 - raw);
-  }
-  if(rShoulder&&rHip&&rKnee) {
-    const raw = calcAngleBest(rShoulder,rHip,rKnee);
-    if(raw!=null) angles['Right Hip Flexion'] = Math.abs(180 - raw);
+  const isGaitMov = /running|gait|walk/i.test(movement);
+
+  // Thigh-from-vertical — 2D image coords
+  const hipFlexV2D = (h, k) => {
+    if(!h||!k) return null;
+    const dy = k.y - h.y;
+    if(dy < 0.02) return null; // knee above or level with hip → not a valid standing frame
+    return Math.round(Math.atan2(Math.abs(k.x - h.x), dy) * 180 / Math.PI);
+  };
+
+  // Thigh-from-vertical — 3D world coords (hip-centred metric space, Y-down convention)
+  const hipFlexV3D = (h, k) => {
+    if(!h||!k||h._wx==null||k._wx==null) return null;
+    const dy = k._wy - h._wy; // positive when knee lower (Y-down)
+    if(dy < 0.02) return null;
+    const dx = k._wx - h._wx, dz = k._wz - h._wz;
+    return Math.round(Math.atan2(Math.hypot(dx, dz), dy) * 180 / Math.PI);
+  };
+
+  if(isGaitMov) {
+    // Running/gait: thigh-from-vertical (preferred)
+    if(lHip&&lKnee) {
+      const val = hipFlexV3D(lHip,lKnee) ?? hipFlexV2D(lHip,lKnee);
+      if(val!=null) angles['Left Hip Flexion'] = val;
+    }
+    if(rHip&&rKnee) {
+      const val = hipFlexV3D(rHip,rKnee) ?? hipFlexV2D(rHip,rKnee);
+      if(val!=null) angles['Right Hip Flexion'] = val;
+    }
+  } else {
+    // Other movements: shoulder-hip-knee (trunk lean is clinically relevant reference)
+    if(lShoulder&&lHip&&lKnee) {
+      const raw = calcAngleBest(lShoulder,lHip,lKnee);
+      if(raw!=null) angles['Left Hip Flexion'] = Math.abs(180 - raw);
+    }
+    if(rShoulder&&rHip&&rKnee) {
+      const raw = calcAngleBest(rShoulder,rHip,rKnee);
+      if(raw!=null) angles['Right Hip Flexion'] = Math.abs(180 - raw);
+    }
   }
   // Hip Extension at toe-off is NOT computed here — it requires the specific toe-off frame.
   // The stride engine's hipExtAtToeoff value is injected into the angles table separately
@@ -6460,7 +6523,7 @@ async function runAnalysis() {
       if(canvas) frameHeight = Math.max(frameHeight, canvas.height);
 
       if(mpResult && mpResult.poseLandmarks) {
-        allAngles.push(extractAngles(mpResult.poseLandmarks, cameraView));
+        allAngles.push(extractAngles(mpResult.poseLandmarks, cameraView, movement));
       }
     }
   } else {
@@ -6484,7 +6547,7 @@ async function runAnalysis() {
   if(window._denseAnglesFrames && window._denseAnglesFrames.length > allAngles.length && /running|gait|walk/i.test(movement)) {
     const denseAngles = window._denseAnglesFrames
       .filter(f => f.landmarks)
-      .map(f => extractAngles(f.landmarks, cameraView));
+      .map(f => extractAngles(f.landmarks, cameraView, movement));
     const densePhases = window._denseAnglesFrames.map(f => f.phase || null);
     aggregated = aggregateAngles(denseAngles, densePhases);
     console.log(`[Analysis] Stage 3: Using ${denseAngles.length} dense frames for angle aggregation (was ${allAngles.length})`);
@@ -6568,7 +6631,7 @@ async function runAnalysis() {
         const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2);
         annotatedFrames2.push({base64, canvas, phase: frame.phase});
         if(mpResult && mpResult.poseLandmarks) {
-          allAngles2.push(extractAngles(mpResult.poseLandmarks, cameraView2));
+          allAngles2.push(extractAngles(mpResult.poseLandmarks, cameraView2, movement));
         }
       }
     } else {
@@ -6657,7 +6720,7 @@ ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases
 
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
 ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
-- Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion. Values near 0° = near-upright; values >80° = excessive forward lean.
+- Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). For running/gait, this is the thigh-from-vertical angle (independent of arm swing). For lifts, this is the shoulder-hip-knee included angle corrected to 0°=neutral. Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion.
 - Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
 - Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. Values aggregated from STANCE frames only (swing excluded). IMPORTANT: ankle/foot landmarks (heel, toe) are the LEAST reliable landmarks in side-view running at 30–60fps — foot moves fast and is often partially occluded. Values outside −12° to +35° are likely tracking artefacts. If ankle DF appears severely asymmetric (>20° L/R difference) or deeply plantarflexed (< −15°) during stance, flag it as UNCONFIRMED and instruct the clinician to verify against the skeleton overlay before drawing clinical conclusions. Do NOT diagnose ankle dysfunction solely from a single plantarflexion reading.
 - Trunk Lean: degrees from vertical (0° = perfectly upright). Running norm = 5-15° forward.
