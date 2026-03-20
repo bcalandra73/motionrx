@@ -1797,11 +1797,21 @@ function startFrameExtraction(file, vid) {
                   .filter(({fd, li}) => li >= fMin && li <= fMax && !usedFisGal.has(fd.fi));
 
                 if(windowCands.length === 0) {
-                  // Window empty — find nearest unused frame in whole cycle
-                  const nearest = perFrame
+                  // Window empty — first try any unused frame in the whole cycle
+                  let nearest = perFrame
                     .map((fd,li) => ({fd,li,dist:Math.abs(li-idealLi)}))
                     .filter(c => c.li >= cycleStart && c.li <= cycleEnd && !usedFisGal.has(c.fd.fi))
                     .sort((a,b) => a.dist-b.dist)[0];
+                  // Last resort: search ALL dense frames (not just cycle) so we always get 8 gallery frames.
+                  // This happens when the best-stride cycle has fewer dense frames than phases (short clip,
+                  // high cadence, or conservative stride engine bounds). Frames outside the cycle are less
+                  // representative but better than a missing phase slot.
+                  if(!nearest) {
+                    nearest = perFrame
+                      .map((fd,li) => ({fd,li,dist:Math.abs(li-idealLi)}))
+                      .filter(c => !usedFisGal.has(c.fd.fi))
+                      .sort((a,b) => a.dist-b.dist)[0];
+                  }
                   if(!nearest) continue;
                   windowCands.push(nearest);
                 }
@@ -3344,7 +3354,13 @@ async function runMediaPipeOnFrames(frames) {
 }
 
 // Draw skeleton with confidence-based rendering (solid=confident, dashed=estimated)
-function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
+function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase=null) {
+  // Swing phases: heel (29/30) and toe (31/32) landmarks are unreliable —
+  // the foot is in the air, plantarflexed, and often occluded by the contralateral leg.
+  // We still draw the ankle (27/28) for structural skeleton continuity but dim
+  // heel/toe and suppress their labels so clinicians are not misled.
+  const phaseId = phase?._baseId || phase?.id || '';
+  const isSwingPhase = ['toeoff','earlyswing','midswing','lateswing'].includes(phaseId);
   return new Promise(resolve => {
     const img = new Image();
     img.onload = () => {
@@ -3395,9 +3411,16 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
         const jr = Math.max(4, W/110);
         // Foot landmark indices that need special visual treatment
         const footLandmarks = new Set([27, 28, 29, 30, 31, 32]); // ankles + heels + toes
+        // Heel/toe landmarks (29-32) are unreliable in swing phases — foot is in the air,
+        // plantarflexed, and often occluded. Suppress them visually to avoid misleading the PT.
+        // Ankle landmarks (27/28) are still drawn (important for skeleton continuity) but
+        // shown with a ⚠ annotation to flag that position is estimated during swing.
+        const heelToeLandmarks = new Set([29, 30, 31, 32]);
         lm.forEach((p, i) => {
           if(p.visibility < 0.2) return;
           if(isFrontalView && i >= 1 && i <= 10) return;
+          // Skip heel/toe entirely during swing phases (they're never reliable in-air)
+          if(isSwingPhase && heelToeLandmarks.has(i)) return;
           const conf = p.visibility;
           const isFoot = footLandmarks.has(i);
           ctx.beginPath();
@@ -3415,6 +3438,8 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
               ctx.fillStyle = '#c084fc'; // purple = tibia-projected (estimated from knee direction)
             } else if(isGroundCorrected) {
               ctx.fillStyle = '#fb923c'; // orange-red = ground-plane corrected
+            } else if(isSwingPhase && (i === 27 || i === 28)) {
+              ctx.fillStyle = '#facc15'; // yellow = ankle during swing (position unreliable)
             } else if(conf >= 0.55) {
               ctx.fillStyle = '#a8ff78'; // lime = heel/toe well-tracked
             } else if(conf >= 0.35) {
@@ -3425,7 +3450,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
             // Small label for ankle landmarks (27/28) to help PT identify them
             if((i === 27 || i === 28) && conf >= 0.25) {
               const side = (i === 27) ? 'LA' : 'RA';
-              const srcNote = isProjected ? '~' : isGroundCorrected ? '↓' : '';
+              const srcNote = isSwingPhase ? '?' : isProjected ? '~' : isGroundCorrected ? '↓' : '';
               ctx.font = `bold ${Math.max(9, W/85)}px sans-serif`;
               ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
               ctx.strokeText(side+srcNote, p.x*W + r + 3, p.y*H + 4);
@@ -3435,6 +3460,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side') {
             ctx.beginPath();
             ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
             ctx.fillStyle = isProjected ? '#c084fc' : isGroundCorrected ? '#fb923c'
+                          : (isSwingPhase && (i===27||i===28)) ? '#facc15'
                           : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
           } else if(conf >= 0.6) {
             ctx.fillStyle = i < 11 ? '#ffeb3b' : '#00e5cc';
@@ -6034,12 +6060,23 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 // Hip Flexion: stored as degrees-from-upright → bigger = more flexed → use .max
 // Knee Flexion: stored as included angle → smaller = more flexed → use .min
 // All others (trunk lean, ankle DF, pelvic drop): use .avg (contextual averages)
+// GAIT_USE_MAX: show peak (largest) value — hip flexion increases during swing
+// GAIT_USE_MIN: capture most-flexed frame (smallest INCLUDED angle) — knee peaks in swing
+// For knee flexion display, we CONVERT the included angle to a clinical flexion angle
+// (180° - included = degrees of bending from full extension).
+// This matches the norm convention "90-130° peak swing flexion" where 90° = moderately bent.
+// Without this conversion, 58° included angle (=122° flexion) would read as "below normal"
+// when compared against the 90-130° norm — the opposite of the true finding.
 const GAIT_USE_MAX = new Set(['Left Hip Flexion','Right Hip Flexion']);
-const GAIT_USE_MIN = new Set(['Left Knee Flexion','Right Knee Flexion']);
+const GAIT_USE_MIN = new Set(['Left Knee Flexion','Right Knee Flexion']); // converted to flexion angle below
 function gaitDisplayVal(jointName, agg, movement) {
   const isGait = /running|gait|walk/i.test(movement || '');
   if(isGait && GAIT_USE_MAX.has(jointName)) return agg.max;
-  if(isGait && GAIT_USE_MIN.has(jointName)) return agg.min;
+  if(isGait && GAIT_USE_MIN.has(jointName)) {
+    // Convert included angle → flexion angle (180° - included)
+    // agg.min is the smallest included angle = the most bent frame = peak flexion
+    return agg.min != null ? 180 - agg.min : null;
+  }
   return agg.avg;
 }
 
@@ -6590,8 +6627,8 @@ async function runAnalysis() {
         , rawBarPoints[0]);
       }
 
-      // Draw skeleton + bar dot on this frame
-      const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, barPt, cameraView);
+      // Draw skeleton + bar dot on this frame, passing phase for swing-aware landmark rendering
+      const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, barPt, cameraView, frame.phase);
       annotatedFrames.push({base64, canvas, phase: frame.phase});
       if(canvas) frameHeight = Math.max(frameHeight, canvas.height);
 
@@ -6701,7 +6738,7 @@ async function runAnalysis() {
       for(let i = 0; i < extractedFrames2.length; i++) {
         const frame = extractedFrames2[i];
         const mpResult = fusedResults2[i];
-        const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2);
+        const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2, frame.phase);
         annotatedFrames2.push({base64, canvas, phase: frame.phase});
         if(mpResult && mpResult.poseLandmarks) {
           allAngles2.push(extractAngles(mpResult.poseLandmarks, cameraView2, movement));
@@ -7100,6 +7137,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           <span><span style="background:#0ea5e9;color:#fff;font-size:.60rem;font-weight:800;padding:0 4px;border-radius:2px;">L</span> Left leg phase</span>
           <span><span style="background:#f97316;color:#fff;font-size:.60rem;font-weight:800;padding:0 4px;border-radius:2px;">R</span> Right leg phase</span>
           <span><span style="color:#f97316;">↓</span> Contact/loading &nbsp; <span style="color:var(--teal);">⊙</span> Stance &nbsp; <span style="color:#818cf8;">↑</span> Swing</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#a8ff78;vertical-align:middle;"></span> Ankle (stance — reliable) &nbsp; <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#facc15;vertical-align:middle;"></span> Ankle? (swing — estimated, heel/toe hidden)</span>
           ${window_strideMetrics?.fsConsensus && window_strideMetrics.fsConsensus !== 'unknown'
             ? `<span style="background:#f97316;color:#fff;font-size:.65rem;font-weight:800;padding:1px 6px;border-radius:3px;">🦶 ${window_strideMetrics.fsConsensus.toUpperCase()} STRIKE</span> <span>Foot strike pattern on Initial Contact frame</span>`
             : ''}`;
