@@ -1551,8 +1551,38 @@ function startFrameExtraction(file, vid) {
               const lHipS  = smooth5(perFrame.map(f=>f.lHip));
               const rHipS  = smooth5(perFrame.map(f=>f.rHip));
 
-              // c) Local maxima detection for ankle Y (contact events)
-              const localMaxima = (arr, minProm=0.015) => {
+              // c) Composite contact detection — ankle Y + knee extension (mirrors StrideEngine)
+              // Pure ankle-Y fails when MoveNet misplaces ankle on treadmill frames.
+              // Knee included angle is large (~165-175°) at contact, small (~60-80°) at midswing.
+              // Building a composite signal makes phase detection robust to ankle placement errors.
+              const normSig = (arr) => {
+                const vals = arr.filter(v=>v!=null);
+                if(vals.length < 2) return arr.map(()=>null);
+                const lo=Math.min(...vals), hi=Math.max(...vals), range=hi-lo;
+                if(range < 0.001) return arr.map(v=>v!=null?0.5:null);
+                return arr.map(v=>v!=null?(v-lo)/range:null);
+              };
+              const lAnkRange = (() => { const v=lAnkS.filter(x=>x!=null); return v.length>1?Math.max(...v)-Math.min(...v):0; })();
+              const rAnkRange = (() => { const v=rAnkS.filter(x=>x!=null); return v.length>1?Math.max(...v)-Math.min(...v):0; })();
+              const ankWeak = (lAnkRange + rAnkRange)/2 < 0.04;
+              const wA = ankWeak ? 0.30 : 0.55, wK = ankWeak ? 0.70 : 0.45;
+              const lAnkN=normSig(lAnkS), rAnkN=normSig(rAnkS);
+              const lKnN=normSig(lKneeS), rKnN=normSig(rKneeS);
+              const mkComp = (aN,kN) => aN.map((_,i)=>{
+                const a=aN[i],k=kN[i];
+                if(a==null&&k==null) return null;
+                const wa=a!=null?wA:0, wk=k!=null?wK:0, ws=wa+wk;
+                if(ws<0.1) return null;
+                return ((a??0.5)*wa+(k??0.5)*wk)/ws;
+              });
+              const lComp = mkComp(lAnkN,lKnN);
+              const rComp = mkComp(rAnkN,rKnN);
+              const compRangeVals = [...lComp,...rComp].filter(v=>v!=null);
+              const gFsmMinProm = compRangeVals.length>3
+                ? Math.max(0.08, (Math.max(...compRangeVals)-Math.min(...compRangeVals))*0.15)
+                : 0.10;
+
+              const localMaxima = (arr, mp=gFsmMinProm) => {
                 const peaks=[];
                 for(let i=1;i<arr.length-1;i++){
                   if(arr[i]==null) continue;
@@ -1561,7 +1591,7 @@ function startFrameExtraction(file, vid) {
                   if(!prev.length||!next.length) continue;
                   if(arr[i]>Math.max(...prev)&&arr[i]>Math.max(...next)){
                     const surrounding=[...prev,...next];
-                    if(arr[i]-Math.min(...surrounding)>=minProm) peaks.push(i);
+                    if(arr[i]-Math.min(...surrounding)>=mp) peaks.push(i);
                   }
                 }
                 if(!peaks.length){
@@ -1582,8 +1612,8 @@ function startFrameExtraction(file, vid) {
               const lVis = lAnkS.filter(v=>v!=null).length;
               const rVis = rAnkS.filter(v=>v!=null).length;
               const visMargin = 0.20; // R must have >20% more frames than L to become REF
-              const lContacts = localMaxima(lAnkS);
-              const rContacts = localMaxima(rAnkS);
+              const lContacts = localMaxima(lComp);
+              const rContacts = localMaxima(rComp);
               const switchToR = (rVis > lVis * (1 + visMargin)) && (rContacts.length > lContacts.length);
               const REF = switchToR ? 'R' : 'L';
               const OPP = REF==='L' ? 'R' : 'L';
@@ -1597,7 +1627,7 @@ function startFrameExtraction(file, vid) {
               const refC     = REF==='L' ? lContacts : rContacts;
               const oppC     = REF==='L' ? rContacts : lContacts;
 
-              console.log(`[GaitFSM v4] REF=${REF} vis=${lVis}L/${rVis}R contacts: L=${lContacts.length} R=${rContacts.length} switchToR=${switchToR}`);
+              console.log(`[GaitFSM v4] REF=${REF} vis=${lVis}L/${rVis}R ankWeak=${ankWeak} contacts: L=${lContacts.length} R=${rContacts.length} switchToR=${switchToR}`);
 
               // e) Determine cycle bounds
               // Prefer the best-representative stride from the stride engine if available
@@ -4759,17 +4789,27 @@ function extractAngles(lm, view='side', movement='') {
 
       // Use combined confidence (visibility × presence) and require higher threshold
       // for pronation than for other metrics — heel is the least reliable landmark.
-      const minHeelConf = 0.55; // higher than default vHigh (0.40)
+      // Raised from 0.55 → 0.65: at 0.55 MediaPipe frequently places the heel at a
+      // plausible-looking but wrong position (e.g. on the treadmill belt edge).
+      const minHeelConf = 0.65;
       const lKneePost = v(25), lAnkPost = v(27);
       const rKneePost = v(26), rAnkPost = v(28);
       const lHeelPost = lm[29] && combinedConf(lm[29]) > minHeelConf ? lm[29] : null;
       const rHeelPost = lm[30] && combinedConf(lm[30]) > minHeelConf ? lm[30] : null;
 
-      // Only compute pronation during stance frames (ankle Y close to ground level).
-      // During swing the heel faces away from camera and the angle is meaningless.
-      // Stance proxy: ankle Y > 0.55 (ankle is in the lower 45% of the frame).
-      const lStance = lAnkPost && lAnkPost.y > 0.55;
-      const rStance = rAnkPost && rAnkPost.y > 0.55;
+      // Only compute pronation during the LOADING phase frame.
+      // Rationale: Loading Response is the only phase where (a) the foot is flat on the
+      // belt, (b) the heel is visible and close to facing the camera, and (c) both the
+      // ankle and heel landmarks are in their most anatomically predictable positions.
+      // All other stance frames (midstance, propulsion, toeoff) have the heel rotating
+      // away from camera or lifting, making the knee→ankle→heel triangle unreliable.
+      // Midstance and propulsion also allow the near-side (swing) foot to occlude the
+      // far-side heel, producing false eversion readings.
+      const phaseId = arguments[2]?._baseId || arguments[2]?.id || null;  // phase passed in future calls
+      // For aggregation: accept loading phase frame OR any stance frame where ankle is very low.
+      // Stance proxy threshold tightened from 0.55 → 0.60 (ankle must be in lower 40% of frame).
+      const lStance = lAnkPost && lAnkPost.y > 0.60;
+      const rStance = rAnkPost && rAnkPost.y > 0.60;
 
       const lPron = lStance ? computePronation(lKneePost, lAnkPost, lHeelPost) : null;
       const rPron = rStance ? computePronation(rKneePost, rAnkPost, rHeelPost) : null;
@@ -5615,28 +5655,95 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const rHipSmooth  = smooth3(perFrameData.map(f=>f.rHip));
   const N = perFrameData.length;
 
-  // ── 1. Contact event detection (local maxima of ankle Y) ──
-  // In normalised coords y=1 = bottom of frame. Foot at ground = maximum Y.
-  // minProm: require peak to rise at least this much above surrounding valley.
-  const findContacts = (ankArr, minProm=0.018) => {
+  // ── 1. Composite contact detection (ankle Y + knee extension confirmation) ──
+  // Pure ankle-Y peak detection fails when MediaPipe/MoveNet misplaces the ankle —
+  // common at 30-60fps on treadmills where the foot moves fast and is often partially
+  // behind the belt edge. Ankle Y alone produces false contacts or misses real ones.
+  //
+  // Composite approach: at each candidate contact frame, verify with knee angle.
+  // At initial contact the knee is near full extension (large included angle ~160-175°).
+  // At midswing the knee is maximally bent (~55-80° included angle).
+  // This cross-checks the ankle signal with a much more reliable landmark pair.
+  //
+  // Signal reliability: compute ankle Y range across the clip.
+  // If range < 0.03 (flat — treadmill geometry at 30fps), reduce ankle weight and
+  // lean more heavily on the knee extension signal for contact detection.
+  const ankYRange = (() => {
+    const lVals = lAnkSmooth.filter(v=>v!=null);
+    const rVals = rAnkSmooth.filter(v=>v!=null);
+    const allVals = [...lVals, ...rVals];
+    if(allVals.length < 4) return 0;
+    return Math.max(...allVals) - Math.min(...allVals);
+  })();
+  const ankSignalWeak = ankYRange < 0.04;  // treadmill flat-signal flag
+
+  // Build a composite "ground contact likelihood" signal for each leg:
+  //   contact_score[i] = w_ank * normalised_ankle_Y[i] + w_knee * normalised_knee_extension[i]
+  // Knee extension = large included angle = near full extension = stance.
+  // Normalise each signal to [0,1] so they contribute equally at equal weight.
+  const normalise = (arr) => {
+    const vals = arr.filter(v=>v!=null);
+    if(vals.length < 2) return arr.map(()=>null);
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    const range = hi - lo;
+    if(range < 0.001) return arr.map(v => v!=null ? 0.5 : null);
+    return arr.map(v => v!=null ? (v - lo) / range : null);
+  };
+
+  const lAnkNorm  = normalise(lAnkSmooth);  // high = foot near ground
+  const rAnkNorm  = normalise(rAnkSmooth);
+  const lKneeNorm = normalise(lKneeSmooth); // high = knee more extended (large included angle)
+  const rKneeNorm = normalise(rKneeSmooth);
+
+  const wAnk  = ankSignalWeak ? 0.30 : 0.55;  // reduce ankle weight if signal is flat
+  const wKnee = ankSignalWeak ? 0.70 : 0.45;  // boost knee weight when ankle unreliable
+
+  const lComposite = lAnkSmooth.map((_,i) => {
+    const a = lAnkNorm[i], k = lKneeNorm[i];
+    if(a == null && k == null) return null;
+    const wa = a != null ? wAnk : 0, wk = k != null ? wKnee : 0;
+    const wSum = wa + wk;
+    if(wSum < 0.1) return null;
+    return ((a ?? 0.5) * wa + (k ?? 0.5) * wk) / wSum;
+  });
+  const rComposite = rAnkSmooth.map((_,i) => {
+    const a = rAnkNorm[i], k = rKneeNorm[i];
+    if(a == null && k == null) return null;
+    const wa = a != null ? wAnk : 0, wk = k != null ? wKnee : 0;
+    const wSum = wa + wk;
+    if(wSum < 0.1) return null;
+    return ((a ?? 0.5) * wa + (k ?? 0.5) * wk) / wSum;
+  });
+
+  // Dynamic minimum prominence: 15% of the composite signal range.
+  // On a flat-ankle treadmill clip this might be 0.12; on overground with good signal ~0.20.
+  // This replaces the fixed 0.018 threshold which was tuned only for raw ankle Y.
+  const compositeRange = (() => {
+    const all = [...lComposite,...rComposite].filter(v=>v!=null);
+    if(all.length < 4) return 0.12;
+    return Math.max(...all) - Math.min(...all);
+  })();
+  const minProm = Math.max(0.08, compositeRange * 0.15);
+
+  const findContacts = (compArr, minProm) => {
     const peaks = [];
-    for(let i=1; i<ankArr.length-1; i++) {
-      if(ankArr[i]==null) continue;
-      // Look at a wider window for running (fast peaks)
-      const prev = ankArr.slice(Math.max(0,i-3),i).filter(x=>x!=null);
-      const next = ankArr.slice(i+1,Math.min(ankArr.length,i+4)).filter(x=>x!=null);
+    for(let i=1; i<compArr.length-1; i++) {
+      if(compArr[i]==null) continue;
+      const prev = compArr.slice(Math.max(0,i-3),i).filter(x=>x!=null);
+      const next = compArr.slice(i+1,Math.min(compArr.length,i+4)).filter(x=>x!=null);
       if(!prev.length||!next.length) continue;
-      const isLocalMax = ankArr[i] > Math.max(...prev) && ankArr[i] >= Math.max(...next);
+      const isLocalMax = compArr[i] > Math.max(...prev) && compArr[i] >= Math.max(...next);
       if(isLocalMax) {
         const minSurround = Math.min(...prev,...next);
-        if(ankArr[i] - minSurround >= minProm) peaks.push(i);
+        if(compArr[i] - minSurround >= minProm) peaks.push(i);
       }
     }
     return peaks;
   };
 
-  const lContactIdxs = findContacts(lAnkSmooth);
-  const rContactIdxs = findContacts(rAnkSmooth);
+  const lContactIdxs = findContacts(lComposite, minProm);
+  const rContactIdxs = findContacts(rComposite, minProm);
+  console.log(`[StrideEngine] ankRange=${ankYRange.toFixed(3)} weak=${ankSignalWeak} compRange=${compositeRange.toFixed(3)} minProm=${minProm.toFixed(3)} contacts L=${lContactIdxs.length} R=${rContactIdxs.length}`);
 
   // Float phase detection is now done per-stride inside the strideDetails loop (signal reliability check)
 
@@ -6495,6 +6602,11 @@ function aggregateAngles(allFrameAngles, framePhases) {
       if(k.startsWith('_')) return;
       // Ankle DF: stance frames only (swing push-off PF is not the clinical measurement)
       if(isSwing && k.includes('Ankle Dorsiflexion')) return;
+      // Pronation: loading phase ONLY — heel landmark is only reliable when the foot is
+      // flat on the ground at full weight acceptance. All other stance frames risk
+      // heel rotation away from camera or near-side foot occlusion of the far-side heel.
+      // If no phase info is available (phaseId null), fall back to any stance frame.
+      if(k.includes('Pronation') && phaseId !== null && phaseId !== 'loading') return;
       // Hip Flexion: swing frames only for .max peak.
       // During stance the hip is near-neutral (10-20°). Including stance frames
       // depresses .max and makes peak hip flexion appear lower than it really is.
