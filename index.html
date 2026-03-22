@@ -4820,7 +4820,6 @@ function extractAngles(lm, view='side', movement='') {
 
   // ── Frontal-plane metrics (front/posterior view only) ─────────────────────
   // These are physically invalid from a side view — only compute when frontal.
-  const isFrontalView = (view === 'front' || view === 'posterior');
   if(isFrontalView) {
     const lHipF=v(23), rHipF=v(24);
     const lKneeF=v(25), rKneeF=v(26);
