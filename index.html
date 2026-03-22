@@ -4560,61 +4560,13 @@ function extractAngles(lm, view='side', movement='') {
   const v = (i) => lm[i] && lm[i].visibility > 0.30 ? lm[i] : null;
   const angles = {};
 
-  // ── Near-side vs far-side disambiguation for side view ───────────────────
-  // In a side-view camera, one leg faces the camera (near) and one is behind it (far).
-  // The far leg's landmarks are foreshortened: the thigh appears nearly vertical
-  // regardless of actual hip flexion, and the knee angle is compressed by perspective.
-  // MediaPipe assigns L/R based on body anatomy (left = landmark 23/25/27 etc.),
-  // NOT camera proximity. We identify the near side by visibility:
-  //   • Near leg: higher hip + knee visibility (both >0.55)
-  //   • Far leg:  lower visibility (typically 0.30-0.55, occluded or foreshortened)
-  //
-  // For 2D side-view hip and knee flexion:
-  //   • Near side: measurement is accurate — use it
-  //   • Far side:  only use if worldLandmarks (_wx/_wz) are available (3D corrects perspective)
-  //                If no worldLandmarks, mark as _lowSideConf so aggregation can flag it
-  //
-  // This does NOT affect frontal-view analysis where both sides face camera equally.
-  const isSideView = (view === 'side');
   const isFrontalView = (view === 'front' || view === 'posterior');
-
-  // Confidence of each hip/knee pair — higher = more likely to be near side
-  const lHipConf  = lm[23]?.visibility ?? 0;
-  const rHipConf  = lm[24]?.visibility ?? 0;
-  const lKneeConf = lm[25]?.visibility ?? 0;
-  const rKneeConf = lm[26]?.visibility ?? 0;
-  const lLegConf  = (lHipConf + lKneeConf) / 2;
-  const rLegConf  = (rHipConf + rKneeConf) / 2;
-
-  // Near side: substantially more visible. Threshold 0.10 margin prevents noise flips.
-  const NEAR_MARGIN = 0.10;
-  const lIsNear = isSideView && (lLegConf > rLegConf + NEAR_MARGIN);
-  const rIsNear = isSideView && (rLegConf > lLegConf + NEAR_MARGIN);
-  // If confidence is similar, both are acceptable (frontal-ish camera or both visible)
-  const bothVisible = isSideView && !lIsNear && !rIsNear;
 
   // Knee angles — use 3D world coordinates when available (eliminates foreshortening)
   const lHip=v(23),lKnee=v(25),lAnkle=v(27);
   const rHip=v(24),rKnee=v(26),rAnkle=v(28);
-
-  // For side-view gait: only compute far-side knee if worldLandmarks available
-  const lKneeFlex = lHip&&lKnee&&lAnkle ? calcAngleBest(lHip,lKnee,lAnkle) : null;
-  const rKneeFlex = rHip&&rKnee&&rAnkle ? calcAngleBest(rHip,rKnee,rAnkle) : null;
-  const lHasWorld = lHip?._wx != null && lKnee?._wx != null;
-  const rHasWorld = rHip?._wx != null && rKnee?._wx != null;
-
-  if(lKneeFlex != null) {
-    const lFarAndNoWorld = isSideView && rIsNear && !lHasWorld;
-    if(!lFarAndNoWorld) angles['Left Knee Flexion'] = lKneeFlex;
-    else angles['Left Knee Flexion'] = lKneeFlex; // keep but flag
-    if(lFarAndNoWorld) angles['_lKneeLowSideConf'] = true;
-  }
-  if(rKneeFlex != null) {
-    const rFarAndNoWorld = isSideView && lIsNear && !rHasWorld;
-    if(!rFarAndNoWorld) angles['Right Knee Flexion'] = rKneeFlex;
-    else angles['Right Knee Flexion'] = rKneeFlex;
-    if(rFarAndNoWorld) angles['_rKneeLowSideConf'] = true;
-  }
+  if(lHip&&lKnee&&lAnkle) angles['Left Knee Flexion']  = calcAngleBest(lHip,lKnee,lAnkle);
+  if(rHip&&rKnee&&rAnkle) angles['Right Knee Flexion'] = calcAngleBest(rHip,rKnee,rAnkle);
 
   // ── Hip angles ────────────────────────────────────────────────────────────
   // RUNNING/GAIT: Use thigh-from-vertical (knee position relative to hip on vertical axis).
@@ -4660,39 +4612,14 @@ function extractAngles(lm, view='side', movement='') {
   };
 
   if(isGaitMov) {
-    // Running/gait: thigh-from-vertical.
-    // SIDE VIEW NEAR-SIDE GATE: The far leg's thigh is foreshortened in 2D.
-    // Example: at 50° true hip flexion, the far leg thigh points partly into the camera,
-    // making its 2D projection only ~10-25°. This collapses bilateral measurements toward
-    // each other — both sides read the near-leg value (as in "49°/49°" above).
-    //
-    // Rule: in side view, only accept a leg's hip flexion from 2D if:
-    //   (a) it IS the near side (higher visibility), OR
-    //   (b) worldLandmarks are available (3D is perspective-corrected), OR
-    //   (c) camera is not clearly side view (frontal or both legs similar visibility)
-    //
-    // For the far leg without worldLandmarks: omit the value entirely.
-    // This means one side may be null — which is correct and honest.
-    // The angles table will show N/A with an explanation rather than a spurious number.
-
+    // Running/gait: thigh-from-vertical (preferred over shoulder-hip-knee)
     if(lHip&&lKnee) {
-      const val3d = hipFlexV3D(lHip, lKnee);
-      if(val3d != null) {
-        angles['Left Hip Flexion'] = val3d; // 3D always accepted
-      } else if(!isSideView || lIsNear || bothVisible) {
-        const val2d = hipFlexV2D(lHip, lKnee);
-        if(val2d != null) angles['Left Hip Flexion'] = val2d;
-      }
-      // else: far side in 2D side view without worldLandmarks — omit
+      const val = hipFlexV3D(lHip,lKnee) ?? hipFlexV2D(lHip,lKnee);
+      if(val!=null) angles['Left Hip Flexion'] = val;
     }
     if(rHip&&rKnee) {
-      const val3d = hipFlexV3D(rHip, rKnee);
-      if(val3d != null) {
-        angles['Right Hip Flexion'] = val3d;
-      } else if(!isSideView || rIsNear || bothVisible) {
-        const val2d = hipFlexV2D(rHip, rKnee);
-        if(val2d != null) angles['Right Hip Flexion'] = val2d;
-      }
+      const val = hipFlexV3D(rHip,rKnee) ?? hipFlexV2D(rHip,rKnee);
+      if(val!=null) angles['Right Hip Flexion'] = val;
     }
   } else {
     // Other movements: shoulder-hip-knee (trunk lean is clinically relevant reference)
@@ -7568,22 +7495,11 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const confNote = (hitRate) => hitRate != null
             ? `<span class="ref" title="Only ${hitRate}% of frames produced this measurement">⚠ ${hitRate}% frames</span>`
             : '';
-
-          // Detect when a value is null due to far-side suppression (side view, not worldLandmarks)
-          // vs genuinely not measured. Both show '—' but the first gets an explanatory note.
-          const isSideViewLocal = (cameraView === 'side');
-          const isFarSideHip = (key) => isSideViewLocal &&
-            (key === 'Left Hip Flexion' || key === 'Right Hip Flexion') &&
-            /running|gait|walk/i.test(movement);
-          const farSideNote = `<span class="ref" style="color:var(--amber);" title="Far-leg 2D measurement suppressed — foreshortening makes it unreliable from side view. Use posterior/frontal view for bilateral comparison.">⚠ far leg (side view)</span>`;
-
-          const lCell = !lv
-            ? (isFarSideHip(L) ? farSideNote : '—')
+          const lCell = !lv ? '—'
             : lLowConf
               ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(lv.hitRate)}<br><span class="ref">insufficient data (${lv.count} frames)</span>`
               : `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°, range ${lv.min}°–${lv.max}°</span>`;
-          const rCell = !rv
-            ? (R && isFarSideHip(R) ? farSideNote : (R ? '—' : '<span class="ref">bilateral</span>'))
+          const rCell = !rv ? (R ? '—' : '<span class="ref">bilateral</span>')
             : rLowConf
               ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(rv.hitRate)}<br><span class="ref">insufficient data (${rv.count} frames)</span>`
               : `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°, range ${rv.min}°–${rv.max}°</span>`;
