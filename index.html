@@ -500,6 +500,13 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </div>
         </div>
         <div id="videoDurationFeedback" style="display:none;margin-top:8px;padding:9px 14px;border-radius:8px;font-size:.78rem;font-weight:500;"></div>
+        <div style="margin-top:12px;padding:10px 14px;background:var(--teal-light);border-radius:8px;display:flex;align-items:center;gap:10px;">
+          <input type="checkbox" id="includeFootwear" checked style="width:16px;height:16px;accent-color:var(--teal);flex-shrink:0;">
+          <label for="includeFootwear" style="font-size:.8rem;color:var(--teal);font-weight:600;cursor:pointer;">
+            👟 Include footwear recommendation in report
+            <span style="font-weight:400;color:var(--muted);display:block;font-size:.72rem;margin-top:1px;">Based on pronation, foot strike, and hip adduction data — adds a shoe category suggestion to the clinical report</span>
+          </label>
+        </div>
       </div>
 
       <!-- Upload + Focus -->
@@ -4340,7 +4347,15 @@ function analyzeBarPath(barPoints, view, movement) {
   // So 1.0 normalized height ≈ 1.8/0.8 = 2.25m = 225cm
   // For horizontal: frame width ≈ frame height * aspect ratio, but we use height as reference
   // Simpler: assume subject height (1.8m) spans the full normalized range → 1 unit = 180cm
-  const NORM_TO_CM = 180; // 1.0 normalized = ~180cm (1.8m subject)
+  const heightCm = parseFloat(document.getElementById('patientHeight')?.value || '0') || 0;
+  const heightUnit = document.getElementById('heightUnit')?.value || 'cm';
+  const heightM = heightCm > 0
+    ? (heightUnit === 'in' ? heightCm * 0.0254 : heightCm / 100)
+    : 1.75; // fallback to 1.75m if not entered
+  // Subject fills ~80% of frame height at a good camera distance
+  const NORM_TO_M  = heightM / 0.80;
+  const NORM_TO_CM = NORM_TO_M * 100;
+
   const maxDriftCm  = Math.round(maxDrift     * NORM_TO_CM * 10) / 10;
   const avgDriftCm  = Math.round(avgDrift     * NORM_TO_CM * 10) / 10;
   const verticalRomCm = Math.round(totalVertical * NORM_TO_CM * 10) / 10;
@@ -4362,6 +4377,80 @@ function analyzeBarPath(barPoints, view, movement) {
   const isDeadliftFront = (view === 'front' || view === 'posterior') &&
                           /deadlift|hinge|rdl/i.test(movement || '');
 
+  // ── Bar Velocity Analysis ─────────────────────────────────────────────────
+  // Velocity requires:
+  //   1. t values (0–1 fraction of video duration) on each bar point
+  //   2. Video duration from the video element
+  //   3. Normalized Y → meters conversion from patient height
+  //
+  // We compute per-segment vertical velocity then identify:
+  //   • Concentric phase: bar moving upward (Y decreasing in image coords)
+  //   • Peak velocity: maximum upward speed in a single segment
+  //   • Mean concentric velocity: average speed during the upward phase
+  //
+  // Clinical context (VBT — Velocity Based Training):
+  //   • > 1.0 m/s  = power/speed zone (jump squats, Olympic lifts)
+  //   • 0.75–1.0   = dynamic strength zone
+  //   • 0.50–0.75  = strength-speed zone
+  //   • 0.35–0.50  = strength zone (typical working sets 70-85% 1RM)
+  //   • < 0.35     = absolute strength / near-maximal effort (>90% 1RM)
+  //
+  // NOTE: Normalized Y is inverted (0=top, 1=bottom), so concentric = Y decreasing.
+  // We require at least one .t field to attempt velocity calculation.
+  let velocityData = null;
+  const hasTime = barPoints.some(p => p.t != null);
+  if(hasTime && barPoints.length >= 4) {
+    const vidEl = document.querySelector('video');
+    const vidDur = vidEl && isFinite(vidEl.duration) && vidEl.duration > 0 ? vidEl.duration : null;
+
+    if(vidDur) {
+      // Build (t_seconds, y_meters) pairs — Y in meters, increasing upward
+      const pts = barPoints
+        .filter(p => p.t != null)
+        .map(p => ({
+          ts: p.t * vidDur,
+          ym: (1 - p.y) * NORM_TO_M  // invert Y so upward = positive
+        }))
+        .sort((a, b) => a.ts - b.ts);
+
+      // Per-segment velocity (m/s upward)
+      const segs = [];
+      for(let i = 1; i < pts.length; i++) {
+        const dt = pts[i].ts - pts[i-1].ts;
+        if(dt < 0.005) continue; // skip near-duplicate timestamps
+        const dy = pts[i].ym - pts[i-1].ym; // positive = bar moving up
+        segs.push({ v: dy / dt, t: (pts[i].ts + pts[i-1].ts) / 2 });
+      }
+
+      // Find concentric phase: sustained upward movement (velocity > 0 for several segments)
+      // Use a threshold to ignore tiny upward jitter during descent
+      const CONCENTRIC_THRESH = 0.05; // m/s — must be moving up meaningfully
+      const conSegs = segs.filter(s => s.v > CONCENTRIC_THRESH);
+
+      if(conSegs.length >= 2) {
+        const peakV   = Math.max(...conSegs.map(s => s.v));
+        const meanV   = conSegs.reduce((sum, s) => sum + s.v, 0) / conSegs.length;
+
+        // VBT zone classification
+        const classifyVBT = (v) => {
+          if(v > 1.00) return {zone: 'Power / Speed', color: '#10b981', pct: '>85% MV', detail: 'Light load, explosive intent'};
+          if(v > 0.75) return {zone: 'Dynamic Strength', color: '#3b82f6', pct: '70–80% 1RM est.', detail: 'Moderate load, high intent'};
+          if(v > 0.50) return {zone: 'Strength-Speed', color: '#f59e0b', pct: '80–87% 1RM est.', detail: 'Moderate-heavy load'};
+          if(v > 0.35) return {zone: 'Strength', color: '#ef4444', pct: '87–93% 1RM est.', detail: 'Heavy load, slower bar'};
+          return           {zone: 'Absolute Strength', color: '#7c3aed', pct: '>93% 1RM est.', detail: 'Near-maximal effort'};
+        };
+
+        velocityData = {
+          peakMs:   Math.round(peakV * 100) / 100,
+          meanMs:   Math.round(meanV * 100) / 100,
+          zone:     classifyVBT(meanV),
+          peakZone: classifyVBT(peakV),
+          segments: conSegs.length,
+        };
+      }
+    }
+  }
+
   return {
     maxDriftCm,
     avgDriftCm,
@@ -4370,7 +4459,8 @@ function analyzeBarPath(barPoints, view, movement) {
     frameCount: barPoints.length,
     isDeadliftFront,
     quality: maxDriftCm < 3 ? 'Optimal' : maxDriftCm < 6 ? 'Acceptable' : 'Significant deviation',
-    flag: maxDriftCm < 3 ? 'flag-ok' : maxDriftCm < 6 ? 'flag-med' : 'flag-high'
+    flag: maxDriftCm < 3 ? 'flag-ok' : maxDriftCm < 6 ? 'flag-med' : 'flag-high',
+    velocity: velocityData,
   };
 }
 
@@ -4470,11 +4560,61 @@ function extractAngles(lm, view='side', movement='') {
   const v = (i) => lm[i] && lm[i].visibility > 0.30 ? lm[i] : null;
   const angles = {};
 
+  // ── Near-side vs far-side disambiguation for side view ───────────────────
+  // In a side-view camera, one leg faces the camera (near) and one is behind it (far).
+  // The far leg's landmarks are foreshortened: the thigh appears nearly vertical
+  // regardless of actual hip flexion, and the knee angle is compressed by perspective.
+  // MediaPipe assigns L/R based on body anatomy (left = landmark 23/25/27 etc.),
+  // NOT camera proximity. We identify the near side by visibility:
+  //   • Near leg: higher hip + knee visibility (both >0.55)
+  //   • Far leg:  lower visibility (typically 0.30-0.55, occluded or foreshortened)
+  //
+  // For 2D side-view hip and knee flexion:
+  //   • Near side: measurement is accurate — use it
+  //   • Far side:  only use if worldLandmarks (_wx/_wz) are available (3D corrects perspective)
+  //                If no worldLandmarks, mark as _lowSideConf so aggregation can flag it
+  //
+  // This does NOT affect frontal-view analysis where both sides face camera equally.
+  const isSideView = (view === 'side');
+  const isFrontalView = (view === 'front' || view === 'posterior');
+
+  // Confidence of each hip/knee pair — higher = more likely to be near side
+  const lHipConf  = lm[23]?.visibility ?? 0;
+  const rHipConf  = lm[24]?.visibility ?? 0;
+  const lKneeConf = lm[25]?.visibility ?? 0;
+  const rKneeConf = lm[26]?.visibility ?? 0;
+  const lLegConf  = (lHipConf + lKneeConf) / 2;
+  const rLegConf  = (rHipConf + rKneeConf) / 2;
+
+  // Near side: substantially more visible. Threshold 0.10 margin prevents noise flips.
+  const NEAR_MARGIN = 0.10;
+  const lIsNear = isSideView && (lLegConf > rLegConf + NEAR_MARGIN);
+  const rIsNear = isSideView && (rLegConf > lLegConf + NEAR_MARGIN);
+  // If confidence is similar, both are acceptable (frontal-ish camera or both visible)
+  const bothVisible = isSideView && !lIsNear && !rIsNear;
+
   // Knee angles — use 3D world coordinates when available (eliminates foreshortening)
   const lHip=v(23),lKnee=v(25),lAnkle=v(27);
   const rHip=v(24),rKnee=v(26),rAnkle=v(28);
-  if(lHip&&lKnee&&lAnkle) angles['Left Knee Flexion']  = calcAngleBest(lHip,lKnee,lAnkle);
-  if(rHip&&rKnee&&rAnkle) angles['Right Knee Flexion'] = calcAngleBest(rHip,rKnee,rAnkle);
+
+  // For side-view gait: only compute far-side knee if worldLandmarks available
+  const lKneeFlex = lHip&&lKnee&&lAnkle ? calcAngleBest(lHip,lKnee,lAnkle) : null;
+  const rKneeFlex = rHip&&rKnee&&rAnkle ? calcAngleBest(rHip,rKnee,rAnkle) : null;
+  const lHasWorld = lHip?._wx != null && lKnee?._wx != null;
+  const rHasWorld = rHip?._wx != null && rKnee?._wx != null;
+
+  if(lKneeFlex != null) {
+    const lFarAndNoWorld = isSideView && rIsNear && !lHasWorld;
+    if(!lFarAndNoWorld) angles['Left Knee Flexion'] = lKneeFlex;
+    else angles['Left Knee Flexion'] = lKneeFlex; // keep but flag
+    if(lFarAndNoWorld) angles['_lKneeLowSideConf'] = true;
+  }
+  if(rKneeFlex != null) {
+    const rFarAndNoWorld = isSideView && lIsNear && !rHasWorld;
+    if(!rFarAndNoWorld) angles['Right Knee Flexion'] = rKneeFlex;
+    else angles['Right Knee Flexion'] = rKneeFlex;
+    if(rFarAndNoWorld) angles['_rKneeLowSideConf'] = true;
+  }
 
   // ── Hip angles ────────────────────────────────────────────────────────────
   // RUNNING/GAIT: Use thigh-from-vertical (knee position relative to hip on vertical axis).
@@ -4504,33 +4644,55 @@ function extractAngles(lm, view='side', movement='') {
     if(!h||!k) return null;
     const dy = k.y - h.y; // positive = knee lower (standing), negative = knee above hip
     // Only reject frames where knee is substantially above the hip (anatomically invalid for running).
-    // dy < -0.10 means knee is >10% frame height above hip — this doesn't occur in normal running.
-    // The old dy < 0.02 incorrectly rejected true peak-swing frames where the knee is at hip level
-    // (which happens at ~70-90° hip flexion in well-trained runners, or ~50-60° for restricted runners).
     if(dy < -0.10) return null;
     const angle = Math.round(Math.atan2(Math.abs(k.x - h.x), dy) * 180 / Math.PI);
-    return Math.min(90, angle); // clamp to physiological running range
+    return Math.min(90, angle);
   };
 
   // Thigh-from-vertical — 3D world coords (hip-centred metric space, Y-down convention)
   const hipFlexV3D = (h, k) => {
     if(!h||!k||h._wx==null||k._wx==null) return null;
-    const dy = k._wy - h._wy; // positive when knee lower (Y-down)
-    if(dy < -0.15) return null; // 3D: 15cm above hip = invalid
+    const dy = k._wy - h._wy;
+    if(dy < -0.15) return null;
     const dx = k._wx - h._wx, dz = k._wz - h._wz;
     const angle = Math.round(Math.atan2(Math.hypot(dx, dz), dy) * 180 / Math.PI);
     return Math.min(90, angle);
   };
 
   if(isGaitMov) {
-    // Running/gait: thigh-from-vertical (preferred)
+    // Running/gait: thigh-from-vertical.
+    // SIDE VIEW NEAR-SIDE GATE: The far leg's thigh is foreshortened in 2D.
+    // Example: at 50° true hip flexion, the far leg thigh points partly into the camera,
+    // making its 2D projection only ~10-25°. This collapses bilateral measurements toward
+    // each other — both sides read the near-leg value (as in "49°/49°" above).
+    //
+    // Rule: in side view, only accept a leg's hip flexion from 2D if:
+    //   (a) it IS the near side (higher visibility), OR
+    //   (b) worldLandmarks are available (3D is perspective-corrected), OR
+    //   (c) camera is not clearly side view (frontal or both legs similar visibility)
+    //
+    // For the far leg without worldLandmarks: omit the value entirely.
+    // This means one side may be null — which is correct and honest.
+    // The angles table will show N/A with an explanation rather than a spurious number.
+
     if(lHip&&lKnee) {
-      const val = hipFlexV3D(lHip,lKnee) ?? hipFlexV2D(lHip,lKnee);
-      if(val!=null) angles['Left Hip Flexion'] = val;
+      const val3d = hipFlexV3D(lHip, lKnee);
+      if(val3d != null) {
+        angles['Left Hip Flexion'] = val3d; // 3D always accepted
+      } else if(!isSideView || lIsNear || bothVisible) {
+        const val2d = hipFlexV2D(lHip, lKnee);
+        if(val2d != null) angles['Left Hip Flexion'] = val2d;
+      }
+      // else: far side in 2D side view without worldLandmarks — omit
     }
     if(rHip&&rKnee) {
-      const val = hipFlexV3D(rHip,rKnee) ?? hipFlexV2D(rHip,rKnee);
-      if(val!=null) angles['Right Hip Flexion'] = val;
+      const val3d = hipFlexV3D(rHip, rKnee);
+      if(val3d != null) {
+        angles['Right Hip Flexion'] = val3d;
+      } else if(!isSideView || rIsNear || bothVisible) {
+        const val2d = hipFlexV2D(rHip, rKnee);
+        if(val2d != null) angles['Right Hip Flexion'] = val2d;
+      }
     }
   } else {
     // Other movements: shoulder-hip-knee (trunk lean is clinically relevant reference)
@@ -4797,17 +4959,9 @@ function extractAngles(lm, view='side', movement='') {
       const lHeelPost = lm[29] && combinedConf(lm[29]) > minHeelConf ? lm[29] : null;
       const rHeelPost = lm[30] && combinedConf(lm[30]) > minHeelConf ? lm[30] : null;
 
-      // Only compute pronation during the LOADING phase frame.
-      // Rationale: Loading Response is the only phase where (a) the foot is flat on the
-      // belt, (b) the heel is visible and close to facing the camera, and (c) both the
-      // ankle and heel landmarks are in their most anatomically predictable positions.
-      // All other stance frames (midstance, propulsion, toeoff) have the heel rotating
-      // away from camera or lifting, making the knee→ankle→heel triangle unreliable.
-      // Midstance and propulsion also allow the near-side (swing) foot to occlude the
-      // far-side heel, producing false eversion readings.
-      const phaseId = arguments[2]?._baseId || arguments[2]?.id || null;  // phase passed in future calls
-      // For aggregation: accept loading phase frame OR any stance frame where ankle is very low.
-      // Stance proxy threshold tightened from 0.55 → 0.60 (ankle must be in lower 40% of frame).
+      // Only compute pronation when the ankle is clearly in stance (near the belt).
+      // Stance proxy: ankle Y > 0.60 (ankle in lower 40% of frame).
+      // The phase-level filter in aggregateAngles further restricts to contact+loading only.
       const lStance = lAnkPost && lAnkPost.y > 0.60;
       const rStance = rAnkPost && rAnkPost.y > 0.60;
 
@@ -6593,7 +6747,10 @@ function aggregateAngles(allFrameAngles, framePhases) {
   const combined = {};
   const frameCounts = {}; // total frames where metric was attempted
   allFrameAngles.forEach((frameAngles, fi) => {
-    const phaseId = framePhases?.[fi]?.id || null;
+    // Read phaseId from _baseId first (set by GaitFSM position-based selector),
+    // falling back to .id (set by event-based path). Both are valid phase keys.
+    const phaseRaw = framePhases?.[fi];
+    const phaseId = phaseRaw?._baseId || phaseRaw?.id || null;
     const isSwing  = ['toeoff','earlyswing','midswing','lateswing'].includes(phaseId);
     const isStance = ['contact','loading','midstance','propulsion'].includes(phaseId);
 
@@ -6602,11 +6759,11 @@ function aggregateAngles(allFrameAngles, framePhases) {
       if(k.startsWith('_')) return;
       // Ankle DF: stance frames only (swing push-off PF is not the clinical measurement)
       if(isSwing && k.includes('Ankle Dorsiflexion')) return;
-      // Pronation: loading phase ONLY — heel landmark is only reliable when the foot is
-      // flat on the ground at full weight acceptance. All other stance frames risk
-      // heel rotation away from camera or near-side foot occlusion of the far-side heel.
-      // If no phase info is available (phaseId null), fall back to any stance frame.
-      if(k.includes('Pronation') && phaseId !== null && phaseId !== 'loading') return;
+      // Pronation: contact and loading frames only — these are the two moments where the
+      // foot is fully flat and the heel faces the posterior camera. Midstance and propulsion
+      // have the heel rotating away; toeoff has it fully lifted.
+      // Fall through (allow) if phaseId is null (no phase info available — old videos).
+      if(k.includes('Pronation') && phaseId !== null && phaseId !== 'loading' && phaseId !== 'contact') return;
       // Hip Flexion: swing frames only for .max peak.
       // During stance the hip is near-neutral (10-20°). Including stance frames
       // depresses .max and makes peak hip flexion appear lower than it really is.
@@ -6905,7 +7062,7 @@ async function runAnalysis() {
   const smoothedBarPoints = barPoints.length >= 3 ? smoothBarPoints(barPoints) : barPoints;
   const barStats = smoothedBarPoints.length >= 2 ? analyzeBarPath(smoothedBarPoints, cameraView, movement) : null;
   const barPathLine = barStats
-    ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}`
+    ? `BAR PATH: max horizontal drift ${barStats.maxDriftCm}cm ${barStats.driftDir}, avg drift ${barStats.avgDriftCm}cm — Quality: ${barStats.quality}${barStats.velocity ? ` | BAR VELOCITY: mean concentric ${barStats.velocity.meanMs} m/s (${barStats.velocity.zone.zone} zone, est. ${barStats.velocity.zone.pct}), peak ${barStats.velocity.peakMs} m/s` : ''}`
     : '';
 
   // Step 4: Send up to 8 annotated frames to Claude (up to 4 per view if dual)
@@ -6943,6 +7100,7 @@ ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
 ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). For running/gait, this is the thigh-from-vertical angle (independent of arm swing). For lifts, this is the shoulder-hip-knee included angle corrected to 0°=neutral. Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion.
+- SIDE VIEW LIMITATION — Hip and Knee Flexion: In a side-view camera, only the near leg's thigh/knee direction can be measured reliably in 2D. The far leg is foreshortened (its thigh points partly toward/away from camera), making its 2D angle systematically underestimate true hip flexion. If one side shows "N/A" for hip or knee flexion, it means the far-side 2D measurement was suppressed because it would be inaccurate. The available side's measurement IS valid and should be used clinically. For true bilateral hip/knee comparison, use the posterior or frontal view, or rely on 3D worldLandmarks when the device supports them.
 - Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
 - Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. Values aggregated from STANCE frames only (swing excluded). IMPORTANT: ankle/foot landmarks (heel, toe) are the LEAST reliable landmarks in side-view running at 30–60fps — foot moves fast and is often partially occluded. Values outside −12° to +35° are likely tracking artefacts. If ankle DF appears severely asymmetric (>20° L/R difference) or deeply plantarflexed (< −15°) during stance, flag it as UNCONFIRMED and instruct the clinician to verify against the skeleton overlay before drawing clinical conclusions. Do NOT diagnose ankle dysfunction solely from a single plantarflexion reading.
 - Trunk Lean: degrees from vertical (0° = perfectly upright). Running norm = 5-15° forward.
@@ -6990,6 +7148,42 @@ ${hasDualView && angleLines2 ? `\nSECOND VIEW ANGLES (${view2Label}):\n${angleLi
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
 ${asiToPromptText(aggregated, movement) ? `\n${asiToPromptText(aggregated, movement)}` : ''}
 ${promsToPromptText(collectPROMs()) ? `\n${promsToPromptText(collectPROMs())}` : ''}
+${(() => {
+  // Footwear recommendation — running/gait only, checkbox must be checked
+  const isRun = /running|gait|walk/i.test(movement);
+  const checked = document.getElementById('includeFootwear')?.checked !== false; // default true
+  if(!isRun || !checked) return '';
+  // Collect available biomechanical signals for footwear classification
+  const pronL = aggregated['Left Pronation']?.avg ?? null;
+  const pronR = aggregated['Right Pronation']?.avg ?? null;
+  const hipAddL = aggregated['Left Hip Adduction']?.avg ?? null;
+  const hipAddR = aggregated['Right Hip Adduction']?.avg ?? null;
+  const fs = window_strideMetrics?.fsConsensus || 'unknown';
+  const stepAsym = window_strideMetrics?.stepLengthAsymPct ?? null;
+  const shoe = document.getElementById('shoeType')?.value || '';
+  const lines2 = [
+    `Current shoe: ${shoe || 'not specified'}`,
+    pronL != null ? `Left pronation: ${pronL}° (neutral 0-4°, mild 5-10°, significant >10°)` : null,
+    pronR != null ? `Right pronation: ${pronR}° (neutral 0-4°, mild 5-10°, significant >10°)` : null,
+    hipAddL != null ? `Left hip adduction (swing): ${hipAddL}° (normal 0-8°, crossover risk >10°)` : null,
+    hipAddR != null ? `Right hip adduction (swing): ${hipAddR}° (normal 0-8°, crossover risk >10°)` : null,
+    `Foot strike pattern: ${fs}`,
+    stepAsym != null ? `Step asymmetry: ${stepAsym}%` : null,
+  ].filter(Boolean).join('\n  ');
+  return `
+FOOTWEAR RECOMMENDATION REQUEST:
+Based on the following biomechanical data, add a "footwear_recommendation" field to your JSON response with a short clinical footwear recommendation (2-4 sentences). Classify the runner into ONE of these categories and explain why:
+  1. NEUTRAL — Good arch control, low pronation, midfoot/forefoot strike → neutral cushioned shoe (e.g. Brooks Ghost, New Balance 1080)
+  2. STABILITY — Mild-moderate overpronation, medial collapse risk → medial post or guide rail shoe (e.g. Brooks Adrenaline, ASICS Kayano)
+  3. MOTION CONTROL — Significant bilateral overpronation (>10°), flat foot, heavy heel strike → motion control shoe (e.g. Brooks Beast, ASICS Gel-Kayano MC)
+  4. MINIMALIST — Strong mechanics, forefoot/midfoot strike, low pronation, high cadence → low-drop minimalist or natural shoe
+  5. MAXIMALIST — Good mechanics but high impact patterns, heel strike, rehabilitation context → maximalist cushion shoe (e.g. Hoka Clifton, ON Cloudmonster)
+
+Also comment on whether current footwear is appropriate or mismatched.
+
+Biomechanical data for classification:
+  ${lines2}`;
+})()}
 
 MOVEMENT-SPECIFIC NORMS: Use the following reference ranges for ${movement} when interpreting angles:
 ${(() => {
@@ -7013,7 +7207,8 @@ Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
   "biomechanical_analysis": "<2-3 paragraph narrative referencing angle measurements, symmetry, movement patterns${barStats ? ', and bar path quality' : ''}>",
   "clinical_impressions": "<1-2 paragraph narrative: clinical significance, risk factors, functional implications>",
   "recommendations": ["<specific actionable PT recommendation>"],
-  "patient_education": ["<simple patient-facing explanation>"]
+  "patient_education": ["<simple patient-facing explanation>"],
+  "footwear_recommendation": "<2-4 sentence footwear recommendation with shoe category and rationale — only include if footwear recommendation was requested above, otherwise omit this field>"
 }
 Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
@@ -7059,6 +7254,8 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         r.recommendations=[...recsBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
         const eduBlock=raw.match(/"patient_education"\s*:\s*\[([\s\S]*?)\]/)?.[1]||'';
         r.patient_education=[...eduBlock.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]).filter(s=>s.length>15);
+        const footwearM=raw.match(/"footwear_recommendation"\s*:\s*"([\s\S]*?)(?<!\\)"/);
+        if(footwearM) r.footwear_recommendation=footwearM[1].replace(/\\n/g,'\n').replace(/\\"/g,'"');
         if(r.score||(r.findings&&r.findings.length)||r.recommendations?.length) report=r;
       } catch(e2) { report=null; }
     }
@@ -7372,11 +7569,22 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const confNote = (hitRate) => hitRate != null
             ? `<span class="ref" title="Only ${hitRate}% of frames produced this measurement">⚠ ${hitRate}% frames</span>`
             : '';
-          const lCell = !lv ? '—'
+
+          // Detect when a value is null due to far-side suppression (side view, not worldLandmarks)
+          // vs genuinely not measured. Both show '—' but the first gets an explanatory note.
+          const isSideViewLocal = (cameraView === 'side');
+          const isFarSideHip = (key) => isSideViewLocal &&
+            (key === 'Left Hip Flexion' || key === 'Right Hip Flexion') &&
+            /running|gait|walk/i.test(movement);
+          const farSideNote = `<span class="ref" style="color:var(--amber);" title="Far-leg 2D measurement suppressed — foreshortening makes it unreliable from side view. Use posterior/frontal view for bilateral comparison.">⚠ far leg (side view)</span>`;
+
+          const lCell = !lv
+            ? (isFarSideHip(L) ? farSideNote : '—')
             : lLowConf
               ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(lv.hitRate)}<br><span class="ref">insufficient data (${lv.count} frames)</span>`
               : `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°, range ${lv.min}°–${lv.max}°</span>`;
-          const rCell = !rv ? (R ? '—' : '<span class="ref">bilateral</span>')
+          const rCell = !rv
+            ? (R && isFarSideHip(R) ? farSideNote : (R ? '—' : '<span class="ref">bilateral</span>'))
             : rLowConf
               ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(rv.hitRate)}<br><span class="ref">insufficient data (${rv.count} frames)</span>`
               : `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°, range ${rv.min}°–${rv.max}°</span>`;
@@ -7455,7 +7663,32 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       }
       const flagClass = barStats.flag;
       const driftLabel = barStats.isDeadliftFront ? 'Lateral Sway' : 'Max Horizontal Drift';
+      const vel = barStats.velocity;
+      const velHtml = vel ? `
+        <div style="margin-bottom:14px;">
+          <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">Bar Velocity (VBT)</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:.66rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:4px;">Mean Concentric</div>
+              <div class="vel-mean" style="font-family:'Source Serif 4',serif;font-size:1.6rem;font-weight:600;color:${vel.zone.color};line-height:1;">${vel.meanMs}</div>
+              <div style="font-size:.72rem;color:var(--muted);">m/s</div>
+            </div>
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:.66rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:4px;">Peak Velocity</div>
+              <div class="vel-peak" style="font-family:'Source Serif 4',serif;font-size:1.6rem;font-weight:600;color:${vel.peakZone.color};line-height:1;">${vel.peakMs}</div>
+              <div style="font-size:.72rem;color:var(--muted);">m/s</div>
+            </div>
+          </div>
+          <div style="background:${vel.zone.color}15;border:1px solid ${vel.zone.color}40;border-radius:6px;padding:10px 14px;">
+            <div class="vel-zone" style="font-size:.78rem;font-weight:700;color:${vel.zone.color};margin-bottom:2px;">Zone: ${vel.zone.zone}</div>
+            <div style="font-size:.74rem;color:var(--muted);">${vel.zone.pct} &nbsp;·&nbsp; ${vel.zone.detail}</div>
+          </div>
+          <div style="margin-top:8px;font-size:.7rem;color:var(--muted);line-height:1.5;">
+            <strong>VBT reference:</strong> &gt;1.0 m/s = Power &nbsp;|&nbsp; 0.75–1.0 = Dynamic strength &nbsp;|&nbsp; 0.50–0.75 = Strength-speed &nbsp;|&nbsp; 0.35–0.50 = Strength &nbsp;|&nbsp; &lt;0.35 = Maximal
+          </div>
+        </div>` : '';
       document.getElementById('barPathStats').innerHTML = `
+            ${velHtml}
             <div style="margin-bottom:14px;">
               <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">Bar Path Metrics</div>
               <table class="angles-table">
@@ -7474,7 +7707,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
               🟢 &lt;3 cm drift = Optimal bar path<br>
               🟡 3–6 cm = Acceptable, monitor closely<br>
               🔴 &gt;6 cm = Significant deviation — increased lumbar load risk<br><br>
-              <em>Note: Estimates based on assumed ~1.8m subject height. Confidence improves with side-view camera angle.</em>
+              <em>Note: Estimates use patient height for calibration${barStats.velocity ? '' : ' (enter height for bar velocity)'}. Confidence improves with side-view camera angle.</em>
             </div>`;
           document.getElementById('barPathSection').style.display='block';
     }
@@ -7602,6 +7835,29 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     `<div class="edu-item"><div class="edu-icon">💬</div><div class="edu-text">${esc(pt)}</div></div>`
   ).join('')||'<p class="finding-desc">No education points returned.</p>';
 
+  const footwearHtml = r.footwear_recommendation ? `
+    <div class="report-section full">
+      <div class="section-head"><span class="sh-icon">👟</span><h3>Footwear Recommendation</h3></div>
+      <div class="section-body">
+        <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;">
+          <div style="flex:1;min-width:240px;">
+            <div class="narrative">${narrativeHtml(r.footwear_recommendation)}</div>
+          </div>
+          <div style="background:var(--navy-light);border-radius:8px;padding:12px 16px;font-size:.74rem;color:var(--navy-mid);line-height:1.6;flex-shrink:0;min-width:200px;">
+            <strong style="display:block;margin-bottom:6px;color:var(--navy);">Shoe category guide</strong>
+            🟢 <strong>Neutral</strong> — low pronation, midfoot strike<br>
+            🔵 <strong>Stability</strong> — mild-mod overpronation<br>
+            🔴 <strong>Motion control</strong> — significant bilateral pronation<br>
+            ⚡ <strong>Minimalist</strong> — strong mechanics, high cadence<br>
+            🛡 <strong>Maximalist</strong> — high impact, rehab context
+          </div>
+        </div>
+        <div style="margin-top:10px;font-size:.72rem;color:var(--muted);font-style:italic;">
+          This recommendation is based on observed biomechanics and should be verified with a manual foot assessment. Pronation values from posterior-view video have ±3° accuracy — treat as a screening tool, not a prescriptive measure.
+        </div>
+      </div>
+    </div>` : '';
+
   document.getElementById('reportGrid').innerHTML=`
     <div class="report-section">
       <div class="section-head"><span class="sh-icon">🔍</span><h3>Key Findings</h3></div>
@@ -7619,6 +7875,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       <div class="section-head"><span class="sh-icon">🏥</span><h3>Clinical Impressions</h3></div>
       <div class="section-body"><div class="narrative">${narrativeHtml(r.clinical_impressions)}</div></div>
     </div>
+    ${footwearHtml}
     <div class="report-section">
       <div class="section-head"><span class="sh-icon">🗣</span><h3>Patient Education</h3></div>
       <div class="section-body">${edu}</div>
@@ -8489,6 +8746,19 @@ async function exportPDF() {
 
         // Stats column
         let sy = y + 4;
+        // VBT velocity tiles (if available) — rendered above path metrics table
+        const velMeanEl = document.querySelector('#barPathStats .vel-mean');
+        const velPeakEl = document.querySelector('#barPathStats .vel-peak');
+        const velZoneEl = document.querySelector('#barPathStats .vel-zone');
+        if(velMeanEl && velPeakEl) {
+          doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.navy);
+          doc.text('BAR VELOCITY (VBT)', ML+bW+6, sy); sy+=6;
+          doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor(C.muted);
+          doc.text(`Mean: ${velMeanEl.textContent.trim()} m/s`, ML+bW+6, sy); sy+=5;
+          doc.text(`Peak: ${velPeakEl.textContent.trim()} m/s`, ML+bW+6, sy); sy+=5;
+          if(velZoneEl) { doc.setFont('helvetica','bold'); setColor(C.teal); doc.text(velZoneEl.textContent.trim(), ML+bW+6, sy); sy+=8; }
+          doc.setFont('helvetica','normal'); setColor(C.muted);
+        }
         statsRows.forEach(row=>{
           const cells = row.querySelectorAll('td');
           if(cells.length<2) return;
@@ -8502,6 +8772,25 @@ async function exportPDF() {
           sy += 14;
         });
         y += blockH + 8;
+      }
+    }
+
+    // ── Footwear Recommendation (running only) ──
+    const footwearSection = [...document.querySelectorAll('#reportGrid .report-section')].find(s=>s.querySelector('h3')?.textContent?.includes('Footwear'));
+    if(footwearSection) {
+      const ftText = footwearSection.querySelector('.narrative')?.textContent?.trim()||'';
+      if(ftText.length > 20) {
+        guard(SECTION_HEAD_H + 28);
+        sectionHead('Footwear Recommendation', C.teal);
+        const ftLines = doc.splitTextToSize(ftText, CW - 4);
+        const ftH = ftLines.length * 4.8 + 8;
+        guard(ftH + 2);
+        setFill(C.tealPale); setDraw(C.teal); doc.setLineWidth(0.4);
+        doc.roundedRect(ML, y, CW, ftH, 2, 2, 'FD');
+        setFill(C.teal); doc.roundedRect(ML, y, 3, ftH, 1, 0, 'F');
+        doc.setFont('helvetica','normal'); doc.setFontSize(7.8); setColor(C.text);
+        ftLines.forEach((l, li) => doc.text(l, ML+7, y+6+li*4.8));
+        y += ftH + 8;
       }
     }
 
