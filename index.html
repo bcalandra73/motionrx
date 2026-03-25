@@ -1394,7 +1394,7 @@ function startFrameExtraction(file, vid) {
 
       // ── Smart phase relabeling: find true bottom/peak using MediaPipe angles ──
       // Only if MediaPipe is ready and movement has a meaningful bottom/peak
-      const needsSmartLabel = /squat|lunge|deadlift|hinge|sit/i.test(movement);
+      const needsSmartLabel = /squat|lunge|deadlift|hinge|sit|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
       const needsGaitLabel  = /running|gait|walk/i.test(movement);
       // For running/gait: MoveNet coarse scan (fast) → phase detection → MediaPipe only on 8 selected frames.
       // For other movements (squats/deadlifts): MediaPipe needed for smart bottom/lockout detection.
@@ -7782,47 +7782,54 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
       let tableHtml = `<div style="font-size:.73rem;color:var(--muted);margin-bottom:10px;">📐 Norms calibrated for: <strong style="color:var(--navy);">${movNorm || 'General movement'}</strong></div>`;
 
-      if(isGait) {
-        // Gait table: group L/R pairs in one row for side-by-side comparison
-        const gaitPairs = [
-          {label:'Hip Flexion',         L:'Left Hip Flexion',          R:'Right Hip Flexion'},
-          {label:'Hip Ext at Toe-off',  L:'Left Hip Extension',        R:'Right Hip Extension'},
-          {label:'Knee Flexion',         L:'Left Knee Flexion',         R:'Right Knee Flexion'},
-          {label:'Knee Extension',       L:'Left Knee Extension',       R:'Right Knee Extension'},
+      const isLandingMov = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+
+      if(isGait || isLandingMov) {
+        // Paired L/R table with peak display values and colour-coded flags
+        const isGaitTable = isGait;
+        const pairsForTable = isGaitTable ? [
+          {label:'Hip Flexion',           L:'Left Hip Flexion',          R:'Right Hip Flexion'},
+          {label:'Hip Ext at Toe-off',    L:'Left Hip Extension',        R:'Right Hip Extension'},
+          {label:'Knee Flexion',          L:'Left Knee Flexion',         R:'Right Knee Flexion'},
+          {label:'Knee Extension',        L:'Left Knee Extension',       R:'Right Knee Extension'},
           {label:'Hip Adduction (frontal)',L:'Left Hip Adduction',       R:'Right Hip Adduction'},
-          {label:'Knee Valgus (frontal)',  L:'Left Knee Valgus',          R:'Right Knee Valgus'},
-          {label:'Pronation (posterior)',L:'Left Pronation',             R:'Right Pronation'},
-          {label:'Ankle Dorsiflexion',   L:'Left Ankle Dorsiflexion',   R:'Right Ankle Dorsiflexion'},
-          {label:'Trunk Lean',           L:'Trunk Lean',                R:null},
+          {label:'Knee Valgus (frontal)',  L:'Left Knee Valgus',         R:'Right Knee Valgus'},
+          {label:'Pronation (posterior)', L:'Left Pronation',            R:'Right Pronation'},
+          {label:'Ankle Dorsiflexion',    L:'Left Ankle Dorsiflexion',   R:'Right Ankle Dorsiflexion'},
+          {label:'Trunk Lean',            L:'Trunk Lean',                R:null},
+          {label:'Trunk Lateral Lean',    L:'Trunk Lateral Lean',        R:null},
+          {label:'Pelvic Drop',           L:'Pelvic Drop',               R:null},
+        ] : [
+          // Landing: show peak-relevant measures in clinical order
+          {label:'Knee Flexion (peak)',   L:'Left Knee Flexion',         R:'Right Knee Flexion'},
+          {label:'Hip Flexion (peak)',    L:'Left Hip Flexion',          R:'Right Hip Flexion'},
+          {label:'Knee Valgus (peak)',    L:'Left Knee Valgus',          R:'Right Knee Valgus'},
+          {label:'Hip Adduction (peak)',  L:'Left Hip Adduction',        R:'Right Hip Adduction'},
+          {label:'Trunk Lean (peak)',     L:'Trunk Lean',                R:null},
           {label:'Trunk Lateral Lean',   L:'Trunk Lateral Lean',        R:null},
           {label:'Pelvic Drop',          L:'Pelvic Drop',               R:null},
+          {label:'Shoulder Flexion',     L:'Left Shoulder Flexion',     R:'Right Shoulder Flexion'},
         ];
+
+        const colLabel = isGaitTable ? `Reference (${movNorm})` : `Reference (ACL norms)`;
         tableHtml += `<table class="angles-table"><thead><tr>
           <th>Joint</th>
-          <th style="color:#0ea5e9">Left Leg</th>
-          <th style="color:#f97316">Right Leg</th>
-          <th>Reference (${movNorm})</th>
+          <th style="color:#0ea5e9">Left</th>
+          <th style="color:#f97316">Right</th>
+          <th>${colLabel}</th>
         </tr></thead><tbody>`;
 
-        // For running/gait: flexion peaks are clinically meaningful, not averages
-        // Hip and knee flexion norms reference PEAK swing phase values
-        // Trunk lean, ankle DF, pelvic drop are contextual — use avg
-        const usePeakFor = ['Hip Flexion','Knee Flexion','Hip Ext at Toe-off'];
+        const usePeakFor = isGaitTable
+          ? ['Hip Flexion','Knee Flexion','Hip Ext at Toe-off']
+          : ['Knee Flexion (peak)','Hip Flexion (peak)','Knee Valgus (peak)','Hip Adduction (peak)','Trunk Lean (peak)'];
 
-        gaitPairs.forEach(({label, L, R}) => {
+        pairsForTable.forEach(({label, L, R}) => {
           const lv = aggregated[L], rv = R ? aggregated[R] : null;
           if(!lv && !rv) return;
-          // Use gaitDisplayVal to correctly handle joint-specific peak conventions:
-          // Hip Flexion → .max (bigger = more flexed in degrees-from-upright)
-          // Knee Flexion → .min (smaller = more flexed in included-angle convention)
-          // Ankle DF → .avg (stance frames only — swing excluded during aggregation)
-          // Others → .avg
           const lVal = lv ? gaitDisplayVal(L, lv, movement) : null;
           const rVal = rv ? gaitDisplayVal(R, rv, movement) : null;
           const usePeak = usePeakFor.includes(label);
 
-          // Per-metric confidence suppression: if fewer than 40% of frames contributed
-          // to this metric's aggregate, it's unreliable — show N/A with explanation
           const lLowConf = lv?.lowConfidence === true;
           const rLowConf = rv?.lowConfidence === true;
 
@@ -7831,22 +7838,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const ref   = getNormLabel(L, movNorm);
           const peakNote = usePeak ? ' <span style="font-size:.65rem;color:var(--muted)">peak</span>' : '';
 
-          // Ankle DF: add confidence note if values look implausible (outside −10 to +35)
-          // These are stance-phase aggregated values — deep PF here signals poor tracking
           let ankleCaveat = '';
           if(label === 'Ankle Dorsiflexion') {
             const lPlausible = lVal == null || (lVal >= -12 && lVal <= 35);
             const rPlausible = rVal == null || (rVal >= -12 && rVal <= 35);
             if(!lPlausible || !rPlausible) {
               ankleCaveat = `<tr><td colspan="4" style="font-size:.68rem;color:var(--amber);padding:2px 10px 8px;background:#fffbf0;">
-                ⚠️ <strong>Ankle tracking note:</strong> Value(s) outside normal stance range suggest foot landmark occlusion or poor MediaPipe confidence. 
-                Distal foot landmarks (heel/toe) are the hardest to track in side-view running — treat ankle DF as an estimate only. 
+                ⚠️ <strong>Ankle tracking note:</strong> Value(s) outside normal stance range suggest foot landmark occlusion or poor MediaPipe confidence.
                 Check skeleton overlay for foot landmark placement. 60fps+ video and bright footwear improve accuracy.
-              </td></tr>`;
-            } else if(lVal != null && rVal != null && Math.abs(lVal - rVal) > 20) {
-              ankleCaveat = `<tr><td colspan="4" style="font-size:.68rem;color:var(--amber);padding:2px 10px 8px;background:#fffbf0;">
-                ⚠️ <strong>Large asymmetry (${Math.abs(lVal-rVal)}°):</strong> Ankle DF asymmetry >20° should be verified against skeleton overlay — foot landmark drift can produce false asymmetry. 
-                True ankle DF asymmetry this large is clinically significant if tracking is confirmed accurate.
               </td></tr>`;
             }
           }
@@ -7870,18 +7869,21 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           </tr>${ankleCaveat}`;
         });
         tableHtml += '</tbody></table>';
-        if(window_strideMetrics?.hipExtAtToeoff != null) {
-          tableHtml += `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">† Hip Ext at Toe-off: bilateral estimate from stride engine (averaged across ${window_strideMetrics.stridesDetected} strides). Per-side values require 60fps+.</div>`;
-        }
-        // Reliability footnote for running
-        if(window_strideMetrics) {
-          const n = window_strideMetrics.stridesDetected;
-          const iccNote = n >= 12
-            ? `High reliability — ${n} strides averaged (equivalent to 3–4 separate trials)`
-            : n >= 6
-            ? `Moderate reliability — ${n} strides. Capture 12+ strides for maximum ICC.`
-            : `Low reliability — only ${n} strides detected. Extend clip to 10+ seconds for reliable measurements.`;
-          tableHtml += `<div style="font-size:.67rem;color:var(--muted);margin-top:4px;border-top:1px solid var(--border);padding-top:5px;">📊 ${iccNote} (MDC reference: Collings et al. 2024)</div>`;
+
+        if(isGaitTable) {
+          if(window_strideMetrics?.hipExtAtToeoff != null) {
+            tableHtml += `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">† Hip Ext at Toe-off: bilateral estimate from stride engine (averaged across ${window_strideMetrics.stridesDetected} strides). Per-side values require 60fps+.</div>`;
+          }
+          // Reliability footnote for running
+          if(window_strideMetrics) {
+            const n = window_strideMetrics.stridesDetected;
+            const iccNote = n >= 12
+              ? `High reliability — ${n} strides averaged (equivalent to 3–4 separate trials)`
+              : n >= 6
+              ? `Moderate reliability — ${n} strides. Capture 12+ strides for maximum ICC.`
+              : `Low reliability — only ${n} strides detected. Extend clip to 10+ seconds for reliable measurements.`;
+            tableHtml += `<div style="font-size:.67rem;color:var(--muted);margin-top:4px;border-top:1px solid var(--border);padding-top:5px;">📊 ${iccNote} (MDC reference: Collings et al. 2024)</div>`;
+          }
         }
       } else {
         tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
