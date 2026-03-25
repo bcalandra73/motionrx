@@ -382,7 +382,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </div>
           <div class="form-group full">
             <label class="form-label">Movement Being Assessed <span class="req">*</span></label>
-            <select id="movementType" onchange="(function(v){var c=document.getElementById('runningInputsCard');if(c)c.style.display=/running|gait|walk/i.test(v)?'block':'none';})(this.value)">
+            <select id="movementType" onchange="(function(v){var c=document.getElementById('runningInputsCard');if(c)c.style.display=/running|gait|walk/i.test(v)?'block':'none';var j=document.getElementById('jumpInputsCard');if(j)j.style.display=/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';})(this.value)">
               <option value="">Select movement type...</option>
               <optgroup label="Lower Extremity">
                 <option>Gait / Walking</option>
@@ -392,6 +392,12 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
                 <option>Lunge</option>
                 <option>Step Up / Step Down</option>
                 <option>Hip Hinge / Deadlift Pattern</option>
+              </optgroup>
+              <optgroup label="Jump &amp; Landing (ACL / Return to Sport)">
+                <option>Drop Jump Landing</option>
+                <option>Countermovement Jump</option>
+                <option>Single-Leg Landing</option>
+                <option>Tuck Jump</option>
               </optgroup>
               <optgroup label="Upper Extremity">
                 <option>Overhead Press / Reach</option>
@@ -505,6 +511,66 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             👟 Include footwear recommendation in report
             <span style="font-weight:400;color:var(--muted);display:block;font-size:.72rem;margin-top:1px;">Based on pronation, foot strike, and hip adduction data — adds a shoe category suggestion to the clinical report</span>
           </label>
+        </div>
+      </div>
+
+      <!-- Jump & Landing Parameters Card -->
+      <div class="card no-mb" id="jumpInputsCard" style="display:none;margin-top:12px;">
+        <div class="card-header">
+          <div class="card-header-icon">🦘</div>
+          <div><h2>Jump / Landing Parameters</h2><p>Unlocks ACL risk scoring, bilateral LSI, and landing phase detection</p></div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Video Frame Rate <span style="font-weight:400;color:var(--muted)">(120fps+ strongly recommended)</span></label>
+            <select id="jumpVideoFps">
+              <option value="30">30 fps — landing mechanics may be missed</option>
+              <option value="60">60 fps — marginal for landing</option>
+              <option value="120" selected>120 fps — recommended minimum</option>
+              <option value="240">240 fps — optimal for ACL screening</option>
+            </select>
+            <div style="font-size:.68rem;color:var(--muted);margin-top:3px;">Landing happens in 40-100ms. At 30fps = 1-3 frames captured.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Post-Op / Involved Limb</label>
+            <select id="jumpInvolvedLimb">
+              <option value="">Not applicable</option>
+              <option value="left">Left limb (post-op / involved)</option>
+              <option value="right">Right limb (post-op / involved)</option>
+              <option value="bilateral">Bilateral / primary prevention</option>
+            </select>
+            <div style="font-size:.68rem;color:var(--muted);margin-top:3px;">Sets ACL LSI threshold comparisons in the report</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Protocol / Box Height</label>
+            <select id="jumpProtocol">
+              <option value="">Standard / not specified</option>
+              <option value="30cm">Drop Jump — 30cm box</option>
+              <option value="45cm">Drop Jump — 45cm box</option>
+              <option value="dvj">Drop Vertical Jump (DVJ)</option>
+              <option value="3hop">Triple Hop for Distance</option>
+              <option value="custom">Custom protocol</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Time Post-Op <span style="font-weight:400;color:var(--muted)">(if applicable)</span></label>
+            <select id="jumpTimePostOp">
+              <option value="">Not applicable</option>
+              <option value="3mo">3 months</option>
+              <option value="6mo">6 months</option>
+              <option value="9mo">9 months</option>
+              <option value="12mo">12 months</option>
+              <option value=">12mo">&gt;12 months</option>
+            </select>
+            <div style="font-size:.68rem;color:var(--muted);margin-top:3px;">Contextualises findings against return-to-sport timelines</div>
+          </div>
+        </div>
+        <div style="margin-top:12px;padding:10px 14px;background:#fff3cd;border-radius:8px;border:1px solid #ffc107;font-size:.76rem;color:#7d5a00;line-height:1.6;">
+          <strong>⚠️ Slow-motion video guidance:</strong>
+          iPhone: Camera → Video → tap the frame rate icon (top right) → select 120 or 240fps &nbsp;·&nbsp;
+          Samsung: Pro Video → 120fps &nbsp;·&nbsp;
+          Older phones: use a slow-mo app (Slow Motion Video FX, or SloPro).
+          Export and upload the original file — do not screen-record.
         </div>
       </div>
 
@@ -5653,6 +5719,58 @@ const MOVEMENT_NORMS = {
     'Right Shoulder Flexion': {ideal:[150,180], warn:130, label:'Full OH: 150-180°'},
     'Trunk Lean':             {max:10, warn:20, label:'Minimal lumbar extension: <10°'},
   },
+
+  // ── Jump & Landing Norms (ACL Return-to-Sport) ─────────────────────────────
+  // Reference: Hewett et al. 2005, Padua et al. 2012, Myer et al. 2015
+  // Key principle: excessive valgus, stiff landing (low knee flex at contact),
+  // trunk lean, and hip adduction are the four main modifiable ACL risk factors.
+  'Drop Jump Landing': {
+    'Left Knee Flexion':    {min:45,  warn:30,  label:'Peak landing knee flexion: ≥45° (soft landing), <30° = stiff landing risk'},
+    'Right Knee Flexion':   {min:45,  warn:30,  label:'Peak landing knee flexion: ≥45° (soft landing), <30° = stiff landing risk'},
+    'Left Hip Flexion':     {min:30,  warn:20,  label:'Hip flexion at landing: ≥30° reduces knee stress'},
+    'Right Hip Flexion':    {min:30,  warn:20,  label:'Hip flexion at landing: ≥30° reduces knee stress'},
+    'Left Knee Valgus':     {max:8,   warn:15,  label:'Dynamic valgus: <8° acceptable, >15° = high ACL risk'},
+    'Right Knee Valgus':    {max:8,   warn:15,  label:'Dynamic valgus: <8° acceptable, >15° = high ACL risk'},
+    'Left Hip Adduction':   {max:10,  warn:18,  label:'Hip adduction at landing: <10° normal, >18° = valgus risk'},
+    'Right Hip Adduction':  {max:10,  warn:18,  label:'Hip adduction at landing: <10° normal, >18° = valgus risk'},
+    'Trunk Lean':           {max:20,  warn:35,  label:'Forward trunk lean at landing: <20°, >35° = proximal mechanism ACL risk'},
+    'Trunk Lateral Lean':   {max:5,   warn:10,  label:'Lateral trunk lean: <5° per side'},
+    'Pelvic Drop':          {max:5,   warn:10,  label:'Pelvic drop: <5° (hip abductor strength indicator)'},
+  },
+  'Countermovement Jump': {
+    'Left Knee Flexion':    {min:45,  warn:30,  label:'Landing knee flexion: ≥45° (soft landing)'},
+    'Right Knee Flexion':   {min:45,  warn:30,  label:'Landing knee flexion: ≥45° (soft landing)'},
+    'Left Hip Flexion':     {min:30,  warn:20,  label:'Landing hip flexion: ≥30°'},
+    'Right Hip Flexion':    {min:30,  warn:20,  label:'Landing hip flexion: ≥30°'},
+    'Left Knee Valgus':     {max:8,   warn:15,  label:'Dynamic valgus at landing: <8°'},
+    'Right Knee Valgus':    {max:8,   warn:15,  label:'Dynamic valgus at landing: <8°'},
+    'Left Hip Adduction':   {max:10,  warn:18,  label:'Hip adduction at landing: <10°'},
+    'Right Hip Adduction':  {max:10,  warn:18,  label:'Hip adduction at landing: <10°'},
+    'Trunk Lean':           {max:20,  warn:35,  label:'Trunk lean at landing: <20°'},
+    'Pelvic Drop':          {max:5,   warn:10,  label:'Pelvic drop: <5°'},
+  },
+  'Single-Leg Landing': {
+    'Left Knee Flexion':    {min:40,  warn:25,  label:'Single-leg landing knee flexion: ≥40°'},
+    'Right Knee Flexion':   {min:40,  warn:25,  label:'Single-leg landing knee flexion: ≥40°'},
+    'Left Hip Flexion':     {min:30,  warn:15,  label:'Single-leg landing hip flexion: ≥30°'},
+    'Right Hip Flexion':    {min:30,  warn:15,  label:'Single-leg landing hip flexion: ≥30°'},
+    'Left Knee Valgus':     {max:8,   warn:15,  label:'Single-leg dynamic valgus: <8°, >15° = high risk'},
+    'Right Knee Valgus':    {max:8,   warn:15,  label:'Single-leg dynamic valgus: <8°, >15° = high risk'},
+    'Left Hip Adduction':   {max:10,  warn:18,  label:'Single-leg hip adduction: <10°'},
+    'Right Hip Adduction':  {max:10,  warn:18,  label:'Single-leg hip adduction: <10°'},
+    'Trunk Lean':           {max:20,  warn:35,  label:'Trunk lean: <20°, lateral lean away from limb = valgus risk'},
+    'Trunk Lateral Lean':   {max:8,   warn:15,  label:'Lateral trunk lean: <8° for single-leg tasks'},
+    'Pelvic Drop':          {max:5,   warn:10,  label:'Pelvic drop (Trendelenburg): <5°'},
+  },
+  'Tuck Jump': {
+    'Left Knee Flexion':    {min:45,  warn:30,  label:'Landing knee flexion: ≥45° — compare rep 1 vs rep 2 for fatigue'},
+    'Right Knee Flexion':   {min:45,  warn:30,  label:'Landing knee flexion: ≥45°'},
+    'Left Knee Valgus':     {max:8,   warn:15,  label:'Dynamic valgus: <8°, compare reps for fatigue effect'},
+    'Right Knee Valgus':    {max:8,   warn:15,  label:'Dynamic valgus: <8°'},
+    'Left Hip Adduction':   {max:10,  warn:18,  label:'Hip adduction at landing: <10°'},
+    'Right Hip Adduction':  {max:10,  warn:18,  label:'Hip adduction at landing: <10°'},
+    'Trunk Lean':           {max:20,  warn:35,  label:'Trunk lean at landing: <20°'},
+  },
 };
 
 // Get norms for the current movement, fall back to generic REF_RANGES
@@ -5754,6 +5872,47 @@ const PHASE_MAPS = {
     {id:'liftoff',  label:'Step Up',   time:0.28, desc:'Leading foot on step'},
     {id:'midpull',  label:'Top',       time:0.52, desc:'Both feet on step'},
     {id:'descent',  label:'Step Down', time:0.76, desc:'Trailing foot descending'},
+  ],
+
+  // ── Jump & Landing Movements ───────────────────────────────────────────────
+  // KEY: 120-240fps slow-motion strongly recommended.
+  // At 30fps, landing (40-100ms) is only 1-3 frames; critical valgus moments may be missed.
+  // Phase detection uses SmartPhase knee-flexion minimum (same as squat bottom).
+
+  'Drop Jump Landing': [
+    {id:'approach',  label:'Pre-Land',      time:0.08, desc:'Airborne — approaching ground'},
+    {id:'contact',   label:'Initial Contact',time:0.25, desc:'Feet touch ground — critical valgus assessment frame'},
+    {id:'loading',   label:'Loading',       time:0.38, desc:'Weight acceptance — knee/hip flexing'},
+    {id:'bottom',    label:'Peak Flexion',  time:0.52, desc:'Maximum knee flexion — highest ACL load'},
+    {id:'ascent',    label:'Stabilization', time:0.72, desc:'Absorbing and stabilizing'},
+    {id:'lockout',   label:'Recovery',      time:0.90, desc:'Return toward upright'},
+  ],
+  'Countermovement Jump': [
+    {id:'stance',    label:'Standing',      time:0.04, desc:'Initial upright position'},
+    {id:'descent',   label:'Countermovement',time:0.22, desc:'Quick descent — hip/knee/ankle flexing'},
+    {id:'bottom',    label:'Bottom',        time:0.35, desc:'Lowest point — maximum countermovement depth'},
+    {id:'ascent1',   label:'Takeoff Drive', time:0.46, desc:'Explosive triple extension'},
+    {id:'flight',    label:'Flight',        time:0.58, desc:'Airborne — maximum height'},
+    {id:'contact',   label:'Landing Contact',time:0.72, desc:'Feet return to ground — landing mechanics'},
+    {id:'loading',   label:'Landing Load',  time:0.82, desc:'Weight acceptance on landing'},
+    {id:'lockout',   label:'Stabilization', time:0.93, desc:'Landing stabilized'},
+  ],
+  'Single-Leg Landing': [
+    {id:'approach',  label:'Pre-Land',      time:0.10, desc:'Airborne on single leg'},
+    {id:'contact',   label:'Initial Contact',time:0.28, desc:'Foot touches ground — valgus assessment frame'},
+    {id:'loading',   label:'Loading',       time:0.42, desc:'Single-leg weight acceptance'},
+    {id:'bottom',    label:'Peak Flexion',  time:0.58, desc:'Maximum single-leg knee flexion — ACL load peak'},
+    {id:'lockout',   label:'Stabilization', time:0.82, desc:'Stick landing — hold position'},
+  ],
+  'Tuck Jump': [
+    {id:'stance',    label:'Standing',      time:0.04, desc:'Starting position'},
+    {id:'descent',   label:'Dip',           time:0.15, desc:'Brief countermovement'},
+    {id:'flight',    label:'Tuck',          time:0.30, desc:'Airborne — knees pulled toward chest'},
+    {id:'contact',   label:'Landing 1',     time:0.45, desc:'First landing — initial valgus assessment'},
+    {id:'loading',   label:'Loading 1',     time:0.52, desc:'Weight acceptance — rep 1'},
+    {id:'descent2',  label:'Dip 2',         time:0.62, desc:'Immediate re-jump'},
+    {id:'flight2',   label:'Tuck 2',        time:0.75, desc:'Second tuck — assessing fatigue effect'},
+    {id:'contact2',  label:'Landing 2',     time:0.88, desc:'Second landing — fatigue comparison frame'},
   ],
 };
 
@@ -6671,6 +6830,51 @@ const CAMERA_GUIDES = {
       {icon:'📏', title:'Even surface, no incline', desc:'Inclined surfaces alter all joint angles systematically and confound the norms.'},
     ]
   },
+  // ── Jump & Landing Camera Guides ──────────────────────────────────────────
+  'Drop Jump Landing': {
+    title: 'Drop Jump Landing — Camera Setup',
+    sub: '120-240fps slow-motion is essential. Landing happens in 40-100ms — standard 30fps captures only 1-3 frames.',
+    tips: [
+      {icon:'🎬', title:'SLOW MOTION IS CRITICAL (120-240fps)', desc:'iPhone: Camera → Video → set to 120fps or 240fps. Samsung: Pro Video → 120fps. At 30fps the peak valgus frame is almost certainly missed.'},
+      {icon:'📐', title:'Dual-plane setup: side view + frontal view', desc:'Side view captures knee flexion, hip flexion, and trunk lean. Frontal/posterior captures knee valgus — the primary ACL risk factor. Upload both for a complete assessment.'},
+      {icon:'📏', title:'Camera at knee height, 6-10 feet away', desc:'Knee-level camera on a tripod minimises distortion. Valgus angle is dramatically affected by camera height — consistent positioning is essential for serial assessments.'},
+      {icon:'📦', title:'Box height 30-45cm (12-18in) for standard DVJ', desc:'Standard drop jump protocol: step off box (do not jump up), land on both feet, immediately jump as high as possible. Film the landing phase.'},
+      {icon:'🎽', title:'Tight shorts, tape knee centre if needed', desc:'Knee patella centre, tibial tuberosity, and ASIS should be visible. Bright knee-height socks or tape on lateral malleolus improves ankle tracking.'},
+    ]
+  },
+  'Countermovement Jump': {
+    title: 'Countermovement Jump — Camera Setup',
+    sub: 'Capture the full jump including landing. 120fps recommended for landing mechanics; 30fps acceptable for takeoff analysis only.',
+    tips: [
+      {icon:'🎬', title:'120fps minimum for landing assessment', desc:'If landing mechanics are the clinical focus, slow-motion is required. 30fps can assess countermovement depth and takeoff symmetry but will miss peak valgus on landing.'},
+      {icon:'📐', title:'Side view for power/depth, frontal for valgus', desc:'Side view: countermovement depth, trunk angle, triple extension quality. Frontal/posterior: bilateral symmetry, valgus on landing, pelvic drop.'},
+      {icon:'📏', title:'Camera at hip height, arms-length stable', desc:'Full body must be in frame including full jump height. Step back 8-10 feet. Hip-level camera preferred for landing mechanics.'},
+      {icon:'🔄', title:'Perform 3 attempts, film best 2', desc:'Bilateral LSI is most reliable with 3 trials. For post-op, compare operated vs non-operated limb knee flexion at landing as a simple screen.'},
+      {icon:'🎽', title:'Arms in frame for arm-swing assessment', desc:'CMJ arm swing is a predictor of jump height and motor control. Ensure arms are visible throughout.'},
+    ]
+  },
+  'Single-Leg Landing': {
+    title: 'Single-Leg Landing (Hop & Stick) — Camera Setup',
+    sub: 'The most sensitive unilateral ACL return-to-sport screen. 120-240fps strongly recommended.',
+    tips: [
+      {icon:'🎬', title:'240fps ideal, 120fps minimum', desc:'Single-leg landing peak valgus occurs within the first 40ms of contact — essentially invisible at 30fps. This test is clinically meaningless without slow-motion video.'},
+      {icon:'📐', title:'Frontal camera is the PRIMARY view for this test', desc:'Knee valgus, hip adduction, and trunk lateral lean are the three key ACL risk factors in unilateral landing. All are frontal-plane measures. Add a side view secondarily for knee/hip flexion.'},
+      {icon:'📏', title:'Hop distance: standardise to 40cm or leg-length', desc:'Mark landing zone on floor with tape. Consistent hop distance enables serial comparisons. Video should capture both takeoff and landing.'},
+      {icon:'🦵', title:'Test operated limb first to avoid fatigue bias', desc:'For post-op ACL, always assess the involved limb before the uninvolved. Fatigue increases valgus collapse.'},
+      {icon:'🎯', title:'Stick landing: hold for 3 seconds', desc:'Patient must hold the landing position for 3 seconds. This differentiates strategy selection (controlled) from reactive landing (reflexive ACL loading).'},
+    ]
+  },
+  'Tuck Jump': {
+    title: 'Tuck Jump — Camera Setup',
+    sub: 'Bilateral fatigue test. Capture 10 consecutive jumps. Compares landing mechanics early vs late to identify fatigue-related valgus breakdown.',
+    tips: [
+      {icon:'🎬', title:'120fps minimum — capture all 10 repetitions', desc:'Film the full 10-jump sequence. The clinical purpose is detecting mechanics degradation across reps. Most protocols compare rep 1-2 vs rep 9-10.'},
+      {icon:'📐', title:'Frontal/anterior camera for primary view', desc:'Knee valgus and bilateral symmetry are the key measures. A frontal camera captures both knees simultaneously for real-time comparison across reps.'},
+      {icon:'📏', title:'Camera at knee height, 8 feet away', desc:'Patient should jump in place. Mark a small tape square on the floor to maintain position. Camera stays stationary throughout.'},
+      {icon:'⏱', title:'10 jumps as fast as possible', desc:'Standard Tuck Jump Assessment protocol: jump as high as possible with maximum tuck (knees to chest) on every rep. No pause between jumps.'},
+      {icon:'👁', title:'Watch for these fatigue signs', desc:'Increasing knee valgus across reps, reduced tuck height, forward trunk collapse, and landing with wider/narrower base are all ACL risk indicators.'},
+    ]
+  },
   '_default': {
     title: 'Camera Setup Tips',
     sub: 'General guidelines for best joint tracking accuracy.',
@@ -7152,6 +7356,22 @@ RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete st
 ${window_strideMetrics.stepLengthAsymPct!=null ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)` : ''}
 ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
+${(() => {
+  // Jump context — only for landing movements
+  const isJump = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+  if(!isJump) return '';
+  const fps       = document.getElementById('jumpVideoFps')?.value || '30';
+  const limb      = document.getElementById('jumpInvolvedLimb')?.value || '';
+  const protocol  = document.getElementById('jumpProtocol')?.value || '';
+  const timePostOp= document.getElementById('jumpTimePostOp')?.value || '';
+  const lines = [];
+  lines.push(`Video frame rate: ${fps}fps${parseInt(fps)<120?' ⚠️ Sub-optimal for landing mechanics — peak valgus may not be captured':' ✓ Adequate for landing assessment'}`);
+  if(limb)       lines.push(`Involved/post-op limb: ${limb} — focus LSI comparison on this limb`);
+  if(protocol)   lines.push(`Protocol: ${protocol}`);
+  if(timePostOp) lines.push(`Time post-op: ${timePostOp} — ${timePostOp==='3mo'?'early rehab phase, high-impact landing not yet expected':timePostOp==='6mo'?'intermediate phase, beginning plyometric progression':timePostOp==='9mo'||timePostOp==='12mo'?'late-stage return-to-sport assessment':'return-to-sport maintenance check'}`);
+  lines.push('ACL LSI thresholds: ≥90% symmetry required for return to sport on all measures (knee flexion, valgus, hop distance)');
+  return '\nJUMP/LANDING CONTEXT:\n' + lines.map(l=>'- '+l).join('\n');
+})()}
 ${hasDualView && angleLines2 ? `\nSECOND VIEW ANGLES (${view2Label}):\n${angleLines2}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
 ${asiToPromptText(aggregated, movement) ? `\n${asiToPromptText(aggregated, movement)}` : ''}
@@ -7201,6 +7421,24 @@ ${(() => {
 })()}
 
 OCCLUSION NOTE: Where orange or dashed skeleton segments appear, the barbell was obscuring the body. Use the surrounding landmark positions and the measured angle data to make clinically informed inferences about those positions rather than ignoring them.
+${/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement) ? `
+LANDING MECHANICS ASSESSMENT — ACL RETURN-TO-SPORT CONTEXT:
+This is a jump/landing analysis. Key priorities in order of ACL risk:
+1. DYNAMIC KNEE VALGUS (frontal plane) — the primary ACL injury mechanism. Report bilateral knee valgus angle at initial contact and at peak flexion. Any value >10° is clinically significant; >15° is high risk.
+2. KNEE FLEXION AT INITIAL CONTACT — stiff-knee landing (<20° at contact) dramatically increases ACL load. Report contact-phase flexion separately from peak flexion.
+3. HIP FLEXION AT LANDING — inadequate hip flexion (<30°) shifts load from hip extensors to knee extensors, increasing ACL stress. This is a modifiable risk factor via coaching cues.
+4. TRUNK POSITION — forward lean >35° and lateral lean away from the landing limb are both associated with ACL injury mechanism.
+5. LIMB SYMMETRY — for ACL post-op return-to-sport, compare L vs R valgus, flexion, and trunk lean. LSI <90% on any measure indicates not yet ready for sport.
+6. PELVIC DROP — contralateral pelvic drop during single-leg tasks indicates hip abductor weakness and increases knee medialisation.
+
+VIDEO QUALITY NOTE: If image quality or frame rate appears limited, note this caveat in your report. At 30fps, peak dynamic valgus may not be captured. Slow-motion video (120-240fps) is required for accurate landing mechanics assessment.
+
+IMPORTANT — WHAT TO LOOK FOR IN EACH PHASE FRAME:
+- Initial Contact frame: knee position (valgus/neutral/varus), knee flexion angle, trunk position
+- Peak Flexion frame: maximum valgus, hip flexion depth, trunk lean magnitude
+- Stabilization frame: can the patient hold a stable single/double leg position?
+
+Score the movement 1-10 where: 10=excellent mechanics, no risk factors; 7-9=minor technique issues; 4-6=moderate risk factors needing intervention; 1-3=significant ACL risk pattern requiring activity modification.` : ''}
 ${hasDualView ? '\nDUAL-VIEW ADVANTAGE: With two camera angles you can identify frontal-plane issues (pelvic drop, knee valgus, lateral trunk lean, foot progression) that are invisible from a single sagittal view. Use both views actively in your analysis.' : ''}
 
 Use all available data — skeleton overlays, joint angles${barStats ? ', and bar path deviation' : ''}${hasDualView ? ', and both camera perspectives' : ''} — for a precise, data-driven clinical report. Reference specific measurements throughout.
