@@ -1610,19 +1610,29 @@ function startFrameExtraction(file, vid) {
               };
 
               // d) Choose reference leg — stabilized with hysteresis margin
-              // ── REF leg stability rule ──────────────────────────────────────
-              // The near leg (typically Left in standard right-side camera setup) is
-              // the default REF. We only switch to Right if Right has MEANINGFULLY
-              // more visible ankle data — at least 20% more frames AND more contacts.
-              // This prevents a single-frame difference from flipping L/R labeling
-              // between sessions of the same patient on the same video setup.
+              // ── REF leg consistency with stride engine ──────────────────
+              // The stride engine ran earlier and chose a REF leg based on contact
+              // event counts across all strides (more reliable than single-frame visibility).
+              // If the stride engine has a clear REF preference, use it.
+              // Only fall back to visibility/contact heuristic if stride engine is unavailable.
+              const strideEngineREF = window_strideMetrics?.refSide || null;
+              let REF, switchToR;
               const lVis = lAnkS.filter(v=>v!=null).length;
               const rVis = rAnkS.filter(v=>v!=null).length;
-              const visMargin = 0.20; // R must have >20% more frames than L to become REF
+              const visMargin = 0.20;
               const lContacts = localMaxima(lComp);
               const rContacts = localMaxima(rComp);
-              const switchToR = (rVis > lVis * (1 + visMargin)) && (rContacts.length > lContacts.length);
-              const REF = switchToR ? 'R' : 'L';
+              if(strideEngineREF) {
+                // Trust the stride engine's REF — it has seen all strides, not just this window
+                REF = strideEngineREF;
+                switchToR = (REF === 'R');
+                console.log(`[GaitFSM v4] REF=${REF} (from stride engine)`);
+              } else {
+                switchToR = (rVis > lVis * (1 + visMargin)) && (rContacts.length > lContacts.length);
+                REF = switchToR ? 'R' : 'L';
+                console.log(`[GaitFSM v4] REF=${REF} vis=${lVis}L/${rVis}R ankWeak=${ankWeak} contacts: L=${lContacts.length} R=${rContacts.length} switchToR=${switchToR}`);
+              }
+
               const OPP = REF==='L' ? 'R' : 'L';
 
               const refAnkS  = REF==='L' ? lAnkS  : rAnkS;
@@ -1633,10 +1643,6 @@ function startFrameExtraction(file, vid) {
               const oppHipS  = REF==='L' ? rHipS  : lHipS;
               const refC     = REF==='L' ? lContacts : rContacts;
               const oppC     = REF==='L' ? rContacts : lContacts;
-
-              console.log(`[GaitFSM v4] REF=${REF} vis=${lVis}L/${rVis}R ankWeak=${ankWeak} contacts: L=${lContacts.length} R=${rContacts.length} switchToR=${switchToR}`);
-
-              // e) Determine cycle bounds
               // Prefer the best-representative stride from the stride engine if available
               let cycleStart, cycleEnd;
               if(window_strideMetrics?.bestStrideFrameRange) {
@@ -1658,10 +1664,32 @@ function startFrameExtraction(file, vid) {
 
               const r0=cycleStart, r1=cycleEnd;
               // REF leg: contact(0%) → midstance(0-35%) → toeoff(25-55%) → midswing(55-100%)
-              const refContactIdx  =r0;
-              const refMidstIdx    =argMinR(refKneeS, r0, r0+Math.round(cycleLen*.35));
-              const refToeoffIdx   =argMinR(refHipS,  r0+Math.round(cycleLen*.20), r0+Math.round(cycleLen*.55));
-              const refMidswingIdx =argMinR(refAnkS,  r0+Math.round(cycleLen*.50), r1);
+              const refContactIdx  = r0;
+              const refMidstIdx    = argMinR(refKneeS, r0, r0+Math.round(cycleLen*.35));
+
+              // Toe-off: prefer hip-flexion minimum in propulsion zone (25-55% of stride).
+              // Cross-check: the ankle composite signal should also drop (foot rising)
+              // within ±5% of the hip-min frame. If they agree, high confidence.
+              // If only hip-min is available, use it alone (treadmill standard).
+              const hipMinIdx = argMinR(refHipS, r0+Math.round(cycleLen*.20), r0+Math.round(cycleLen*.55));
+              const ankDropZoneStart = Math.max(r0, hipMinIdx - Math.round(cycleLen*.05));
+              const ankDropZoneEnd   = Math.min(r1, hipMinIdx + Math.round(cycleLen*.05));
+              // Ankle composite drops (foot lifts) at toe-off: look for falling edge near hip-min
+              let ankDropIdx = null;
+              let maxDropRate = 0;
+              const refComp = REF==='L' ? lComp : rComp;
+              for(let fi=ankDropZoneStart+1; fi<=ankDropZoneEnd && fi<N; fi++) {
+                const prev = refComp[fi-1], curr = refComp[fi];
+                if(prev!=null && curr!=null && (prev - curr) > maxDropRate) {
+                  maxDropRate = prev - curr; ankDropIdx = fi;
+                }
+              }
+              // Use ankle drop if it confirms hip-min (within range and drop is meaningful)
+              const refToeoffIdx = (ankDropIdx != null && maxDropRate > 0.05)
+                ? Math.round((hipMinIdx + ankDropIdx) / 2)  // average the two signals
+                : hipMinIdx;
+
+              const refMidswingIdx = argMinR(refAnkS, r0+Math.round(cycleLen*.50), r1);
 
               // OPP leg events: offset ~50% into cycle
               const oppMidRaw=r0+Math.round(cycleLen*.5);
@@ -6856,6 +6884,37 @@ async function runAnalysis() {
     const densePhases = window._denseAnglesFrames.map(f => f.phase || null);
     aggregated = aggregateAngles(denseAngles, densePhases);
     console.log(`[Analysis] Stage 3: Using ${denseAngles.length} dense frames for angle aggregation (was ${allAngles.length})`);
+
+    // ── Hip flexion worldLandmarks override ────────────────────────────────
+    // Dense frames are from MoveNet coarse scan — no worldLandmarks (_wx/_wz).
+    // hipFlexV3D() returns null for all of them → 2D fallback → near/far foreshortening
+    // causes both sides to read the near-leg value (e.g. 49°/49°).
+    //
+    // The 8 MediaPipe Pose Landmarker Heavy gallery frames DO have worldLandmarks.
+    // Re-aggregate ONLY hip flexion from those frames. If they produce a bilateral
+    // difference ≥ 3° (confirming 3D fired and corrected perspective), use those values.
+    // Otherwise keep the dense-frame values (worldLandmarks not available, e.g. legacy API).
+    if(allAngles.length >= 2) {
+      const framePhases = extractedFrames.map(f => f.phase || null);
+      const mpHipAgg = aggregateAngles(allAngles, framePhases);
+      const mpL = mpHipAgg['Left Hip Flexion'];
+      const mpR = mpHipAgg['Right Hip Flexion'];
+      if(mpL && mpR) {
+        const lVal = gaitDisplayVal('Left Hip Flexion',  mpL, movement);
+        const rVal = gaitDisplayVal('Right Hip Flexion', mpR, movement);
+        const denseLVal = gaitDisplayVal('Left Hip Flexion',  aggregated['Left Hip Flexion']  || mpL, movement);
+        const denseRVal = gaitDisplayVal('Right Hip Flexion', aggregated['Right Hip Flexion'] || mpR, movement);
+        // Use MP gallery values if: (a) they differ from each other (3D fired), OR
+        // (b) they differ from dense values (dense 2D was pulling values toward each other)
+        const mpDiffers = Math.abs(lVal - rVal) >= 3;
+        const mpVsDense = Math.abs(lVal - denseLVal) >= 3 || Math.abs(rVal - denseRVal) >= 3;
+        if(mpDiffers || mpVsDense) {
+          aggregated['Left Hip Flexion']  = mpL;
+          aggregated['Right Hip Flexion'] = mpR;
+          console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° vs dense L=${denseLVal}° R=${denseRVal}°`);
+        }
+      }
+    }
   } else {
     const framePhases = extractedFrames.map(f => f.phase || null);
     aggregated = allAngles.length > 0 ? aggregateAngles(allAngles, framePhases) : {};
