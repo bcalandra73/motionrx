@@ -6,8 +6,7 @@
 <title>MotionRx — Clinical Motion Analysis</title>
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 <!-- MediaPipe Tasks Vision — loaded dynamically via initMediaPipe() with multi-CDN fallback -->
-<!-- Legacy @mediapipe/pose kept as guaranteed fallback if new API can't load -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
+<!-- Legacy @mediapipe/pose loaded on-demand inside initMediaPipeLegacyFallback() only if new API fails -->
 <script src="https://unpkg.com/@tensorflow/tfjs@4.11.0/dist/tf.min.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
@@ -1119,15 +1118,27 @@ async function initMediaPipe() {
 async function initMediaPipeLegacyFallback() {
   const badge = document.getElementById('mpBadge');
   try {
-    // Wait briefly for the pose.js script tag to finish loading if needed
-    let poseWait = 0;
-    while(typeof Pose === 'undefined' && poseWait < 8000) {
-      await new Promise(r => setTimeout(r, 300));
-      poseWait += 300;
+    // Dynamically inject the legacy pose.js script only when needed.
+    // Previously this was a <script src> tag in <head>, which caused an uncaught
+    // NetworkError if jsDelivr CDN was unreachable (GitHub Pages CSP, network issue, etc.)
+    // — crashing the entire app before any error handling could run.
+    // Injecting it here keeps the error contained inside this try/catch.
+    if(typeof Pose === 'undefined') {
+      badge.textContent = '⏳ Loading legacy model...';
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js';
+        s.crossOrigin = 'anonymous';
+        s.onload  = resolve;
+        s.onerror = () => reject(new Error('Failed to load legacy pose.js from jsDelivr CDN'));
+        document.head.appendChild(s);
+      });
+      // Brief pause to let the module register its globals
+      await new Promise(r => setTimeout(r, 200));
     }
-    if(typeof Pose === 'undefined') throw new Error('Legacy Pose class not available');
+    if(typeof Pose === 'undefined') throw new Error('Legacy Pose class not available after load');
 
-    badge.textContent = '⏳ Loading legacy model...';
+    badge.textContent = '⏳ Initialising legacy model...';
     const legacyPose = new Pose({
       locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`
     });
@@ -9086,6 +9097,18 @@ function showErr(msg) {
 // Global error handlers to catch any uncaught crashes
 window.onerror = (msg, src, line, col, err) => {
   console.error('[GlobalError]', msg, 'at', src, line, col, err?.stack);
+  // Suppress external CDN / network errors — these are not app crashes.
+  // They appear when a fallback CDN script fails to load (e.g. legacy mediapipe on jsDelivr).
+  // The app handles CDN failures gracefully inside initMediaPipeLegacyFallback().
+  const isNetworkErr = typeof msg === 'string' && (
+    msg.includes('NetworkError') || msg.includes('net::') ||
+    msg.includes('Failed to load') || msg.includes('Script error')
+  );
+  const isExternalSrc = typeof src === 'string' && (
+    src.includes('cdn.jsdelivr') || src.includes('unpkg.com') ||
+    src.includes('cdnjs.cloudflare') || src.includes('googleapis')
+  );
+  if(isNetworkErr || isExternalSrc) return; // don't show popup for CDN failures
   showErr(`Uncaught error: ${msg} (line ${line})`);
 };
 window.addEventListener('unhandledrejection', e => {
