@@ -1504,17 +1504,24 @@ function startFrameExtraction(file, vid) {
 
           if(extremeIdx >= 0) {
             const targetId = isHinge ? 'lockout' : 'bottom';
-            frames.forEach(f => {
-              if(f.phase?.id === targetId)
-                f.phase = {id:'inter', label:'Inter', desc:'Between phases'};
-            });
             const winner = frameScores[extremeIdx];
             const method = winner.kneeAngle != null ? 'knee+hip composite' : 'hip position (knees occluded)';
-            // For landing movements, map to 'bottom' which aligns with 'peak_flexion' phase window
-            frames[extremeIdx].phase = (isFlexion || isLanding)
-              ? {id:'bottom',  label:'Peak Flexion',  desc:`Peak knee flexion — detected via ${method}`}
-              : {id:'lockout', label:'Lockout', desc:`Full extension — detected via hip angle`};
-            console.log(`[SmartPhase] Relabeled frame ${extremeIdx+1} as ${targetId} via ${method}`);
+            const newPhase = (isFlexion || isLanding)
+              ? {id:'bottom',  label:'Peak Flexion',  desc:`Peak knee flexion — detected via ${method}`, _detected:true}
+              : {id:'lockout', label:'Lockout', desc:`Full extension — detected via hip angle`, _detected:true};
+
+            // Find the frame that currently holds the canonical 'bottom'/'lockout' phase (if any)
+            // SWAP rather than relabeling to 'inter' — avoids adding a ghost Inter frame to the gallery.
+            // If the detected frame IS the canonical frame, nothing to swap; just update the label.
+            const canonIdx = frames.findIndex(f => f.phase?.id === targetId);
+            if(canonIdx >= 0 && canonIdx !== extremeIdx) {
+              // Give the canonical frame the detected frame's old phase (keep gallery coverage)
+              frames[canonIdx].phase = frames[extremeIdx].phase
+                ? {...frames[extremeIdx].phase, _detected:false}
+                : {id:'inter', label:'Coverage', desc:'Nearest position frame', _detected:false};
+            }
+            frames[extremeIdx].phase = newPhase;
+            console.log(`[SmartPhase] Relabeled frame ${extremeIdx+1} as ${targetId} via ${method}${canonIdx>=0&&canonIdx!==extremeIdx?' (swapped with frame '+(canonIdx+1)+')':''}`);
           }
 
           // ── Gait FSM: re-label frames using foot-Y trajectory ──
@@ -3674,49 +3681,68 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
             // Check if either foot (ankle or heel) lands MEDIAL to the centreline.
             // Normal: both feet land at or outside the pelvis midpoint.
             // Crossover: foot lands inside (medial to) centreline — IT band / knee risk.
-            const footLMs = [
-              {lm: lAnkle,  side:'L', label:'LA'},
-              {lm: rAnkle,  side:'R', label:'RA'},
-              {lm: lHeel,   side:'L', label:'LH'},
-              {lm: rHeel,   side:'R', label:'RH'},
-            ].filter(f => f.lm && (f.lm.visibility||0) > 0.3);
+            //
+            // NOTE: Suppressed for jump/landing movements (drop jump, CMJ, single-leg, tuck).
+            // During airborne phases, feet naturally come together near the midline — this
+            // is not crossover gait. Crossover is only clinically meaningful for running/walking.
+            const isJumpMovement = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(
+              document.getElementById('movementType')?.value || ''
+            );
 
-            let crossoverDetected = false;
-            footLMs.forEach(({lm: foot, side, label}) => {
-              const footX = foot.x * W;
-              // Left foot crosses over if it lands RIGHT of centreline (>centreline X)
-              // Right foot crosses over if it lands LEFT of centreline (<centreline X)
-              const isCrossover = (side === 'L' && footX > pelvisMidX + W*0.02)
-                                || (side === 'R' && footX < pelvisMidX - W*0.02);
-              if(isCrossover) {
-                crossoverDetected = true;
-                // Red ring around the crossed-over foot
-                const r = Math.max(10, W/55);
-                ctx.beginPath();
-                ctx.arc(footX, foot.y*H, r, 0, 2*Math.PI);
-                ctx.strokeStyle = 'rgba(239,68,68,0.85)';
-                ctx.lineWidth = 2.5;
-                ctx.stroke();
-                // Arrow pointing to violation
-                ctx.font = `bold ${Math.max(10, W/65)}px sans-serif`;
-                ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth = 2.5;
-                ctx.strokeText('⚠ CROSSOVER', footX + r + 4, foot.y*H + 4);
-                ctx.fillStyle = '#ef4444';
-                ctx.fillText('⚠ CROSSOVER', footX + r + 4, foot.y*H + 4);
-              }
-            });
+            if(!isJumpMovement) {
+              const footLMs = [
+                {lm: lAnkle,  side:'L', label:'LA'},
+                {lm: rAnkle,  side:'R', label:'RA'},
+                {lm: lHeel,   side:'L', label:'LH'},
+                {lm: rHeel,   side:'R', label:'RH'},
+              ].filter(f => f.lm && (f.lm.visibility||0) > 0.3);
 
-            ctx.restore();
+              let crossoverDetected = false;
+              footLMs.forEach(({lm: foot, side, label}) => {
+                const footX = foot.x * W;
+                // Left foot crosses over if it lands RIGHT of centreline (>centreline X)
+                // Right foot crosses over if it lands LEFT of centreline (<centreline X)
+                // Threshold: 5% of frame width gives enough margin to ignore tracking noise
+                const isCrossover = (side === 'L' && footX > pelvisMidX + W*0.05)
+                                  || (side === 'R' && footX < pelvisMidX - W*0.05);
+                if(isCrossover) {
+                  crossoverDetected = true;
+                  // Red ring around the crossed-over foot
+                  const r = Math.max(10, W/55);
+                  ctx.beginPath();
+                  ctx.arc(footX, foot.y*H, r, 0, 2*Math.PI);
+                  ctx.strokeStyle = 'rgba(239,68,68,0.85)';
+                  ctx.lineWidth = 2.5;
+                  ctx.stroke();
+                  // Arrow pointing to violation
+                  ctx.font = `bold ${Math.max(10, W/65)}px sans-serif`;
+                  ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth = 2.5;
+                  ctx.strokeText('⚠ CROSSOVER', footX + r + 4, foot.y*H + 4);
+                  ctx.fillStyle = '#ef4444';
+                  ctx.fillText('⚠ CROSSOVER', footX + r + 4, foot.y*H + 4);
+                }
+              });
+            }
           }
         }
         ctx.font = `${Math.max(10, W/70)}px sans-serif`;
+        // Dynamic legend — only show states actually present in this frame
+        const lms = poseResult?.poseLandmarks || [];
+        const hasProjected       = lms.some(p => p?.source?.includes('tibia-projected') || p?.source?.includes('tibia-blended'));
+        const hasGroundCorrected = lms.some(p => p?.source?.includes('ground-corrected'));
+        const hasSwingAnkle      = isSwingPhase;
+        const hasFootLM          = lms.some((p,i) => i>=29 && i<=32 && p && (p.visibility||0) > 0.35);
+        const hasEstimated       = lms.some(p => p && (p.visibility||0) >= 0.35 && (p.visibility||0) < 0.60);
+        const hasLowConf         = lms.some(p => p && (p.visibility||0) > 0 && (p.visibility||0) < 0.35);
         const legendItems = [
-          {color:'#00e5cc',              label:'High confidence'},
-          {color:'#a8ff78',              label:'Foot landmark (verify!)'},
-          {color:'#c084fc',              label:'Ankle: tibia-projected (est.)'},
-          {color:'#ffa500',              label:'Estimated (occluded)'},
-          {color:'rgba(255,100,100,0.9)',label:'Low confidence'},
-        ];
+          {color:'#00e5cc',               label:'High confidence',                 show:true},
+          {color:'#a8ff78',               label:'Foot landmark (verify!)',          show:hasFootLM},
+          {color:'#c084fc',               label:'Ankle: tibia-projected (est.)',   show:hasProjected},
+          {color:'#fb923c',               label:'Ankle: ground-corrected',          show:hasGroundCorrected},
+          {color:'#facc15',               label:'Ankle: swing (position est.)',     show:hasSwingAnkle},
+          {color:'#ffa500',               label:'Estimated (occluded)',             show:hasEstimated},
+          {color:'rgba(255,100,100,0.9)', label:'Low confidence',                  show:hasLowConf},
+        ].filter(i => i.show);
         const lx = 8, ly = H - legendItems.length * Math.max(16, H/40) - 8;
         legendItems.forEach((item, idx) => {
           const lineH = Math.max(16, H/40);
@@ -6745,12 +6771,17 @@ function getPhaseTimes(movement, videoDuration) {
     };
   }
   // Build expanded frame list targeting exactly 8 frames
-  // Strategy: if movement already has 8 phases, use them directly — no interpolation needed
+  // Strategy: if movement already has 8 phases, use them directly — no interpolation needed.
+  // For landing movements (jump/drop), respect the actual phase count — don't pad to 8
+  // by inserting "Inter" frames. Landing phases are biomechanically specific; filler frames
+  // between them just get labeled as Inter and add noise without clinical value.
+  const isLandingMovement = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+  const targetCount = isLandingMovement ? phases.length : 8;
   const expanded = [];
   const expandedLabels = [];
-  if(phases.length >= 8) {
+  if(phases.length >= targetCount) {
     // Full phase map — use as-is, no "Inter" padding needed
-    phases.slice(0, 8).forEach(phase => { expanded.push(phase.time); expandedLabels.push(phase); });
+    phases.slice(0, targetCount).forEach(phase => { expanded.push(phase.time); expandedLabels.push(phase); });
   } else {
     phases.forEach((phase, i) => {
       expanded.push(phase.time);
@@ -6768,8 +6799,8 @@ function getPhaseTimes(movement, videoDuration) {
       }
     });
   }
-  // Trim or pad to exactly 8
-  while(expanded.length > 8) {
+  // Trim or pad to exactly targetCount
+  while(expanded.length > targetCount) {
     // Remove the last non-phase interpolated frame
     const lastInter = [...expandedLabels].reverse().findIndex(l => l.id === 'frame');
     if(lastInter === -1) break;
@@ -6777,7 +6808,7 @@ function getPhaseTimes(movement, videoDuration) {
     expanded.splice(idx, 1);
     expandedLabels.splice(idx, 1);
   }
-  while(expanded.length < 8) {
+  while(expanded.length < targetCount) {
     // Fill by bisecting the largest gap
     let maxGap = 0, maxIdx = 0;
     for(let i = 0; i < expanded.length - 1; i++) {
@@ -6796,8 +6827,8 @@ function getPhaseTimes(movement, videoDuration) {
       deduped.push(t); dedupedLabels.push(expandedLabels[i]);
     }
   });
-  // Pad back to 8 if deduplication removed frames
-  while(deduped.length < 8) {
+  // Pad back to targetCount if deduplication removed frames
+  while(deduped.length < targetCount) {
     let maxGap = 0, maxIdx = 0;
     for(let i = 0; i < deduped.length - 1; i++) {
       const g = deduped[i+1] - deduped[i];
@@ -6807,7 +6838,7 @@ function getPhaseTimes(movement, videoDuration) {
     deduped.splice(maxIdx+1, 0, newT);
     dedupedLabels.splice(maxIdx+1, 0, {id:'frame', label:`Frame ${deduped.length}`, desc:'Coverage frame'});
   }
-  return {times: deduped.slice(0, 8), labels: dedupedLabels.slice(0, 8)};
+  return {times: deduped.slice(0, targetCount), labels: dedupedLabels.slice(0, targetCount)};
 }
 
 // ── Camera Guide Data ──
