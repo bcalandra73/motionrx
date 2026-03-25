@@ -1343,8 +1343,27 @@ function startFrameExtraction(file, vid) {
             // This is the fast pre-analysis pass. MediaPipe Heavy runs later (in runAnalysis)
             // on only the 8 phase-selected frames — at the right biomechanical moments.
             quickFused = await coarseScanWithMoveNet(frames, statusText);
+          } else if(needsGaitLabel) {
+            // ── MediaPipe fallback for gait (MoveNet unavailable) ─────────────
+            // Running MediaPipe Heavy on 128 dense frames is too slow/memory-heavy.
+            // Subsample to 16 evenly-spaced frames for the GaitFSM quick scan.
+            // The full 128-frame extraction is already done; GaitFSM will select 8
+            // of these 16 for the gallery. MediaPipe Heavy runs on those 8 in runAnalysis.
+            statusText.textContent = 'MoveNet unavailable — using MediaPipe for phase detection (16 frames)...';
+            const GAIT_SCAN_N = 16;
+            const step = Math.max(1, Math.floor(frames.length / GAIT_SCAN_N));
+            const scanFrames = frames.filter((_, i) => i % step === 0).slice(0, GAIT_SCAN_N);
+            const scanResults = await runMediaPipeOnFrames(scanFrames);
+            const scanFused = await fusedLandmarkPipeline(
+              scanResults, scanFrames.map(f => f.imageData), movement, cameraView
+            );
+            // Expand back to full frame count by repeating nearest scan result
+            quickFused = frames.map((_, fi) => {
+              const scanIdx = Math.min(Math.round(fi / step), scanFused.length - 1);
+              return scanFused[scanIdx] || null;
+            });
           } else {
-            // ── MediaPipe fallback (squats/deadlifts, or MoveNet unavailable) ─
+            // ── MediaPipe fallback for squats/deadlifts (or other non-gait) ──
             statusText.textContent = 'Detecting phase events with pose model...';
             const quickResults = await runMediaPipeOnFrames(frames);
             quickFused = await fusedLandmarkPipeline(
@@ -1674,31 +1693,21 @@ function startFrameExtraction(file, vid) {
               const argMaxR=(arr,from,to)=>{let b=-Infinity,bi=from;for(let i=from;i<=to&&i<arr.length;i++){if(arr[i]!=null&&arr[i]>b){b=arr[i];bi=i;}}return bi;};
 
               const r0=cycleStart, r1=cycleEnd;
-              // REF leg: contact(0%) → midstance(0-35%) → toeoff(25-55%) → midswing(55-100%)
+              // REF leg: contact(0%) → loading(8-18%) → midstance(18-35%) → propulsion(35-50%) → toeoff(25-55%) → midswing(55-100%)
               const refContactIdx  = r0;
+
+              // Loading Response: peak knee flexion in early stance (0.06-0.22 of cycle).
+              // The knee bends maximally during weight acceptance — this is the clinical
+              // Loading Response phase. argMinR on included angle gives most-bent frame.
+              const refLoadingIdx  = argMinR(refKneeS, r0+Math.round(cycleLen*.06), r0+Math.round(cycleLen*.22));
+
               const refMidstIdx    = argMinR(refKneeS, r0, r0+Math.round(cycleLen*.35));
 
-              // Toe-off: prefer hip-flexion minimum in propulsion zone (25-55% of stride).
-              // Cross-check: the ankle composite signal should also drop (foot rising)
-              // within ±5% of the hip-min frame. If they agree, high confidence.
-              // If only hip-min is available, use it alone (treadmill standard).
-              const hipMinIdx = argMinR(refHipS, r0+Math.round(cycleLen*.20), r0+Math.round(cycleLen*.55));
-              const ankDropZoneStart = Math.max(r0, hipMinIdx - Math.round(cycleLen*.05));
-              const ankDropZoneEnd   = Math.min(r1, hipMinIdx + Math.round(cycleLen*.05));
-              // Ankle composite drops (foot lifts) at toe-off: look for falling edge near hip-min
-              let ankDropIdx = null;
-              let maxDropRate = 0;
-              const refComp = REF==='L' ? lComp : rComp;
-              for(let fi=ankDropZoneStart+1; fi<=ankDropZoneEnd && fi<N; fi++) {
-                const prev = refComp[fi-1], curr = refComp[fi];
-                if(prev!=null && curr!=null && (prev - curr) > maxDropRate) {
-                  maxDropRate = prev - curr; ankDropIdx = fi;
-                }
-              }
-              // Use ankle drop if it confirms hip-min (within range and drop is meaningful)
-              const refToeoffIdx = (ankDropIdx != null && maxDropRate > 0.05)
-                ? Math.round((hipMinIdx + ankDropIdx) / 2)  // average the two signals
-                : hipMinIdx;
+              // Propulsion: the phase between midstance and toe-off where the ankle
+              // is plantarflexing and hip is extending. Use the midpoint of the
+              // midstance→toeoff interval as the best stable estimate.
+              const refToeoffIdx   = argMinR(refHipS, r0+Math.round(cycleLen*.20), r0+Math.round(cycleLen*.55));
+              const refPropIdx     = Math.round((refMidstIdx + refToeoffIdx) / 2);
 
               const refMidswingIdx = argMinR(refAnkS, r0+Math.round(cycleLen*.50), r1);
 
@@ -1720,13 +1729,15 @@ function startFrameExtraction(file, vid) {
               //   OPP toeoff     ≈ REF late swing    (opp push-off = ref prepares to land)
               const rawEv=[
                 {i:refContactIdx,  side:REF, phaseId:'contact',    pri:0},
-                {i:refMidstIdx,    side:REF, phaseId:'midstance',  pri:1},
-                {i:refToeoffIdx,   side:REF, phaseId:'toeoff',     pri:2},
-                {i:refMidswingIdx, side:REF, phaseId:'midswing',   pri:3},
-                {i:oppContactIdx,  side:REF, phaseId:'earlyswing', pri:4},  // OPP contact → REF early swing
-                {i:oppMidstIdx,    side:REF, phaseId:'midswing',   pri:5},  // OPP midstance → REF mid swing
-                {i:oppToeoffIdx,   side:REF, phaseId:'lateswing',  pri:6},  // OPP toeoff → REF late swing
-                {i:oppMidswingIdx, side:REF, phaseId:'lateswing',  pri:7},  // OPP midswing → REF late swing (fallback)
+                {i:refLoadingIdx,  side:REF, phaseId:'loading',    pri:1},  // peak knee flex in early stance
+                {i:refMidstIdx,    side:REF, phaseId:'midstance',  pri:2},
+                {i:refPropIdx,     side:REF, phaseId:'propulsion', pri:3},  // midstance→toeoff midpoint
+                {i:refToeoffIdx,   side:REF, phaseId:'toeoff',     pri:4},
+                {i:refMidswingIdx, side:REF, phaseId:'midswing',   pri:5},
+                {i:oppContactIdx,  side:REF, phaseId:'earlyswing', pri:6},  // OPP contact → REF early swing
+                {i:oppMidstIdx,    side:REF, phaseId:'midswing',   pri:7},  // OPP midstance → REF mid swing
+                {i:oppToeoffIdx,   side:REF, phaseId:'lateswing',  pri:8},  // OPP toeoff → REF late swing
+                {i:oppMidswingIdx, side:REF, phaseId:'lateswing',  pri:9},  // OPP midswing → REF late swing (fallback)
               ].filter(e=>e.i>=0&&e.i<N);
 
               // Deduplicate by frame index (keep lowest priority)
@@ -2332,7 +2343,8 @@ function startFrameExtraction(file, vid) {
               console.log('[FSM] Phase relabeling complete');
             }
           } catch(fsmErr) {
-            console.warn('[FSM] Phase classification failed, keeping SmartPhase labels:', fsmErr);
+            console.error('[FSM] Phase classification failed:', fsmErr.message, fsmErr.stack);
+            console.warn('[FSM] Falling back to SmartPhase labels — gallery will show unlabeled frames');
           }
         }
       }
