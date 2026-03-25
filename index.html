@@ -1439,12 +1439,14 @@ function startFrameExtraction(file, vid) {
           const fusedForPhase = quickFused.map(lms => ({ poseLandmarks: lms }));
           const isFlexion = /squat|lunge|sit/i.test(movement);
           const isHinge   = /deadlift|hinge/i.test(movement);
-          console.log(`[SmartPhase] ${fusedForPhase.length} fused results, isFlexion=${isFlexion}, isHinge=${isHinge}, movement="${movement}"`);
+          const isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+          console.log(`[SmartPhase] ${fusedForPhase.length} fused results, isFlexion=${isFlexion}, isHinge=${isHinge}, isLanding=${isLanding}, movement="${movement}"`);
 
           // Score each frame with a composite metric.
-          // For squats: primary = min knee angle, fallback = max hip Y (hips lowest in frame).
+          // For squats & landings: primary = min knee angle (max flexion), fallback = max hip Y.
+          // For deadlifts: max hip extension angle.
           // Lower knees occlude at deep squat — hip landmarks stay visible much longer.
-          // We convert everything to a single "depth score" where HIGHER = deeper squat.
+          // We convert everything to a single "depth score" where HIGHER = deeper squat/landing.
           // Knee angle contribution: invert so bent knee (small angle) → high score.
           // Hip Y contribution: higher Y in normalised coords = lower in frame = deeper.
 
@@ -1479,7 +1481,7 @@ function startFrameExtraction(file, vid) {
             // If knee angle available: weight it 70%, hip Y 30%
             // If knee angle missing:   use hip Y only (normalised to 0-1 scale vs max seen)
             let score = null;
-            if(isFlexion) {
+            if(isFlexion || isLanding) {
               const kneeScore = kneeAngle != null ? (180 - kneeAngle) : null; // higher = more bent
               const hipScore  = hipY != null ? hipY * 180 : null;             // scale to ~same range
               if(kneeScore!=null && hipScore!=null) score = kneeScore*0.7 + hipScore*0.3;
@@ -1508,8 +1510,9 @@ function startFrameExtraction(file, vid) {
             });
             const winner = frameScores[extremeIdx];
             const method = winner.kneeAngle != null ? 'knee+hip composite' : 'hip position (knees occluded)';
-            frames[extremeIdx].phase = isFlexion
-              ? {id:'bottom',  label:'Bottom',  desc:`Deepest point — detected via ${method}`}
+            // For landing movements, map to 'bottom' which aligns with 'peak_flexion' phase window
+            frames[extremeIdx].phase = (isFlexion || isLanding)
+              ? {id:'bottom',  label:'Peak Flexion',  desc:`Peak knee flexion — detected via ${method}`}
               : {id:'lockout', label:'Lockout', desc:`Full extension — detected via hip angle`};
             console.log(`[SmartPhase] Relabeled frame ${extremeIdx+1} as ${targetId} via ${method}`);
           }
@@ -4918,10 +4921,16 @@ function extractAngles(lm, view='side', movement='') {
       // For left leg: medial direction is positive x (toward center)
       // For right leg: medial direction is negative x (toward center)
       return valgusDeg; // magnitude only — reported separately per side
+      // Physiological clamp applied after return (see below)
     };
 
-    const lValgus = computeKneeValgus(lHipF, lKneeF, lAnkF);
-    const rValgus = computeKneeValgus(rHipF, rKneeF, rAnkF);
+    const lValgusRaw = computeKneeValgus(lHipF, lKneeF, lAnkF);
+    const rValgusRaw = computeKneeValgus(rHipF, rKneeF, rAnkF);
+    // Physiological clamp: true dynamic valgus >25° is almost never real biomechanics.
+    // Values above this are typically caused by airborne/occluded landmark misplacement.
+    // The clinical concern threshold is 15°, so clamping at 25° preserves all meaningful data.
+    const lValgus = (lValgusRaw != null && lValgusRaw <= 25) ? lValgusRaw : null;
+    const rValgus = (rValgusRaw != null && rValgusRaw <= 25) ? rValgusRaw : null;
     if(lValgus != null) angles['Left Knee Valgus']  = lValgus;
     if(rValgus != null) angles['Right Knee Valgus'] = rValgus;
 
@@ -4943,11 +4952,15 @@ function extractAngles(lm, view='side', movement='') {
       const thighDy = kneeLM.y - hipLM.y;  // positive = knee below hip (expected)
       const thighLen = Math.hypot(thighDx, thighDy);
       if(thighLen < 0.03) return null; // degenerate frame
-      // Angle from vertical: atan(horizontal / vertical)
-      // Positive = thigh leans medially (toward body centre from camera's view)
-      // For LEFT leg: medial = positive x (knee moves right toward centre)
-      // For RIGHT leg: medial = negative x (knee moves left toward centre)
+      // Reject frames where knee is substantially above the hip (airborne / layout position).
+      // In standing/landing the knee is always below the hip (thighDy > 0).
+      // Allowing negative thighDy produces wildly inflated adduction angles for airborne frames.
+      if(thighDy < -0.02) return null; // knee above hip — airborne or occluded frame
       const angleDeg = Math.round(Math.atan2(Math.abs(thighDx), thighDy) * 180 / Math.PI);
+      // Physiological clamp: maximum real hip adduction/abduction from frontal view is ~30°.
+      // Values above this are almost always landmark placement errors on airborne or
+      // occluded frames, not genuine biomechanical patterns.
+      if(angleDeg > 30) return null;
       // Determine if medial or lateral
       return { deg: angleDeg, medial: true }; // always report magnitude; sign stored separately
     };
@@ -5888,31 +5901,31 @@ const PHASE_MAPS = {
     {id:'lockout',   label:'Recovery',      time:0.90, desc:'Return toward upright'},
   ],
   'Countermovement Jump': [
-    {id:'stance',    label:'Standing',      time:0.04, desc:'Initial upright position'},
+    {id:'stance',    label:'Standing',       time:0.04, desc:'Initial upright position'},
     {id:'descent',   label:'Countermovement',time:0.22, desc:'Quick descent — hip/knee/ankle flexing'},
-    {id:'bottom',    label:'Bottom',        time:0.35, desc:'Lowest point — maximum countermovement depth'},
-    {id:'ascent1',   label:'Takeoff Drive', time:0.46, desc:'Explosive triple extension'},
-    {id:'flight',    label:'Flight',        time:0.58, desc:'Airborne — maximum height'},
+    {id:'bottom',    label:'Bottom',         time:0.35, desc:'Lowest point — maximum countermovement depth'},
+    {id:'ascent1',   label:'Takeoff Drive',  time:0.46, desc:'Explosive triple extension'},
+    {id:'flight',    label:'Flight',         time:0.58, desc:'Airborne — maximum height'},
     {id:'contact',   label:'Landing Contact',time:0.72, desc:'Feet return to ground — landing mechanics'},
-    {id:'loading',   label:'Landing Load',  time:0.82, desc:'Weight acceptance on landing'},
-    {id:'lockout',   label:'Stabilization', time:0.93, desc:'Landing stabilized'},
+    {id:'loading',   label:'Landing Load',   time:0.82, desc:'Weight acceptance on landing'},
+    {id:'lockout',   label:'Stabilization',  time:0.93, desc:'Landing stabilized'},
   ],
   'Single-Leg Landing': [
-    {id:'approach',  label:'Pre-Land',      time:0.10, desc:'Airborne on single leg'},
+    {id:'approach',  label:'Pre-Land',       time:0.10, desc:'Airborne on single leg'},
     {id:'contact',   label:'Initial Contact',time:0.28, desc:'Foot touches ground — valgus assessment frame'},
-    {id:'loading',   label:'Loading',       time:0.42, desc:'Single-leg weight acceptance'},
-    {id:'bottom',    label:'Peak Flexion',  time:0.58, desc:'Maximum single-leg knee flexion — ACL load peak'},
-    {id:'lockout',   label:'Stabilization', time:0.82, desc:'Stick landing — hold position'},
+    {id:'loading',   label:'Loading',        time:0.42, desc:'Single-leg weight acceptance'},
+    {id:'bottom',    label:'Peak Flexion',   time:0.58, desc:'Maximum single-leg knee flexion — ACL load peak'},
+    {id:'lockout',   label:'Stabilization',  time:0.82, desc:'Stick landing — hold position'},
   ],
   'Tuck Jump': [
-    {id:'stance',    label:'Standing',      time:0.04, desc:'Starting position'},
-    {id:'descent',   label:'Dip',           time:0.15, desc:'Brief countermovement'},
-    {id:'flight',    label:'Tuck',          time:0.30, desc:'Airborne — knees pulled toward chest'},
-    {id:'contact',   label:'Landing 1',     time:0.45, desc:'First landing — initial valgus assessment'},
-    {id:'loading',   label:'Loading 1',     time:0.52, desc:'Weight acceptance — rep 1'},
-    {id:'descent2',  label:'Dip 2',         time:0.62, desc:'Immediate re-jump'},
-    {id:'flight2',   label:'Tuck 2',        time:0.75, desc:'Second tuck — assessing fatigue effect'},
-    {id:'contact2',  label:'Landing 2',     time:0.88, desc:'Second landing — fatigue comparison frame'},
+    {id:'stance',    label:'Standing',        time:0.04, desc:'Starting position'},
+    {id:'descent',   label:'Dip',             time:0.15, desc:'Brief countermovement'},
+    {id:'flight',    label:'Tuck',            time:0.30, desc:'Airborne — knees pulled toward chest'},
+    {id:'contact',   label:'Landing 1',       time:0.45, desc:'First landing — initial valgus assessment'},
+    {id:'loading',   label:'Loading 1',       time:0.52, desc:'Weight acceptance — rep 1'},
+    {id:'descent2',  label:'Dip 2',           time:0.62, desc:'Immediate re-jump'},
+    {id:'flight2',   label:'Tuck 2',          time:0.75, desc:'Second tuck — assessing fatigue effect'},
+    {id:'contact2',  label:'Landing 2',       time:0.88, desc:'Second landing — fatigue comparison frame'},
   ],
 };
 
@@ -6464,16 +6477,42 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 // This matches the norm convention "90-130° peak swing flexion" where 90° = moderately bent.
 // Without this conversion, 58° included angle (=122° flexion) would read as "below normal"
 // when compared against the 90-130° norm — the opposite of the true finding.
+//
+// LANDING MOVEMENTS follow the same convention:
+//   • Knee flexion: show PEAK flexion (180 - min included) — the most-bent landing frame
+//   • Hip flexion:  show PEAK flexion (max value)
+//   • Valgus/adduction: show PEAK (max) — the worst-case frame is the clinical measure
 const GAIT_USE_MAX = new Set(['Left Hip Flexion','Right Hip Flexion']);
 const GAIT_USE_MIN = new Set(['Left Knee Flexion','Right Knee Flexion']); // converted to flexion angle below
+const LANDING_PEAK_MAX = new Set([
+  'Left Hip Flexion','Right Hip Flexion',
+  'Left Knee Valgus','Right Knee Valgus',
+  'Left Hip Adduction','Right Hip Adduction',
+  'Trunk Lean','Trunk Lateral Lean','Pelvic Drop',
+]);
+const LANDING_PEAK_FLEX = new Set(['Left Knee Flexion','Right Knee Flexion']); // 180 - min included
+
 function gaitDisplayVal(jointName, agg, movement) {
-  const isGait = /running|gait|walk/i.test(movement || '');
+  const isGait    = /running|gait|walk/i.test(movement || '');
+  const isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement || '');
+
   if(isGait && GAIT_USE_MAX.has(jointName)) return agg.max;
   if(isGait && GAIT_USE_MIN.has(jointName)) {
     // Convert included angle → flexion angle (180° - included)
     // agg.min is the smallest included angle = the most bent frame = peak flexion
     return agg.min != null ? 180 - agg.min : null;
   }
+
+  if(isLanding && LANDING_PEAK_FLEX.has(jointName)) {
+    // Landing knee: show peak flexion = 180 - minimum included angle
+    // e.g. min included=85° → 95° flexion (correct; a deep landing bend)
+    return agg.min != null ? 180 - agg.min : null;
+  }
+  if(isLanding && LANDING_PEAK_MAX.has(jointName)) {
+    // For valgus/adduction/trunk: worst-case peak value is the clinical measure
+    return agg.max;
+  }
+
   return agg.avg;
 }
 
