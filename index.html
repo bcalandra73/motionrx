@@ -6511,12 +6511,18 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 const GAIT_USE_MAX = new Set(['Left Hip Flexion','Right Hip Flexion']);
 const GAIT_USE_MIN = new Set(['Left Knee Flexion','Right Knee Flexion']); // converted to flexion angle below
 const LANDING_PEAK_MAX = new Set([
-  'Left Hip Flexion','Right Hip Flexion',
+  // Frontal-plane risk measures: worst-case peak (highest value = most risk)
   'Left Knee Valgus','Right Knee Valgus',
   'Left Hip Adduction','Right Hip Adduction',
   'Trunk Lean','Trunk Lateral Lean','Pelvic Drop',
 ]);
-const LANDING_PEAK_FLEX = new Set(['Left Knee Flexion','Right Knee Flexion']); // 180 - min included
+// Sagittal flexion measures: 180 - min_included = peak flexion angle
+// Hip flexion uses the same convention as knee — the included angle decreases as the joint bends.
+// agg.min = most-bent frame (smallest included angle) → 180 - min = peak flexion in degrees
+const LANDING_PEAK_FLEX = new Set([
+  'Left Knee Flexion','Right Knee Flexion',
+  'Left Hip Flexion','Right Hip Flexion',
+]);
 
 function gaitDisplayVal(jointName, agg, movement) {
   const isGait    = /running|gait|walk/i.test(movement || '');
@@ -7384,6 +7390,23 @@ ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). For running/gait, this is the thigh-from-vertical angle (independent of arm swing). For lifts, this is the shoulder-hip-knee included angle corrected to 0°=neutral. Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion.
 - SIDE VIEW LIMITATION — Hip and Knee Flexion: In a side-view camera, only the near leg's thigh/knee direction can be measured reliably in 2D. The far leg is foreshortened (its thigh points partly toward/away from camera), making its 2D angle systematically underestimate true hip flexion. If one side shows "N/A" for hip or knee flexion, it means the far-side 2D measurement was suppressed because it would be inaccurate. The available side's measurement IS valid and should be used clinically. For true bilateral hip/knee comparison, use the posterior or frontal view, or rely on 3D worldLandmarks when the device supports them.
 - Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
+${/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement) ? `
+⚠️ CRITICAL — LANDING MOVEMENT ANGLE CONVENTIONS (read before interpreting ANY angle):
+All flexion values in this report have been PRE-CONVERTED to clinical flexion angles where:
+  0° = fully extended (straight leg)
+  Higher values = more bent / more flexed
+  Example: "Knee Flexion (peak) = 95°" means the knee bent 95° from full extension — this is EXCELLENT landing mechanics, well above the ≥45° soft-landing threshold.
+
+DO NOT interpret these as raw included angles. The conversion (180° - included angle) has already been applied.
+Specifically:
+- Knee Flexion (peak): 180° - minimum_included_angle = degrees of actual bending. ≥45° is soft landing; ≥90° is deep/controlled. A value of 95° is GOOD, not stiff-knee.
+- Hip Flexion (peak): 180° - minimum_included_angle = degrees of hip flexion from neutral. ≥30° is adequate for landing. A value of 60-90° is normal controlled landing.
+- Trunk Lean (peak): degrees FORWARD from vertical. 0° = upright. <20° = acceptable; >35° = ACL risk; >50° = severe forward lean.
+- Knee Valgus (peak): degrees of medial knee deviation. 0° = ideal. <8° = acceptable; >15° = high ACL risk. These are already peak worst-case values.
+- Hip Adduction (peak): degrees of medial thigh deviation. 0° = ideal. <10° = normal; >18° = risk threshold.
+
+STIFF-KNEE LANDING: Only flag if Knee Flexion (peak) < 45°. Values of 80-100° are good; 100°+ is excellent.
+HIP STRATEGY: Only flag inadequate hip flexion if Hip Flexion (peak) < 30°. Values of 60-90° indicate good hip-dominant strategy.` : ''}
 - Ankle Dorsiflexion: reported as degrees FROM neutral (90° raw). Positive = dorsiflexion, negative = plantarflexion. Normal loading DF = +10 to +25°. Values aggregated from STANCE frames only (swing excluded). IMPORTANT: ankle/foot landmarks (heel, toe) are the LEAST reliable landmarks in side-view running at 30–60fps — foot moves fast and is often partially occluded. Values outside −12° to +35° are likely tracking artefacts. If ankle DF appears severely asymmetric (>20° L/R difference) or deeply plantarflexed (< −15°) during stance, flag it as UNCONFIRMED and instruct the clinician to verify against the skeleton overlay before drawing clinical conclusions. Do NOT diagnose ankle dysfunction solely from a single plantarflexion reading.
 - Trunk Lean: degrees from vertical (0° = perfectly upright). Running norm = 5-15° forward.
 - Shoulder Flexion: arm forward from body. 0° = arm at side; 90° = arm horizontal forward. NOTE: In running from a SIDE-VIEW camera, shoulder asymmetry reflects timing (one arm forward, one back) not ROM — do NOT flag shoulder asymmetry as clinically significant unless the front/posterior view also shows it.
@@ -7508,7 +7531,12 @@ IMPORTANT — WHAT TO LOOK FOR IN EACH PHASE FRAME:
 - Peak Flexion frame: maximum valgus, hip flexion depth, trunk lean magnitude
 - Stabilization frame: can the patient hold a stable single/double leg position?
 
-Score the movement 1-10 where: 10=excellent mechanics, no risk factors; 7-9=minor technique issues; 4-6=moderate risk factors needing intervention; 1-3=significant ACL risk pattern requiring activity modification.` : ''}
+Score the movement 1-10 where: 10=excellent mechanics, no risk factors; 7-9=minor technique issues; 4-6=moderate risk factors needing intervention; 1-3=significant ACL risk pattern requiring activity modification.
+
+CAMERA VIEW NOTE FOR THIS LANDING ASSESSMENT:
+Primary camera: ${cameraView}
+${/side/i.test(cameraView) && !hasDualView ? `⚠️ SIDE VIEW ONLY — MAJOR LIMITATION: You are missing the most important ACL risk data. Knee valgus, hip adduction, and pelvic drop are ALL frontal-plane measures that cannot be assessed from a side camera. From a side view you can assess: knee flexion angle, hip flexion, trunk forward lean, and landing timing. You CANNOT assess: dynamic knee valgus, medial knee collapse, hip adduction, lateral trunk lean, or foot placement symmetry. Explicitly note this limitation in your report and strongly recommend a frontal/anterior camera view for complete ACL risk screening.` : ''}
+${/front|anterior/i.test(cameraView) && !hasDualView ? `FRONTAL VIEW ONLY: You can assess valgus, hip adduction, pelvic drop, and bilateral symmetry well. Knee flexion and hip flexion values from a frontal camera are less reliable than from a side view — interpret with caution. Trunk lean is visible but foreshortened. Strongly recommend adding a side view for complete sagittal-plane assessment.` : ''}` : ''}
 ${hasDualView ? '\nDUAL-VIEW ADVANTAGE: With two camera angles you can identify frontal-plane issues (pelvic drop, knee valgus, lateral trunk lean, foot progression) that are invisible from a single sagittal view. Use both views actively in your analysis.' : ''}
 
 Use all available data — skeleton overlays, joint angles${barStats ? ', and bar path deviation' : ''}${hasDualView ? ', and both camera perspectives' : ''} — for a precise, data-driven clinical report. Reference specific measurements throughout.
