@@ -3033,6 +3033,19 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
       const kc = k.visibility||0, ac = a?.visibility||0;
       if(kc < KNEE_MIN_CONF) return;
 
+      // ── Skip reprojection for high-confidence ankle landmarks that are elevated ──
+      // When the patient stands on a box (Pre-Land phase), the ankle is correctly placed
+      // HIGH in the frame (low Y value). The belt-level reference learned from landing
+      // frames will be LOWER in the frame, causing reprojection to pull the ankle DOWN
+      // to floor level — the opposite of correct. If the ankle is high-confidence (>0.60)
+      // and is already near the knee (within plausible tibia length), trust MediaPipe.
+      if(a && ac >= 0.60 && a.y > k.y + 0.01) {
+        // Ankle is below knee (correct anatomy) and high confidence — skip reprojection
+        // unless it's obviously too far from the knee
+        const ankDist = Math.hypot(a.x - k.x, a.y - k.y);
+        if(ankDist < medLen * 1.8) return;
+      }
+
       // Get the per-frame tibia direction (phase-appropriate)
       const dir = getInterpolatedDir(fi);
       if(!dir) return;
@@ -4769,14 +4782,22 @@ function extractAngles(lm, view='side', movement='') {
     }
   } else {
     // Other movements: shoulder-hip-knee (trunk lean is clinically relevant reference)
-    if(lShoulder&&lHip&&lKnee) {
-      const raw = calcAngleBest(lShoulder,lHip,lKnee);
-      if(raw!=null) angles['Left Hip Flexion'] = Math.abs(180 - raw);
+    // FRONTAL VIEW: hip flexion cannot be computed reliably from a frontal/posterior camera.
+    // The shoulder-hip-knee angle from the front measures lateral trunk lean, not forward flexion.
+    // Suppress rather than report a meaningless value — the table will show N/A and guide the
+    // clinician to use a side view for sagittal-plane hip/knee flexion assessment.
+    const isLandingMov = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+    if(!isFrontalView || !isLandingMov) {
+      if(lShoulder&&lHip&&lKnee) {
+        const raw = calcAngleBest(lShoulder,lHip,lKnee);
+        if(raw!=null) angles['Left Hip Flexion'] = Math.abs(180 - raw);
+      }
+      if(rShoulder&&rHip&&rKnee) {
+        const raw = calcAngleBest(rShoulder,rHip,rKnee);
+        if(raw!=null) angles['Right Hip Flexion'] = Math.abs(180 - raw);
+      }
     }
-    if(rShoulder&&rHip&&rKnee) {
-      const raw = calcAngleBest(rShoulder,rHip,rKnee);
-      if(raw!=null) angles['Right Hip Flexion'] = Math.abs(180 - raw);
-    }
+    // For frontal-view landing, hip flexion is omitted — clinician sees N/A in table
   }
   // Hip Extension at toe-off is NOT computed here — it requires the specific toe-off frame.
   // The stride engine's hipExtAtToeoff value is injected into the angles table separately
