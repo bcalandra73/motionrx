@@ -7387,10 +7387,25 @@ async function runAnalysis() {
     ? `DUAL-PLANE ANALYSIS: Two camera angles were captured. Images 1–${framesToSend.length} are from the ${view1Label}; images ${framesToSend.length+1}–${frameCount} are from the ${view2Label}. Angles have been merged: sagittal-plane measurements (hip/knee flexion, trunk lean) taken from the most appropriate view, frontal-plane measurements (valgus, pelvic tilt, symmetry) from the other. Use both sets of frames to give a more complete 3D movement picture than a single-view analysis allows.`
     : `CAMERA VIEW: ${view1Label}`;
 
-  const mergedAngleLines = Object.entries(aggregated).map(([k,v]) => {
+  const isUpperExMov = /shoulder|overhead.*press|overhead.*reach|pushing|pulling/i.test(movement);
+  const suppressLowerExInPrompt = new Set([
+    'Left Knee Flexion','Right Knee Flexion','Left Knee Extension','Right Knee Extension',
+    'Left Knee Valgus','Right Knee Valgus','Left Hip Adduction','Right Hip Adduction',
+    'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion','Left Pronation','Right Pronation',
+  ]);
+
+  const mergedAngleLines = Object.entries(aggregated).filter(([k]) => {
+    // For upper extremity movements, suppress lower-body metrics from the prompt
+    // — they just measure standing posture and have wrong reference ranges
+    if(isUpperExMov && suppressLowerExInPrompt.has(k)) return false;
+    return true;
+  }).map(([k,v]) => {
     // For running/gait: report peak (max) for flexion joints, avg for others
-    const dispVal = gaitDisplayVal(k, v, movement);
-    const peakNote = ((dispVal === v.max || dispVal === v.min) && dispVal !== v.avg) ? ' [peak]' : '';
+    // For shoulder/elbow flexion: always report peak (max) — avg includes start position at 0°
+    const isShoulderOrElbow = /Shoulder (Flexion|Abduction)|Elbow Flexion/.test(k);
+    const dispVal = isShoulderOrElbow ? v.max : gaitDisplayVal(k, v, movement);
+    const peakNote = isShoulderOrElbow ? ' [peak ROM]'
+      : ((dispVal === v.max || dispVal === v.min) && dispVal !== v.avg) ? ' [peak]' : '';
     const viewNote = hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : '';
     return `${k}: ${dispVal}°${peakNote} (range ${v.min}°–${v.max}°)${viewNote}`;
   }).join('\n');
@@ -7411,6 +7426,14 @@ ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). For running/gait, this is the thigh-from-vertical angle (independent of arm swing). For lifts, this is the shoulder-hip-knee included angle corrected to 0°=neutral. Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion.
 - SIDE VIEW LIMITATION — Hip and Knee Flexion: In a side-view camera, only the near leg's thigh/knee direction can be measured reliably in 2D. The far leg is foreshortened (its thigh points partly toward/away from camera), making its 2D angle systematically underestimate true hip flexion. If one side shows "N/A" for hip or knee flexion, it means the far-side 2D measurement was suppressed because it would be inaccurate. The available side's measurement IS valid and should be used clinically. For true bilateral hip/knee comparison, use the posterior or frontal view, or rely on 3D worldLandmarks when the device supports them.
 - Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
+${isUpperExMov ? `
+⚠️ UPPER EXTREMITY ANGLE CONVENTIONS (read before interpreting):
+- Shoulder Flexion / Abduction values in this report are PEAK ROM values (maximum angle achieved across all frames). Do NOT treat them as averages. A value of 168° means the patient achieved 168° of shoulder flexion at peak — excellent. A value of 90° means they achieved 90° at peak — moderately limited.
+- Normal full shoulder flexion = 170-180°. Normal abduction = 170-180°. Functional overhead = >160°.
+- Shoulder asymmetry: clinically significant if >15° difference L vs R, or LSI <90%.
+- Trunk lean during overhead: compensatory lumbar extension if trunk lean peaks >15° during shoulder flexion — check if lean increases with shoulder elevation.
+- Lower extremity data (knee flexion, hip adduction etc.) has been SUPPRESSED from this report — it only measures standing posture and is not clinically relevant for this assessment.
+- Hip flexion shown (if present) reflects sagittal trunk/pelvis position, NOT hip ROM — small values (5-20°) are normal for someone standing upright.` : ''}
 ${/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement) ? `
 ⚠️ CRITICAL — LANDING MOVEMENT ANGLE CONVENTIONS (read before interpreting ANY angle):
 All flexion values in this report have been PRE-CONVERTED to clinical flexion angles where:
@@ -7966,18 +7989,61 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           }
         }
       } else {
-        tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Avg Angle</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
-        Object.entries(aggregated).forEach(([k,v]) => {
-          const flag = flagAngleForMovement(k, v.avg, movNorm);
+        const isUpperEx = /shoulder|overhead|press.*reach|pushing|pulling/i.test(movement);
+
+        // For upper extremity movements: define the clinically relevant joints in priority order
+        // and suppress lower-extremity metrics (knee flex, hip flex etc.) that just measure
+        // standing posture noise and confuse Claude with wrong reference ranges.
+        const upperExPrimaryJoints = [
+          'Left Shoulder Flexion', 'Right Shoulder Flexion',
+          'Left Shoulder Abduction', 'Right Shoulder Abduction',
+          'Left Elbow Flexion', 'Right Elbow Flexion',
+          'Trunk Lean', 'Trunk Lateral Lean',
+          'Left Hip Flexion', 'Right Hip Flexion',  // keep but label as compensatory
+          'Pelvic Drop',
+        ];
+        // Lower-extremity joints to SUPPRESS entirely for upper-ex movements
+        const suppressForUpperEx = new Set([
+          'Left Knee Flexion','Right Knee Flexion',
+          'Left Knee Extension','Right Knee Extension',
+          'Left Knee Valgus','Right Knee Valgus',
+          'Left Hip Adduction','Right Hip Adduction',
+          'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
+          'Left Pronation','Right Pronation',
+        ]);
+
+        tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Peak / Avg</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
+
+        const entriesToShow = isUpperEx
+          ? Object.entries(aggregated).filter(([k]) => !suppressForUpperEx.has(k))
+          : Object.entries(aggregated);
+
+        entriesToShow.forEach(([k, v]) => {
+          // For shoulder flexion/abduction: show PEAK (max) as the primary value.
+          // The average is meaningless — it includes the start position at 0°.
+          // Peak = max observed across all frames = actual ROM achieved.
+          const isShoulderFlex = /Shoulder (Flexion|Abduction)/.test(k);
+          const isElbowFlex    = /Elbow Flexion/.test(k);
+          const dispVal = (isShoulderFlex || isElbowFlex) ? v.max : v.avg;
+          const peakLabel = (isShoulderFlex || isElbowFlex)
+            ? ' <span style="font-size:.65rem;color:var(--muted)">peak</span>' : '';
+
+          const flag = flagAngleForMovement(k, dispVal, movNorm);
           const ref = getNormLabel(k, movNorm);
           tableHtml += `<tr>
             <td>${k}</td>
-            <td><span class="val ${flag}">${v.avg}°</span></td>
+            <td><span class="val ${flag}">${dispVal}°</span>${peakLabel}${(isShoulderFlex||isElbowFlex)?`<br><span class="ref">avg ${v.avg}°</span>`:''}</td>
             <td class="ref">${v.min}° – ${v.max}°</td>
             <td class="ref">${ref}</td>
           </tr>`;
         });
         tableHtml += '</tbody></table>';
+        if(isUpperEx) {
+          tableHtml += `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">
+            † Shoulder flexion shows <strong>peak ROM achieved</strong> across all frames — not average. 
+            Lower extremity metrics suppressed (not clinically relevant for this movement).
+          </div>`;
+        }
       }
 
       document.getElementById('anglesBody').innerHTML = tableHtml;
