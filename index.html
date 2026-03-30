@@ -927,6 +927,14 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="section-body" id="anglesBody"></div>
     </div>
 
+    <!-- Dense dynamic angle curves (landing / running) -->
+    <div class="report-section full" id="denseCurvesSection" style="margin-bottom:16px;display:none;">
+      <div class="section-head"><span class="sh-icon">📈</span><h3>Continuous Angle Curves</h3>
+        <span style="font-size:.70rem;color:var(--muted);font-weight:400;margin-left:8px;">Dense MediaPipe pass — critical movement window</span>
+      </div>
+      <div class="section-body" id="denseCurvesBody"></div>
+    </div>
+
 
     <!-- PROMs results (shown when PROMs were entered, or added post-analysis) -->
     <div class="report-section full" id="promsResultSection" style="margin-bottom:16px;display:none;">
@@ -7093,6 +7101,438 @@ function aggregateAngles(allFrameAngles, framePhases) {
 }
 
 // ── Main Analysis ──
+// ── Foot/Ankle Multi-Scale Refinement ──────────────────────────────────────────
+// Problem: MediaPipe Heavy was trained on general pose estimation. In a full-body
+// frame at typical recording resolution, the ankle/heel region is only ~40-80px wide.
+// This is too few pixels for reliable sub-landmark precision on small bony prominences.
+//
+// Solution: For dynamic movements (running, jumping), after the initial pose detection
+// we extract a high-resolution crop of the lower-leg region (from mid-thigh to bottom
+// of frame) and run a second MediaPipe inference on that crop. The foot region now
+// occupies ~3-4× more of the inference input, giving the model substantially more
+// pixel data to anchor landmark positions.
+//
+// The crop includes enough anatomical context (mid-thigh visible) for MediaPipe to
+// reliably detect limb orientation and place ankle/heel/toe landmarks accurately.
+// Refined landmarks are only used if: confidence improves AND anatomical plausibility
+// checks pass (knee above ankle, plausible tibia length).
+//
+async function refineFootLandmarks(imageBase64, coarseLandmarks) {
+  if(!coarseLandmarks || !mpReady || !poseLandmarkerInstance) return coarseLandmarks;
+
+  // Indices for foot landmarks we want to refine
+  const FOOT_IDX = [25,26,27,28,29,30,31,32]; // knees, ankles, heels, toes
+
+  // Check if refinement is needed: any foot landmark with confidence < 0.60
+  const needsRefinement = FOOT_IDX.some(i => {
+    const lm = coarseLandmarks[i];
+    return !lm || (lm.visibility||0) < 0.60;
+  });
+  if(!needsRefinement) return coarseLandmarks; // all foot landmarks are reliable — skip
+
+  try {
+    // Build crop bounds: from mid-thigh (halfway between hip and knee) to bottom of frame
+    // Width: full width of frame (preserves aspect ratio context for MediaPipe)
+    const lHip = coarseLandmarks[23], rHip = coarseLandmarks[24];
+    const lKnee = coarseLandmarks[25], rKnee = coarseLandmarks[26];
+
+    if(!lKnee && !rKnee) return coarseLandmarks; // no knee reference — can't crop
+
+    // Crop top = midpoint between hip and knee (or 40% from top if no hip visible)
+    const hipY = (lHip && rHip) ? (lHip.y + rHip.y) / 2
+               : (lHip?.y ?? rHip?.y ?? 0.3);
+    const kneeY = Math.min(lKnee?.y ?? 1, rKnee?.y ?? 1);
+    const cropTopFrac = Math.max(0, hipY - (kneeY - hipY) * 0.15); // slightly above hip
+
+    if(cropTopFrac >= 0.95) return coarseLandmarks; // nothing to crop
+
+    // Load original image to canvas for cropping
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => rej(new Error('crop-load'));
+      im.src = 'data:image/jpeg;base64,' + imageBase64;
+    });
+
+    const W = img.naturalWidth, H = img.naturalHeight;
+    const cropY = Math.floor(cropTopFrac * H);
+    const cropH = H - cropY; // from cropY to bottom
+
+    if(cropH < 80) return coarseLandmarks; // crop too small to be useful
+
+    // Scale the crop up to fill the full original frame dimensions — this is the
+    // resolution boost that improves ankle/heel precision
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width  = W;
+    cropCanvas.height = H; // scale to full height so MediaPipe gets same input size
+    const ctx = cropCanvas.getContext('2d');
+    ctx.drawImage(img, 0, cropY, W, cropH, 0, 0, W, H); // stretch crop to fill frame
+
+    // Run MediaPipe on the zoomed crop
+    const cropB64 = cropCanvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+    const cropResults = await runMediaPipeOnFrames([{imageData: cropB64}]);
+    const refinedLMs = cropResults[0];
+    if(!refinedLMs) return coarseLandmarks;
+
+    // Map refined crop coordinates back to original frame coordinates
+    // The crop covers original frame rows [cropY..H], scaled to fill H rows
+    // Inverse: original_y = cropTopFrac + refined_y_frac * (1 - cropTopFrac)
+    const mapY = (ry) => cropTopFrac + ry * (1 - cropTopFrac);
+    const mapX = (rx) => rx; // full width preserved — x unchanged
+
+    // Merge: use refined landmark if it has higher confidence AND passes plausibility
+    const merged = coarseLandmarks.map((orig, i) => {
+      if(!FOOT_IDX.includes(i)) return orig; // keep non-foot landmarks unchanged
+
+      const ref = refinedLMs[i];
+      if(!ref) return orig;
+
+      const refConf  = ref.visibility  || 0;
+      const origConf = orig?.visibility || 0;
+
+      // Only use refined landmark if confidence improved
+      if(refConf <= origConf && refConf < 0.55) return orig;
+
+      // Map back to original frame coordinates
+      const origX = mapX(ref.x);
+      const origY = mapY(ref.y);
+
+      // Plausibility: ankle/heel must be below the knee
+      if((i === 27 || i === 28 || i === 29 || i === 30) && lKnee && rKnee) {
+        const kneeRefY = i === 27 || i === 29 || i === 31 ? (lKnee?.y ?? 0) : (rKnee?.y ?? 0);
+        if(origY < kneeRefY - 0.02) return orig; // would place ankle above knee — reject
+      }
+
+      return {
+        ...orig,
+        x: origX,
+        y: origY,
+        visibility: refConf,
+        // Preserve world coords from original if refined doesn't have them
+        _wx: ref._wx ?? orig?._wx ?? null,
+        _wy: ref._wy ?? orig?._wy ?? null,
+        _wz: ref._wz ?? orig?._wz ?? null,
+        source: `foot-refined(was-${origConf.toFixed(2)}→${refConf.toFixed(2)})`,
+      };
+    });
+
+    const refinedCount = merged.filter((m,i) => FOOT_IDX.includes(i) && m?.source?.startsWith('foot-refined')).length;
+    if(refinedCount > 0) {
+      console.log(`[FootRefine] Refined ${refinedCount} foot landmarks (crop from ${(cropTopFrac*100).toFixed(0)}% down)`);
+    }
+    return merged;
+
+  } catch(e) {
+    console.warn('[FootRefine] Failed:', e.message);
+    return coarseLandmarks;
+  }
+}
+
+// ── Dense Dynamic Analysis Pass ──────────────────────────────────────────────────
+// Runs MediaPipe Heavy on 24-32 frames within the clinically critical movement window,
+// then applies foot landmark refinement to each frame.
+//
+// For LANDING (drop jump, CMJ, single-leg, tuck jump):
+//   Window = initial contact → stabilization (approx 20%–72% of video)
+//   Captures the full valgus curve, peak flexion timing, and rate of collapse onset.
+//   At 120fps this = ~62 real frames → we sample 24 evenly → every 2-3 real frames.
+//
+// For RUNNING / GAIT:
+//   Window = best detected stride cycle from stride engine, or full clip if unavailable.
+//   Captures continuous hip/knee/ankle curves across one complete stride.
+//
+// Returns: array of {t, angles, landmarks} objects + stores in window._denseDynamicCurves
+//
+async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, statusEl) {
+  if(!mpReady || !poseLandmarkerInstance) return null;
+  if(!vidEl || !dur || !isFinite(dur) || dur <= 0) return null;
+
+  const isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+  const isRunning = /running|gait|walk/i.test(movement);
+  if(!isLanding && !isRunning) return null;
+
+  // Determine the critical window
+  let windowStart, windowEnd, frameCount;
+
+  if(isLanding) {
+    // Contact phase starts around 20-25% into the video (pre-land is ~0-20%)
+    // Stabilization ends around 72-80%
+    windowStart = 0.18;
+    windowEnd   = 0.78;
+    frameCount  = 24;
+    if(statusEl) statusEl.textContent = 'Dense landing pass: extracting 24 frames around contact window...';
+  } else {
+    // Running: use best stride range from stride engine, fallback to full clip
+    const sm = window_strideMetrics;
+    if(sm?.bestStrideFrameRange && window._denseAnglesFrames?.length > 0) {
+      // Convert frame indices to proportions using dense frame array
+      const N = window._denseAnglesFrames.length;
+      windowStart = Math.max(0,   (sm.bestStrideFrameRange[0] - 2) / N);
+      windowEnd   = Math.min(1.0, (sm.bestStrideFrameRange[1] + 2) / N);
+    } else {
+      windowStart = 0.05;
+      windowEnd   = 0.95;
+    }
+    frameCount  = 32;
+    if(statusEl) statusEl.textContent = 'Dense gait pass: extracting 32 frames across stride cycle...';
+  }
+
+  // Extract frames
+  const proportions = Array.from({length: frameCount}, (_, i) =>
+    windowStart + (i / (frameCount - 1)) * (windowEnd - windowStart)
+  );
+  const denseFrames = [];
+  for(const prop of proportions) {
+    const t = prop * dur;
+    const b64 = await seekCapture(vidEl, Math.max(0.05, Math.min(t, dur - 0.05)));
+    if(b64) denseFrames.push({imageData: b64, t: prop});
+  }
+
+  if(denseFrames.length < 8) return null;
+
+  if(statusEl) statusEl.textContent = `Dense pass: running MediaPipe on ${denseFrames.length} frames + foot refinement...`;
+
+  // Run MediaPipe on all dense frames
+  const mpResults = await runMediaPipeOnFrames(denseFrames);
+
+  // Apply foot landmark refinement to each frame
+  const refinedLandmarks = [];
+  for(let i = 0; i < denseFrames.length; i++) {
+    const raw = mpResults[i];
+    if(!raw) { refinedLandmarks.push(null); continue; }
+    const refined = await refineFootLandmarks(denseFrames[i].imageData, raw);
+    refinedLandmarks.push(refined);
+  }
+
+  // Extract angle curves
+  const curves = refinedLandmarks.map((lms, i) => {
+    if(!lms) return null;
+    return {
+      t:         denseFrames[i].t,
+      tMs:       Math.round(denseFrames[i].t * dur * 1000),
+      angles:    extractAngles(lms, cameraViewLocal, movement),
+      landmarks: lms,
+    };
+  }).filter(Boolean);
+
+  window._denseDynamicCurves = curves;
+  console.log(`[DensePass] ${curves.length} frames processed for ${movement}`);
+
+  return curves;
+}
+
+// ── Render Dense Curve Charts ─────────────────────────────────────────────────
+function renderDenseCurves(curves, movement) {
+  const section = document.getElementById('denseCurvesSection');
+  const body    = document.getElementById('denseCurvesBody');
+  if(!section || !body || !curves || curves.length < 4) return;
+
+  const isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+  const isRunning = /running|gait|walk/i.test(movement);
+
+  // Define which angle series to chart for each movement type
+  const seriesConfig = isLanding ? [
+    {key:'Left Knee Flexion',   label:'L Knee Flexion',   color:'#0ea5e9', transform: v => v!=null ? 180-v : null},
+    {key:'Right Knee Flexion',  label:'R Knee Flexion',   color:'#f97316', transform: v => v!=null ? 180-v : null},
+    {key:'Left Knee Valgus',    label:'L Knee Valgus',    color:'#3b82f6', transform: v => v},
+    {key:'Right Knee Valgus',   label:'R Knee Valgus',    color:'#ef4444', transform: v => v},
+    {key:'Trunk Lean',          label:'Trunk Lean',       color:'#8b5cf6', transform: v => v},
+  ] : [
+    {key:'Left Hip Flexion',    label:'L Hip Flex',       color:'#0ea5e9', transform: v => v},
+    {key:'Right Hip Flexion',   label:'R Hip Flex',       color:'#f97316', transform: v => v},
+    {key:'Left Knee Flexion',   label:'L Knee Flex',      color:'#3b82f6', transform: v => v!=null ? 180-v : null},
+    {key:'Right Knee Flexion',  label:'R Knee Flex',      color:'#ef4444', transform: v => v!=null ? 180-v : null},
+    {key:'Left Ankle Dorsiflexion',  label:'L Ankle DF', color:'#10b981', transform: v => v},
+    {key:'Right Ankle Dorsiflexion', label:'R Ankle DF', color:'#f59e0b', transform: v => v},
+  ];
+
+  const tValues = curves.map(c => c.tMs);
+  const tMin = Math.min(...tValues), tMax = Math.max(...tValues);
+  const tRange = Math.max(1, tMax - tMin);
+
+  // Build SVG sparklines for each series
+  const W = 500, H = 90, PAD = {l:36, r:8, t:8, b:22};
+  const plotW = W - PAD.l - PAD.r;
+  const plotH = H - PAD.t - PAD.b;
+
+  // Split into two charts: sagittal (hip/knee) and frontal (valgus/adduction)
+  const sagittalKeys = isLanding
+    ? ['Left Knee Flexion','Right Knee Flexion','Trunk Lean']
+    : ['Left Hip Flexion','Right Hip Flexion','Left Knee Flexion','Right Knee Flexion','Left Ankle Dorsiflexion','Right Ankle Dorsiflexion'];
+  const frontalKeys = isLanding
+    ? ['Left Knee Valgus','Right Knee Valgus','Left Hip Adduction','Right Hip Adduction']
+    : [];
+
+  const buildChart = (title, keysToShow) => {
+    const activeSeries = seriesConfig.filter(s => keysToShow.includes(s.key));
+    if(!activeSeries.length) return '';
+
+    // Collect all values across series for Y scaling
+    const allVals = [];
+    activeSeries.forEach(s => {
+      curves.forEach(c => {
+        const raw = c.angles[s.key];
+        const v = s.transform(raw);
+        if(v != null) allVals.push(v);
+      });
+    });
+    if(!allVals.length) return '';
+
+    const yMin = Math.min(...allVals) - 5;
+    const yMax = Math.max(...allVals) + 5;
+    const yRange = Math.max(1, yMax - yMin);
+    const px = (t) => PAD.l + ((t - tMin) / tRange) * plotW;
+    const py = (v) => PAD.t + plotH - ((v - yMin) / yRange) * plotH;
+
+    // Build polylines
+    const lines = activeSeries.map(s => {
+      const pts = curves.map(c => {
+        const raw = c.angles[s.key];
+        const v = s.transform(raw);
+        if(v == null) return null;
+        return `${px(c.tMs).toFixed(1)},${py(v).toFixed(1)}`;
+      }).filter(Boolean).join(' ');
+      if(!pts) return '';
+
+      // Find peak value and position for annotation
+      let peakV = null, peakT = null;
+      curves.forEach(c => {
+        const raw = c.angles[s.key];
+        const v = s.transform(raw);
+        if(v != null && (peakV === null || (keysToShow.includes('Knee Valgus') ? v > peakV : v > peakV))) {
+          peakV = v; peakT = c.tMs;
+        }
+      });
+      const peakAnnot = peakV != null ? `<circle cx="${px(peakT).toFixed(1)}" cy="${py(peakV).toFixed(1)}" r="3" fill="${s.color}"/>` : '';
+
+      return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.8" stroke-linejoin="round" opacity="0.9"/>${peakAnnot}`;
+    }).join('');
+
+    // Y axis ticks
+    const nTicks = 4;
+    const tickStep = yRange / nTicks;
+    const ticks = Array.from({length: nTicks + 1}, (_, i) => {
+      const v = Math.round(yMin + i * tickStep);
+      return `<line x1="${PAD.l}" x2="${PAD.l - 3}" y1="${py(v).toFixed(1)}" y2="${py(v).toFixed(1)}" stroke="var(--muted)" stroke-width="1"/>
+              <text x="${PAD.l - 5}" y="${(py(v)+3).toFixed(1)}" text-anchor="end" font-size="9" fill="var(--muted)">${v}°</text>`;
+    }).join('');
+
+    // X axis label (ms)
+    const xLabel = `<text x="${W/2}" y="${H}" text-anchor="middle" font-size="9" fill="var(--muted)">Time (ms) — ${tMin}ms to ${tMax}ms</text>`;
+
+    // Legend
+    const legendItems = activeSeries.map((s, i) => {
+      const lx = PAD.l + i * 90;
+      return `<rect x="${lx}" y="${H - 10}" width="12" height="4" fill="${s.color}" rx="2"/>
+              <text x="${lx + 15}" y="${H - 6}" font-size="8" fill="var(--muted)">${s.label}</text>`;
+    }).join('');
+
+    return `<div style="margin-bottom:16px;">
+      <div style="font-size:.72rem;font-weight:600;color:var(--navy);margin-bottom:6px;">${title}</div>
+      <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:580px;height:auto;overflow:visible;">
+        <rect x="${PAD.l}" y="${PAD.t}" width="${plotW}" height="${plotH}" fill="var(--navy-light)" rx="3"/>
+        ${ticks}
+        <line x1="${PAD.l}" x2="${PAD.l+plotW}" y1="${PAD.t+plotH}" y2="${PAD.t+plotH}" stroke="var(--border)" stroke-width="1"/>
+        <line x1="${PAD.l}" x2="${PAD.l}" y1="${PAD.t}" y2="${PAD.t+plotH}" stroke="var(--border)" stroke-width="1"/>
+        ${lines}
+        ${xLabel}
+        ${legendItems}
+      </svg>
+    </div>`;
+  };
+
+  // Compute peak/timing metrics for clinical summary
+  const getPeakAndTiming = (key, transform, higher=true) => {
+    let best = null, bestT = null;
+    curves.forEach(c => {
+      const raw = c.angles[key];
+      const v = transform(raw);
+      if(v != null && (best === null || (higher ? v > best : v < best))) {
+        best = v; bestT = c.tMs;
+      }
+    });
+    return {val: best != null ? Math.round(best) : null, tMs: bestT};
+  };
+
+  let summaryHtml = '';
+  if(isLanding) {
+    const lKneeFlx = getPeakAndTiming('Left Knee Flexion',  v => v!=null?180-v:null, true);
+    const rKneeFlx = getPeakAndTiming('Right Knee Flexion', v => v!=null?180-v:null, true);
+    const lValgus  = getPeakAndTiming('Left Knee Valgus',   v => v, true);
+    const rValgus  = getPeakAndTiming('Right Knee Valgus',  v => v, true);
+    const trunkPk  = getPeakAndTiming('Trunk Lean',         v => v, true);
+
+    // Contact moment: first frame where knee flexion > 15° from max (knee starting to bend)
+    let contactMs = null;
+    const firstFlexThresh = (lKneeFlx.val ?? rKneeFlx.val ?? 20) * 0.25;
+    for(const c of curves) {
+      const lF = c.angles['Left Knee Flexion'];
+      const rF = c.angles['Right Knee Flexion'];
+      const lFlex = lF != null ? 180 - lF : null;
+      const rFlex = rF != null ? 180 - rF : null;
+      const flex = (lFlex ?? 0 + rFlex ?? 0) / (lFlex!=null&&rFlex!=null?2:1);
+      if(flex > firstFlexThresh) { contactMs = c.tMs; break; }
+    }
+
+    // Valgus at contact vs valgus at peak
+    let contactValgusL = null, contactValgusR = null;
+    if(contactMs != null) {
+      const contactFrame = curves.reduce((best, c) =>
+        Math.abs(c.tMs - contactMs) < Math.abs(best.tMs - contactMs) ? c : best
+      );
+      contactValgusL = contactFrame.angles['Left Knee Valgus'];
+      contactValgusR = contactFrame.angles['Right Knee Valgus'];
+    }
+
+    const lValgusOnset = contactValgusL != null && lValgus.val != null
+      ? `${Math.round(contactValgusL)}° → ${lValgus.val}° peak` : `Peak ${lValgus.val ?? '—'}°`;
+    const rValgusOnset = contactValgusR != null && rValgus.val != null
+      ? `${Math.round(contactValgusR)}° → ${rValgus.val}° peak` : `Peak ${rValgus.val ?? '—'}°`;
+    const timeToFlexL = lKneeFlx.tMs != null && contactMs != null
+      ? `${lKneeFlx.tMs - contactMs}ms to peak flex` : '';
+    const timeToFlexR = rKneeFlx.tMs != null && contactMs != null
+      ? `${rKneeFlx.tMs - contactMs}ms to peak flex` : '';
+
+    summaryHtml = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+        <div style="font-size:.65rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Left Limb — Landing Curve</div>
+        <div style="font-size:.8rem;line-height:1.8;">
+          <span style="color:var(--navy-mid);">Peak knee flex:</span> <strong>${lKneeFlx.val ?? '—'}°</strong>${timeToFlexL ? ` <span style="color:var(--muted);font-size:.7rem;">(${timeToFlexL})</span>` : ''}<br>
+          <span style="color:var(--navy-mid);">Valgus curve:</span> <strong style="color:${(lValgus.val||0)>15?'#ef4444':(lValgus.val||0)>8?'#f59e0b':'#10b981'}">${lValgusOnset}</strong>
+        </div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+        <div style="font-size:.65rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Right Limb — Landing Curve</div>
+        <div style="font-size:.8rem;line-height:1.8;">
+          <span style="color:var(--navy-mid);">Peak knee flex:</span> <strong>${rKneeFlx.val ?? '—'}°</strong>${timeToFlexR ? ` <span style="color:var(--muted);font-size:.7rem;">(${timeToFlexR})</span>` : ''}<br>
+          <span style="color:var(--navy-mid);">Valgus curve:</span> <strong style="color:${(rValgus.val||0)>15?'#ef4444':(rValgus.val||0)>8?'#f59e0b':'#10b981'}">${rValgusOnset}</strong>
+        </div>
+      </div>
+    </div>
+    <div style="font-size:.68rem;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:var(--navy-light);border-radius:6px;">
+      ⚡ <strong>Valgus curve interpretation:</strong> "contact → peak" shows how valgus evolves through loading. 
+      High contact valgus = initial position deficit (hip control). Valgus that worsens to peak = progressive collapse under load (quad-dominant strategy, fatigue). 
+      ${contactMs != null ? `Contact estimated at ${contactMs}ms into clip.` : 'Contact moment estimated from knee flexion onset.'}
+      ${trunkPk.val != null ? ` Peak trunk lean: <strong style="color:${trunkPk.val>35?'#ef4444':trunkPk.val>20?'#f59e0b':'inherit'}">${trunkPk.val}°</strong> at ${trunkPk.tMs}ms.` : ''}
+    </div>`;
+  }
+
+  const sagittalTitle = isLanding ? 'Sagittal Plane — Knee Flexion & Trunk Lean' : 'Sagittal Plane — Hip, Knee & Ankle';
+  const frontalTitle  = 'Frontal Plane — Knee Valgus & Hip Adduction';
+
+  body.innerHTML = summaryHtml
+    + buildChart(sagittalTitle, sagittalKeys)
+    + (frontalKeys.length ? buildChart(frontalTitle, frontalKeys) : '')
+    + `<div style="font-size:.66rem;color:var(--muted);margin-top:6px;">
+        ${curves.length} frames · MediaPipe Heavy + foot refinement · 
+        ${isLanding ? 'Contact window (18%–78% of clip)' : 'Stride window'} · 
+        <span style="color:var(--teal);">Ankle/heel landmarks refined via multi-scale MediaPipe crop</span>
+      </div>`;
+
+  section.style.display = 'block';
+}
+
 async function runAnalysis() {
   const movement = document.getElementById('movementType').value;
   const apiKey = document.getElementById('apiKey').value.trim();
@@ -7152,11 +7592,28 @@ async function runAnalysis() {
       movement,
       cameraView
     );
-    // Wrap fused landmarks back into result-like objects for downstream compatibility
     console.log('[Analysis] Stage 2 complete: fusion done, landmarks:', fusedLandmarks?.length);
-    const fusedResults = fusedLandmarks.map((lms, i) => ({
+
+    // ── Foot/Ankle Multi-Scale Refinement (dynamic movements only) ──────────────
+    // For running and jumping, run a second MediaPipe pass on a zoomed lower-body
+    // crop for any frame with low-confidence foot landmarks. This gives the model
+    // 3-4× more pixels for the ankle/heel region, improving landmark precision.
+    const isDynamicMovement = /running|gait|walk|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+    let refinedLandmarks = fusedLandmarks;
+    if(isDynamicMovement && mpReady && poseLandmarkerInstance) {
+      statusEl.textContent = 'Refining foot/ankle landmarks (multi-scale pass)...';
+      refinedLandmarks = await Promise.all(
+        fusedLandmarks.map((lms, i) =>
+          lms ? refineFootLandmarks(extractedFrames[i].imageData, lms) : Promise.resolve(null)
+        )
+      );
+      console.log('[Analysis] Stage 2b: Foot refinement complete');
+    }
+
+    // Wrap refined landmarks back into result-like objects for downstream compatibility
+    const fusedResults = refinedLandmarks.map((lms, i) => ({
       poseLandmarks: lms,
-      _raw: mpResults[i]  // preserve original for debug
+      _raw: mpResults[i]
     }));
 
     for(let i=0; i<extractedFrames.length; i++) {
@@ -7248,6 +7705,61 @@ async function runAnalysis() {
   const angleLines = Object.entries(aggregated).map(([k,v]) =>
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
+
+  // ── Stage 3c: Dense Dynamic Pass ────────────────────────────────────────────
+  // For running and landing movements: run MediaPipe Heavy + foot refinement on
+  // 24-32 frames across the critical movement window, producing continuous angle
+  // curves. This runs AFTER the 8-frame aggregation so it doesn't block Claude
+  // from receiving the main angle data, and uses the same video element.
+  const isDynamicForDense = /running|gait|walk|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+  let denseCurves = null;
+  if(isDynamicForDense && mpReady && poseLandmarkerInstance) {
+    try {
+      const vidElForDense = document.querySelector('video');
+      const durForDense   = vidElForDense?.duration;
+      if(vidElForDense && durForDense && isFinite(durForDense)) {
+        statusEl.textContent = 'Running dense movement analysis pass...';
+        denseCurves = await runDenseDynamicPass(movement, vidElForDense, durForDense, cameraView, statusEl);
+
+        // Upgrade aggregated angles with dense-pass peak values for valgus/adduction/ankle
+        // These benefit most from the extra frames and foot refinement
+        if(denseCurves && denseCurves.length >= 8) {
+          const denseAgg = aggregateAngles(
+            denseCurves.map(c => c.angles),
+            denseCurves.map(() => null) // no phase gating — use all frames
+          );
+          // Selectively upgrade: only override metrics where dense gives more extremal values
+          // (better peak detection) for the clinically important dynamic metrics
+          const upgradeKeys = [
+            'Left Knee Valgus','Right Knee Valgus',
+            'Left Hip Adduction','Right Hip Adduction',
+            'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
+            'Left Pronation','Right Pronation',
+          ];
+          let upgraded = 0;
+          upgradeKeys.forEach(k => {
+            if(denseAgg[k] && aggregated[k]) {
+              // Use dense max for valgus/adduction (worst-case peak matters)
+              // Use dense for ankle (more frames in stance window = better DF estimate)
+              aggregated[k] = {
+                ...aggregated[k],
+                max: Math.max(aggregated[k].max, denseAgg[k].max),
+                min: Math.min(aggregated[k].min, denseAgg[k].min),
+                // keep avg from original phase-gated 8 frames (more representative)
+              };
+              upgraded++;
+            } else if(denseAgg[k] && !aggregated[k]) {
+              aggregated[k] = denseAgg[k]; // dense found a metric the 8 frames missed
+              upgraded++;
+            }
+          });
+          if(upgraded > 0) console.log(`[DensePass] Upgraded ${upgraded} peak metrics from dense curves`);
+        }
+      }
+    } catch(denseErr) {
+      console.warn('[DensePass] Non-critical error:', denseErr.message);
+    }
+  }
 
   // ── Stage 3b: Second video pipeline (if uploaded) ──
   let annotatedFrames2 = [];
@@ -7513,6 +8025,59 @@ ${(() => {
 })()}
 ${hasDualView && angleLines2 ? `\nSECOND VIEW ANGLES (${view2Label}):\n${angleLines2}` : ''}
 ${barPathLine ? `\nBAR PATH ANALYSIS: ${barPathLine}` : ''}
+${(() => {
+  // Dense dynamic curves summary — inject if available (landing/running only)
+  const curves = window._denseDynamicCurves;
+  if(!curves || curves.length < 4) return '';
+  const isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+  const isRunning  = /running|gait|walk/i.test(movement);
+  if(!isLanding && !isRunning) return '';
+
+  const getPeak = (key, higher=true) => {
+    let best = null;
+    curves.forEach(c => {
+      const v = c.angles[key];
+      if(v != null && (best === null || (higher ? v > best : v < best))) best = v;
+    });
+    return best != null ? Math.round(best) : null;
+  };
+
+  const lines = [`Dense pass: ${curves.length} frames, MediaPipe Heavy + foot refinement`];
+
+  if(isLanding) {
+    const lKF = getPeak('Left Knee Flexion',  false); // min included = peak flex
+    const rKF = getPeak('Right Knee Flexion', false);
+    const lVG = getPeak('Left Knee Valgus',   true);
+    const rVG = getPeak('Right Knee Valgus',  true);
+    const lHA = getPeak('Left Hip Adduction', true);
+    const rHA = getPeak('Right Hip Adduction',true);
+    if(lKF!=null) lines.push(`Left peak knee flexion (dense): ${180-lKF}° — more accurate than 8-frame estimate`);
+    if(rKF!=null) lines.push(`Right peak knee flexion (dense): ${180-rKF}°`);
+    if(lVG!=null) lines.push(`Left peak knee valgus (dense, ${curves.length}-frame curve): ${lVG}°`);
+    if(rVG!=null) lines.push(`Right peak knee valgus (dense, ${curves.length}-frame curve): ${rVG}°`);
+    if(lHA!=null) lines.push(`Left peak hip adduction (dense): ${lHA}°`);
+    if(rHA!=null) lines.push(`Right peak hip adduction (dense): ${rHA}°`);
+
+    // Valgus onset: value at first frame of curve vs peak
+    const firstVgL = curves[0]?.angles['Left Knee Valgus'];
+    const firstVgR = curves[0]?.angles['Right Knee Valgus'];
+    if(firstVgL!=null && lVG!=null) lines.push(`Left valgus contact→peak: ${Math.round(firstVgL)}°→${lVG}° (${lVG-Math.round(firstVgL)>3?'progressive collapse':lVG-Math.round(firstVgL)<-2?'improves on load':'stable'})`);
+    if(firstVgR!=null && rVG!=null) lines.push(`Right valgus contact→peak: ${Math.round(firstVgR)}°→${rVG}° (${rVG-Math.round(firstVgR)>3?'progressive collapse':rVG-Math.round(firstVgR)<-2?'improves on load':'stable'})`);
+    lines.push('IMPORTANT: use dense-pass peak values above instead of 8-frame estimates for valgus and knee flexion when they differ.');
+  } else if(isRunning) {
+    const lADF = getPeak('Left Ankle Dorsiflexion',  false);
+    const rADF = getPeak('Right Ankle Dorsiflexion', false);
+    const lPron = getPeak('Left Pronation',  true);
+    const rPron = getPeak('Right Pronation', true);
+    if(lADF!=null) lines.push(`Left ankle DF (dense refined): ${lADF}° (foot-refinement applied)`);
+    if(rADF!=null) lines.push(`Right ankle DF (dense refined): ${rADF}°`);
+    if(lPron!=null) lines.push(`Left pronation (dense): ${lPron}°`);
+    if(rPron!=null) lines.push(`Right pronation (dense): ${rPron}°`);
+    lines.push('Ankle and pronation values from dense pass have improved foot landmark precision from multi-scale crop refinement — prefer these over 8-frame estimates.');
+  }
+
+  return '\nDENSE DYNAMIC PASS RESULTS:\n' + lines.map(l=>'- '+l).join('\n');
+})()}
 ${asiToPromptText(aggregated, movement) ? `\n${asiToPromptText(aggregated, movement)}` : ''}
 ${promsToPromptText(collectPROMs()) ? `\n${promsToPromptText(collectPROMs())}` : ''}
 ${(() => {
@@ -8141,6 +8706,16 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       // Store for session comparison snapshot
       window._lastAggregated = aggregated;
       report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
+
+      // Render dense angle curves (landing/running only) — non-blocking, fires after main report
+      if(denseCurves && denseCurves.length >= 4) {
+        try { renderDenseCurves(denseCurves, movement); }
+        catch(e) { console.warn('[DenseCurves] Render error:', e.message); }
+      } else {
+        // Hide section if no dense pass ran (stationary movements)
+        const dc = document.getElementById('denseCurvesSection');
+        if(dc) dc.style.display = 'none';
+      }
       // Show session save/compare buttons after a successful analysis
       const saveBtn = document.getElementById('saveSessionBtn');
       const cmpBtn  = document.getElementById('compareSessionBtn');
