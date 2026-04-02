@@ -335,6 +335,11 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
   .report-header{flex-direction:column}
   .phase-group-views{grid-template-columns:1fr 1fr}
 }
+
+/* ── Tape marker config chips ── */
+.tape-loc-chip{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border:1.5px solid var(--border);border-radius:5px;cursor:pointer;font-size:.76rem;color:var(--muted);user-select:none;background:var(--surface);transition:all .15s}
+.tape-loc-chip:has(input:checked){border-color:var(--teal);color:var(--teal);background:var(--teal-light);font-weight:500}
+.tape-loc-chip input{display:none}
 </style>
 </head>
 <body>
@@ -382,7 +387,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </div>
           <div class="form-group full">
             <label class="form-label">Movement Being Assessed <span class="req">*</span></label>
-            <select id="movementType" onchange="(function(v){var c=document.getElementById('runningInputsCard');if(c)c.style.display=/running|gait|walk/i.test(v)?'block':'none';var j=document.getElementById('jumpInputsCard');if(j)j.style.display=/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';})(this.value)">
+            <select id="movementType" onchange="(function(v){var c=document.getElementById('runningInputsCard');if(c)c.style.display=/running|gait|walk/i.test(v)?'block':'none';var j=document.getElementById('jumpInputsCard');if(j)j.style.display=/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';var t=document.getElementById('tapeMarkersCard');if(t)t.style.display=/running|gait|walk|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';})(this.value)">
               <option value="">Select movement type...</option>
               <optgroup label="Lower Extremity">
                 <option>Gait / Walking</option>
@@ -571,6 +576,89 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           Samsung: Pro Video → 120fps &nbsp;·&nbsp;
           Older phones: use a slow-mo app (Slow Motion Video FX, or SloPro).
           Export and upload the original file — do not screen-record.
+        </div>
+      </div>
+
+      <!-- Tape Marker Configuration — shown for running and jump/landing movements -->
+      <div class="card no-mb" id="tapeMarkersCard" style="display:none;margin-top:12px;">
+        <div class="card-header" style="margin-bottom:0;">
+          <div class="card-header-icon">🎯</div>
+          <div><h2>Tape Marker Configuration</h2><p>Color tape on bony landmarks overrides MediaPipe estimates with pixel-precise positions</p></div>
+          <div style="margin-left:auto;flex-shrink:0;">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.82rem;font-weight:600;color:var(--navy);">
+              <input type="checkbox" id="tapeEnabled"
+                onchange="document.getElementById('tapeConfigBody').style.display=this.checked?'block':'none'"
+                style="width:16px;height:16px;accent-color:var(--teal);">
+              Enable tape refinement
+            </label>
+          </div>
+        </div>
+        <div id="tapeConfigBody" style="display:none;margin-top:16px;">
+          <!-- Color A -->
+          <div style="margin-bottom:12px;padding:14px;background:var(--bg);border-radius:8px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+              <div style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;width:54px;flex-shrink:0;">Color A</div>
+              <select id="tapeColorA" style="width:148px;">
+                <option value="orange" selected>🟠 Neon orange</option>
+                <option value="green">🟢 Neon green</option>
+                <option value="yellow">🟡 Yellow</option>
+                <option value="blue">🔵 Blue</option>
+                <option value="pink">🩷 Pink / magenta</option>
+                <option value="red">🔴 Red</option>
+                <option value="white">⚪ White</option>
+              </select>
+              <span style="font-size:.78rem;color:var(--muted);flex-shrink:0;">assigned to</span>
+              <select id="tapeLegA" style="width:160px;">
+                <option value="left" selected>Left leg</option>
+                <option value="right">Right leg</option>
+                <option value="left_knee">Left knee only</option>
+                <option value="right_knee">Right knee only</option>
+                <option value="both_knees">Both knees</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;padding-left:64px;">
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocA" value="ankle" checked> Ankle / malleolus</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocA" value="heel" checked> Heel</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocA" value="toe" checked> Toe / forefoot</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocA" value="knee"> Knee</label>
+            </div>
+          </div>
+          <!-- Color B -->
+          <div style="margin-bottom:14px;padding:14px;background:var(--bg);border-radius:8px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+              <div style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;width:54px;flex-shrink:0;">Color B</div>
+              <select id="tapeColorB" style="width:148px;">
+                <option value="orange">🟠 Neon orange</option>
+                <option value="green" selected>🟢 Neon green</option>
+                <option value="yellow">🟡 Yellow</option>
+                <option value="blue">🔵 Blue</option>
+                <option value="pink">🩷 Pink / magenta</option>
+                <option value="red">🔴 Red</option>
+                <option value="white">⚪ White</option>
+              </select>
+              <span style="font-size:.78rem;color:var(--muted);flex-shrink:0;">assigned to</span>
+              <select id="tapeLegB" style="width:160px;">
+                <option value="left">Left leg</option>
+                <option value="right" selected>Right leg</option>
+                <option value="left_knee">Left knee only</option>
+                <option value="right_knee">Right knee only</option>
+                <option value="both_knees">Both knees</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;padding-left:64px;">
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocB" value="ankle" checked> Ankle / malleolus</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocB" value="heel" checked> Heel</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocB" value="toe" checked> Toe / forefoot</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLocB" value="knee"> Knee</label>
+            </div>
+          </div>
+          <div style="padding:9px 13px;background:var(--teal-light);border-radius:6px;font-size:.73rem;color:var(--teal);line-height:1.65;">
+            💡 <strong>Placement guide —</strong>
+            <strong>Lateral view:</strong> near-leg = lateral malleolus, heel, 5th metatarsal head; far-leg = medial malleolus, heel, 1st metatarsal head ·
+            <strong>Posterior view:</strong> Achilles insertion, calcaneus centre, plantar heel ·
+            <strong>Jump:</strong> lateral femoral condyle (knee), lateral malleolus, 5th metatarsal head ·
+            Strips work best; ~1 cm wide × 2–3 cm long oriented perpendicular to the limb.
+          </div>
         </div>
       </div>
 
@@ -1313,7 +1401,7 @@ async function handleFile(file) {
     vid.src = url; vid.controls = true; vid.muted = true; vid.playsInline = true;
     vid.style.cssText = 'width:100%;max-height:280px;object-fit:contain;display:block;';
     wrap.appendChild(vid); wrap.appendChild(badge);
-    window._primaryVidEl = vid; // store ref for dense pass (avoids fragile querySelector)
+    window._primaryVidEl = vid;
     startFrameExtraction(file, vid);
   }
 }
@@ -7229,6 +7317,234 @@ async function refineFootLandmarks(imageBase64, coarseLandmarks) {
   }
 }
 
+
+// ── Tape Marker Config Reader ─────────────────────────────────────────────────
+// Reads the tape marker UI card state into a config object.
+// Returns null if tape refinement is disabled or card is hidden.
+//
+function readTapeConfig() {
+  const card = document.getElementById('tapeMarkersCard');
+  if(!card || card.style.display === 'none') return null;
+  if(!document.getElementById('tapeEnabled')?.checked) return null;
+
+  // Landmark index lookup by leg assignment + location name
+  const LMAP = {
+    left:       {ankle:27, heel:29, toe:31, knee:25},
+    right:      {ankle:28, heel:30, toe:32, knee:26},
+    left_knee:  {knee:25},
+    right_knee: {knee:26},
+    both_knees: {knee:[25,26]},
+  };
+
+  const readColor = (suffix) => {
+    const color = document.getElementById(`tapeColor${suffix}`)?.value;
+    const leg   = document.getElementById(`tapeLeg${suffix}`)?.value;
+    const locs  = [...document.querySelectorAll(`[name="tapeLoc${suffix}"]:checked`)].map(i=>i.value);
+    if(!color || !leg || !locs.length) return null;
+    const map = LMAP[leg] || LMAP.left;
+    const indices = [];
+    locs.forEach(loc => {
+      const entry = map[loc];
+      if(entry === undefined) return;
+      if(Array.isArray(entry)) entry.forEach(idx => indices.push({loc, idx}));
+      else indices.push({loc, idx: entry});
+    });
+    if(!indices.length) return null;
+    return {color, leg, locs, indices};
+  };
+
+  const colorA = readColor('A');
+  const colorB = readColor('B');
+  if(!colorA && !colorB) return null;
+  return {colorA, colorB};
+}
+
+// ── HSV Color Blob Detector ───────────────────────────────────────────────────
+// Finds connected regions of a target color in a JPEG frame.
+// Uses scanline connected-components (O(W×H), no recursion) — safe for video frames.
+// Strip-aware: accepts elongated blobs; minPixels=30 calibrated for ~4×8px tape strip
+// at typical 640px recording width.
+//
+// Returns: array of {x, y, pixelCount, widthPx, heightPx} sorted by pixelCount desc
+//          x/y are normalized 0-1 frame coordinates of blob centroid.
+//
+async function detectColorBlobs(imageBase64, colorName, minPixels = 30) {
+  // HSV match functions — neon tape has high saturation and value, making it
+  // robust even under variable gym/field lighting.
+  const HSV = {
+    orange: (h,s,v) => (h>=14&&h<=40)   && s>0.55 && v>0.38,
+    green:  (h,s,v) => (h>=78&&h<=138)  && s>0.48 && v>0.32,
+    yellow: (h,s,v) => (h>=42&&h<=68)   && s>0.55 && v>0.48,
+    blue:   (h,s,v) => (h>=195&&h<=252) && s>0.45 && v>0.18,
+    pink:   (h,s,v) => (h>=285&&h<=345) && s>0.38 && v>0.40,
+    red:    (h,s,v) => (h>=340||h<=12)  && s>0.58 && v>0.32,
+    white:  (h,s,v) => v>0.82 && s<0.18,
+  };
+  const matchFn = HSV[colorName];
+  if(!matchFn) return [];
+
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onerror = () => resolve([]);
+    img.onload = () => {
+      const W = img.naturalWidth, H = img.naturalHeight;
+      if(!W || !H) { resolve([]); return; }
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const pix = ctx.getImageData(0, 0, W, H).data;
+
+      // ── Binary mask: 1 = matches target color ──
+      const mask = new Uint8Array(W * H);
+      for(let y = 0; y < H; y++) {
+        for(let x = 0; x < W; x++) {
+          const i4 = (y * W + x) * 4;
+          const r = pix[i4]/255, g = pix[i4+1]/255, b = pix[i4+2]/255;
+          const mx = Math.max(r,g,b), mn = Math.min(r,g,b), d = mx - mn;
+          let h = 0, s = mx > 0 ? d/mx : 0, v = mx;
+          if(d > 0) {
+            if(mx===r)      h = 60*(((g-b)/d)%6);
+            else if(mx===g) h = 60*((b-r)/d+2);
+            else            h = 60*((r-g)/d+4);
+            if(h < 0) h += 360;
+          }
+          mask[y*W+x] = matchFn(h, s, v) ? 1 : 0;
+        }
+      }
+
+      // ── Scanline connected components (union-find) ──
+      const label  = new Int32Array(W * H);
+      const parent = [0]; // parent[i]=i means root; 0 = background sentinel
+      let nextLbl = 1;
+
+      const find = (a) => {
+        while(parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; }
+        return a;
+      };
+      const unite = (a, b) => {
+        a = find(a); b = find(b);
+        if(a !== b) parent[a] = b;
+      };
+
+      for(let y = 0; y < H; y++) {
+        for(let x = 0; x < W; x++) {
+          const idx = y*W+x;
+          if(!mask[idx]) continue;
+          const above = y>0 ? label[(y-1)*W+x] : 0;
+          const left  = x>0 ? label[y*W+x-1]   : 0;
+          if(!above && !left) {
+            label[idx] = nextLbl;
+            parent.push(nextLbl); // parent[nextLbl] = nextLbl (self = root)
+            nextLbl++;
+          } else if(above && !left) {
+            label[idx] = above;
+          } else if(!above && left) {
+            label[idx] = left;
+          } else {
+            label[idx] = left;
+            unite(above, left);
+          }
+        }
+      }
+
+      // ── Collect stats per root label ──
+      const stats = {};
+      for(let y = 0; y < H; y++) {
+        for(let x = 0; x < W; x++) {
+          const l = label[y*W+x];
+          if(!l) continue;
+          const root = find(l);
+          if(!stats[root]) stats[root] = {sx:0, sy:0, n:0, x0:W, x1:0, y0:H, y1:0};
+          const s = stats[root];
+          s.sx+=x; s.sy+=y; s.n++;
+          if(x<s.x0)s.x0=x; if(x>s.x1)s.x1=x;
+          if(y<s.y0)s.y0=y; if(y>s.y1)s.y1=y;
+        }
+      }
+
+      const blobs = Object.values(stats)
+        .filter(s => s.n >= minPixels)
+        .map(s => ({
+          x: s.sx/s.n/W,  // normalized centroid
+          y: s.sy/s.n/H,
+          pixelCount: s.n,
+          widthPx:  s.x1-s.x0+1,
+          heightPx: s.y1-s.y0+1,
+        }))
+        .sort((a,b) => b.pixelCount - a.pixelCount);
+
+      resolve(blobs);
+    };
+    img.src = 'data:image/jpeg;base64,' + imageBase64;
+  });
+}
+
+// ── Tape Landmark Refinement ──────────────────────────────────────────────────
+// For each configured tape color, detects blobs and assigns them to target
+// landmark indices using MediaPipe priors as disambiguation anchors.
+// Nearest-blob assignment with plausibility radius; most-confident MP landmarks
+// claim their nearest blob first to resolve 3-blob (ankle+heel+toe) ambiguity.
+// Called after refineFootLandmarks() in both 8-frame and dense passes.
+//
+async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
+  if(!tapeConfig || !landmarks) return landmarks;
+
+  const merged = landmarks.slice(); // shallow copy — we replace individual slots
+
+  const processColor = async (colorConf) => {
+    if(!colorConf?.indices?.length) return;
+
+    const blobs = await detectColorBlobs(imageBase64, colorConf.color);
+    if(!blobs.length) {
+      console.log(`[TapeRefine] 0 blobs found for color=${colorConf.color}`);
+      return;
+    }
+
+    // Sort targets by descending MediaPipe confidence so the most reliable
+    // prior claims its nearest blob first — resolves ankle/heel/toe ambiguity.
+    const targets = colorConf.indices
+      .map(({loc, idx}) => ({loc, idx, conf: merged[idx]?.visibility ?? 0}))
+      .sort((a,b) => b.conf - a.conf);
+
+    const used = new Set();
+    const RADIUS = 0.15; // 15% of frame height — generous but anatomically bounded
+
+    for(const tgt of targets) {
+      const prior = merged[tgt.idx];
+      if(!prior) continue;
+
+      let bestBlob = null, bestDist = Infinity, bestBi = -1;
+      blobs.forEach((blob, bi) => {
+        if(used.has(bi)) return;
+        const dx = blob.x - prior.x, dy = blob.y - prior.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if(dist < RADIUS && dist < bestDist) { bestDist = dist; bestBlob = blob; bestBi = bi; }
+      });
+
+      if(bestBlob) {
+        used.add(bestBi);
+        const origConf = prior.visibility ?? 0;
+        merged[tgt.idx] = {
+          ...prior,
+          x:          bestBlob.x,
+          y:          bestBlob.y,
+          visibility: Math.max(origConf, 0.88),
+          source:     `tape-${colorConf.color}(was-${origConf.toFixed(2)},d=${bestDist.toFixed(3)},px=${bestBlob.pixelCount})`,
+        };
+        console.log(`[TapeRefine] LM${tgt.idx}(${tgt.loc}) ← ${colorConf.color} blob @(${bestBlob.x.toFixed(3)},${bestBlob.y.toFixed(3)}) dist=${bestDist.toFixed(3)} px=${bestBlob.pixelCount}`);
+      } else {
+        console.log(`[TapeRefine] LM${tgt.idx}(${tgt.loc}): no ${colorConf.color} blob within radius — keeping MP estimate`);
+      }
+    }
+  };
+
+  if(tapeConfig.colorA) await processColor(tapeConfig.colorA);
+  if(tapeConfig.colorB) await processColor(tapeConfig.colorB);
+
+  return merged;
+}
+
 // ── Dense Dynamic Analysis Pass ──────────────────────────────────────────────────
 // Runs MediaPipe Heavy on 24-32 frames within the clinically critical movement window,
 // then applies foot landmark refinement to each frame.
@@ -7244,7 +7560,7 @@ async function refineFootLandmarks(imageBase64, coarseLandmarks) {
 //
 // Returns: array of {t, angles, landmarks} objects + stores in window._denseDynamicCurves
 //
-async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, statusEl) {
+async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, statusEl, tapeConfig=null) {
   if(!mpReady || !poseLandmarkerInstance) return null;
   if(!vidEl || !dur || !isFinite(dur) || dur <= 0) return null;
 
@@ -7296,12 +7612,13 @@ async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, status
   // Run MediaPipe on all dense frames
   const mpResults = await runMediaPipeOnFrames(denseFrames);
 
-  // Apply foot landmark refinement to each frame
+  // Apply foot landmark refinement + tape marker refinement to each frame
   const refinedLandmarks = [];
   for(let i = 0; i < denseFrames.length; i++) {
     const raw = mpResults[i];
     if(!raw) { refinedLandmarks.push(null); continue; }
-    const refined = await refineFootLandmarks(denseFrames[i].imageData, raw);
+    let refined = await refineFootLandmarks(denseFrames[i].imageData, raw);
+    if(tapeConfig) refined = await applyTapeRefinement(denseFrames[i].imageData, refined, tapeConfig);
     refinedLandmarks.push(refined);
   }
 
@@ -7611,6 +7928,18 @@ async function runAnalysis() {
         )
       );
       console.log('[Analysis] Stage 2b: Foot refinement complete');
+      // ── Tape marker refinement (Stage 2c) ──
+      const tapeConf2c = readTapeConfig();
+      if(tapeConf2c) {
+        statusEl.textContent = 'Applying tape marker refinement...';
+        refinedLandmarks = await Promise.all(
+          refinedLandmarks.map((lms, i) =>
+            lms ? applyTapeRefinement(extractedFrames[i].imageData, lms, tapeConf2c)
+                : Promise.resolve(null)
+          )
+        );
+        console.log('[Analysis] Stage 2c: Tape marker refinement complete');
+      }
     }
 
     // Wrap refined landmarks back into result-like objects for downstream compatibility
@@ -7722,7 +8051,7 @@ async function runAnalysis() {
       const durForDense   = vidElForDense?.duration;
       if(vidElForDense && durForDense && isFinite(durForDense)) {
         statusEl.textContent = 'Running dense movement analysis pass...';
-        denseCurves = await runDenseDynamicPass(movement, vidElForDense, durForDense, cameraView, statusEl);
+        denseCurves = await runDenseDynamicPass(movement, vidElForDense, durForDense, cameraView, statusEl, readTapeConfig());
 
         // Upgrade aggregated angles with dense-pass peak values for valgus/adduction/ankle
         // These benefit most from the extra frames and foot refinement
@@ -9185,8 +9514,6 @@ function clearSavedSessions() {
 
 // ── PDF Export ──
 async function exportPDF() {
-  // Guard: window.jspdf may be undefined if CDN failed to load at page start.
-  // Attempt a dynamic on-demand load before giving up.
   if(!window.jspdf) {
     try {
       await new Promise((res, rej) => {
