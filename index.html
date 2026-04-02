@@ -7364,80 +7364,143 @@ async function runTapeDetectionTest() {
 
   btn.disabled = true;
   btn.textContent = '⏳ Running...';
-  status.textContent = '';
+  status.textContent = 'Running MediaPipe for ROI…';
 
   try {
-    // Use the first extracted frame as the test image
-    const imgB64 = extractedFrames[Math.floor(extractedFrames.length / 3)]?.imageData
-                || extractedFrames[0].imageData;
+    // Use a frame from ~1/3 through the clip for the test
+    const testFrame = extractedFrames[Math.floor(extractedFrames.length / 3)]
+                   || extractedFrames[0];
+    const imgB64 = testFrame.imageData;
 
-    // Load image to get dimensions
+    // ── Step 1: Quick MediaPipe inference to get body landmarks for ROI ──────
+    let testLandmarks = null;
+    if(mpReady && poseLandmarkerInstance) {
+      try {
+        const mpRes = await runMediaPipeOnFrames([{imageData: imgB64}]);
+        testLandmarks = mpRes[0] || null;
+      } catch(e) { /* non-fatal — fall back to full-frame */ }
+    }
+    const hasLandmarks = testLandmarks && testLandmarks.length > 0;
+
+    // ── Step 2: Load image and set up canvas ─────────────────────────────────
     const img = await new Promise((res, rej) => {
       const im = new Image();
       im.onload = () => res(im);
       im.onerror = () => rej(new Error('load'));
       im.src = 'data:image/jpeg;base64,' + imgB64;
     });
-
     cv.width  = img.naturalWidth;
     cv.height = img.naturalHeight;
     const ctx = cv.getContext('2d');
     ctx.drawImage(img, 0, 0);
-
     const W = img.naturalWidth, H = img.naturalHeight;
-    let totalFound = 0;
-    const colorLabels = [];
 
-    // Run detection for each configured color and draw results
-    const colors = [tc.colorA, tc.colorB].filter(Boolean);
     const DRAW_COLORS = {
       orange:'#ff8c00', green:'#00e676', yellow:'#ffee00',
-      blue:'#00b0ff', pink:'#ff4081', red:'#ff1744', white:'#ffffff'
+      blue:'#00b0ff',   pink:'#ff4081', red:'#ff1744', white:'#ffffff'
     };
 
+    status.textContent = 'Detecting blobs…';
+
+    let totalIn = 0, totalOut = 0;
+    const colorLabels = [];
+    const colors = [tc.colorA, tc.colorB].filter(Boolean);
+
+    // ── Step 3: Per-color detection — full-frame then ROI-filtered ───────────
     for(const conf of colors) {
-      const roiTest = computeTapeROI(null, conf); // null landmarks → full-frame ROI for preview
-      const blobs = await detectColorBlobs(imgB64, conf.color, 5, 300, roiTest); // low threshold for preview
-      colorLabels.push(`${conf.color}: ${blobs.length} blob${blobs.length!==1?'s':''}`);
-      totalFound += blobs.length;
+      // Full-frame pass (minPx=5 for preview sensitivity)
+      const allBlobs  = await detectColorBlobs(imgB64, conf.color, 5, 350, null);
+
+      // Compute ROI from real landmarks (or null → full frame)
+      const roi       = computeTapeROI(hasLandmarks ? testLandmarks : null, conf);
+
+      // Partition into in-ROI and out-of-ROI
+      const inBlobs   = allBlobs.filter(b => {
+        if(!roi) return true;
+        return b.x >= (roi.xMin||0) && b.x <= (roi.xMax||1)
+            && b.y >= (roi.yMin||0) && b.y <= (roi.yMax||1)
+            && b.pixelCount <= 220;
+      });
+      const outBlobs  = allBlobs.filter(b => !inBlobs.includes(b));
+
+      totalIn  += inBlobs.length;
+      totalOut += outBlobs.length;
+      colorLabels.push(`${conf.color}: ${inBlobs.length} usable${outBlobs.length ? ` (+${outBlobs.length} outside ROI)` : ''}`);
 
       const dc = DRAW_COLORS[conf.color] || '#fff';
-      blobs.forEach((blob, bi) => {
+
+      // Draw EXCLUDED blobs as faint crossed-out rings
+      outBlobs.forEach(blob => {
+        const bx = blob.x * W, by = blob.y * H;
+        const r  = Math.max(7, Math.sqrt(blob.pixelCount) * 0.7);
+        ctx.globalAlpha = 0.35;
+        ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2);
+        ctx.strokeStyle = dc; ctx.lineWidth = 1.5; ctx.stroke();
+        // X strike-through
+        ctx.beginPath();
+        ctx.moveTo(bx - r*0.7, by - r*0.7); ctx.lineTo(bx + r*0.7, by + r*0.7);
+        ctx.moveTo(bx + r*0.7, by - r*0.7); ctx.lineTo(bx - r*0.7, by + r*0.7);
+        ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.globalAlpha = 1.0;
+      });
+
+      // Draw IN-ROI blobs as solid rings with pixel count
+      inBlobs.forEach(blob => {
         const bx = blob.x * W, by = blob.y * H;
         const r  = Math.max(8, Math.sqrt(blob.pixelCount) * 0.8);
-        // Outer ring
         ctx.beginPath(); ctx.arc(bx, by, r + 3, 0, Math.PI*2);
         ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 3; ctx.stroke();
-        // Color ring
         ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2);
         ctx.strokeStyle = dc; ctx.lineWidth = 2.5; ctx.stroke();
-        // Centroid dot
         ctx.beginPath(); ctx.arc(bx, by, 3, 0, Math.PI*2);
         ctx.fillStyle = dc; ctx.fill();
-        // Pixel count label
         ctx.font = `bold ${Math.max(10, W/90)}px sans-serif`;
-        ctx.strokeStyle='rgba(0,0,0,0.9)'; ctx.lineWidth=2.5;
+        ctx.strokeStyle = 'rgba(0,0,0,0.9)'; ctx.lineWidth = 2.5;
         ctx.strokeText(`${blob.pixelCount}px`, bx + r + 4, by + 4);
         ctx.fillStyle = dc;
         ctx.fillText(`${blob.pixelCount}px`, bx + r + 4, by + 4);
       });
+
+      // Draw the ROI rectangle as a dashed blue border
+      if(roi) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(96,165,250,0.9)';
+        ctx.lineWidth   = 2;
+        ctx.setLineDash([8, 5]);
+        ctx.strokeRect(
+          roi.xMin * W, roi.yMin * H,
+          (roi.xMax - roi.xMin) * W,
+          (roi.yMax - roi.yMin) * H
+        );
+        ctx.setLineDash([]);
+        // Label the ROI box
+        ctx.font = `bold ${Math.max(9, W/95)}px sans-serif`;
+        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        ctx.fillRect(roi.xMin*W, roi.yMin*H - 16, 115, 15);
+        ctx.fillStyle = 'rgba(147,210,255,1)';
+        ctx.fillText('Search region (ROI)', roi.xMin*W + 3, roi.yMin*H - 4);
+        ctx.restore();
+      }
     }
 
-    // Summary overlay at top
-    ctx.fillStyle = 'rgba(0,0,0,0.65)';
-    ctx.fillRect(0, 0, W, Math.max(32, H/18));
+    // Summary bar
+    ctx.fillStyle = 'rgba(0,0,0,0.70)';
+    ctx.fillRect(0, 0, W, Math.max(34, H/17));
     ctx.fillStyle = '#fff';
-    ctx.font = `bold ${Math.max(11, W/70)}px sans-serif`;
-    ctx.fillText(`Tape blobs — ${colorLabels.join('  ·  ')}  (minPx=15)`, 8, Math.max(20, H/24));
+    ctx.font = `bold ${Math.max(11, W/68)}px sans-serif`;
+    const roiNote = hasLandmarks ? '' : '  ⚠ no landmarks — ROI unavailable';
+    ctx.fillText(`${colorLabels.join('  ·  ')}${roiNote}`, 8, Math.max(22, H/22));
 
     preview.style.display = 'block';
-    status.textContent = totalFound > 0
-      ? `✅ ${totalFound} blob${totalFound!==1?'s':''} detected — ${colorLabels.join(', ')}`
-      : '❌ No blobs detected — check color selection or tape visibility in video';
-    status.style.color = totalFound > 0 ? 'var(--teal)' : 'var(--red)';
+    const msg = totalIn > 0
+      ? `✅ ${totalIn} usable blob${totalIn!==1?'s':''} within ROI — ${colorLabels.join(', ')}${totalOut ? `  (${totalOut} excluded by ROI)` : ''}`
+      : `❌ No blobs within ROI — adjust colors or check tape visibility`;
+    status.textContent = msg;
+    status.style.color = totalIn > 0 ? 'var(--teal)' : 'var(--red)';
 
   } catch(e) {
     status.textContent = '⚠️ Test failed: ' + e.message;
+    console.error('[TapeTest]', e);
   } finally {
     btn.disabled = false;
     btn.textContent = '🔍 Test tape detection on uploaded frame';
@@ -8350,7 +8413,7 @@ async function runAnalysis() {
     console.log('[Analysis] Stage 3b: Running second video pipeline');
     // Small delay to let MediaPipe settle after primary run
     await new Promise(r => setTimeout(r, 200));
-    if(mpReady && poseInstance) {
+    if(mpReady && poseLandmarkerInstance) {  // use poseLandmarkerInstance (Heavy) not legacy poseInstance
       const mpResults2 = await runMediaPipeOnFrames(extractedFrames2);
       const fusedLandmarks2 = await fusedLandmarkPipeline(
         mpResults2,
@@ -8358,7 +8421,32 @@ async function runAnalysis() {
         movement,
         cameraView2
       );
-      const fusedResults2 = fusedLandmarks2.map((lms, i) => ({
+
+      // ── Stage 3b-i: Foot/ankle crop refinement (posterior view) ──────────────
+      let refinedLandmarks2 = fusedLandmarks2;
+      if(isDynamicMovement && mpReady && poseLandmarkerInstance) {
+        statusEl.textContent = 'Refining posterior foot landmarks...';
+        refinedLandmarks2 = await Promise.all(
+          fusedLandmarks2.map((lms, i) =>
+            lms ? refineFootLandmarks(extractedFrames2[i].imageData, lms)
+                : Promise.resolve(null)
+          )
+        );
+        // ── Stage 3b-ii: Tape marker refinement (posterior view) ─────────────
+        const tapeConf3b = readTapeConfig();
+        if(tapeConf3b) {
+          statusEl.textContent = 'Applying tape refinement to posterior view...';
+          refinedLandmarks2 = await Promise.all(
+            refinedLandmarks2.map((lms, i) =>
+              lms ? applyTapeRefinement(extractedFrames2[i].imageData, lms, tapeConf3b)
+                  : Promise.resolve(null)
+            )
+          );
+          console.log('[Analysis] Stage 3b-ii: Posterior tape refinement complete');
+        }
+      }
+
+      const fusedResults2 = refinedLandmarks2.map((lms, i) => ({
         poseLandmarks: lms,
         _raw: mpResults2[i]
       }));
