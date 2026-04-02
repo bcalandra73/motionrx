@@ -8656,25 +8656,26 @@ function renderDenseCurves(curves, movement) {
     </div>
     ${(() => {
       const fm = window._denseFilteredMetrics;
-      if(!fm?.lValgusRate && !fm?.lFlexRate) return '';
-      const vRate = (v) => v==null ? '—' : `${v}°/s`;
-      const vColor = (v, thresh1, thresh2) => v==null?'inherit':v>thresh2?'#ef4444':v>thresh1?'#f59e0b':'#10b981';
-      // Valgus rate: >150°/s = high risk (Hewett normative data)
-      const lVRc = vColor(fm.lValgusRate, 80, 150);
-      const rVRc = vColor(fm.rValgusRate, 80, 150);
-      // Flex rate: <200°/s = stiff lander, >350°/s = soft lander
-      const lFRc = fm.lFlexRate==null?'inherit':fm.lFlexRate<200?'#ef4444':fm.lFlexRate<350?'#f59e0b':'#10b981';
-      const rFRc = fm.rFlexRate==null?'inherit':fm.rFlexRate<200?'#ef4444':fm.rFlexRate<350?'#f59e0b':'#10b981';
-      return \`<div style="margin-bottom:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">
-        <div style="font-size:.66rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">⚡ Angular Velocity at Contact (Butterworth-filtered)</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.78rem;line-height:1.9;">
-          <div><span style="color:var(--muted);">Knee valgus rate L/R:</span> <strong style="color:\${lVRc}">\${vRate(fm.lValgusRate)}</strong> / <strong style="color:\${rVRc}">\${vRate(fm.rValgusRate)}</strong>
-            <span style="display:block;font-size:.68rem;color:var(--muted);">&lt;80°/s normal · &gt;150°/s high-risk (Hewett)</span></div>
-          <div><span style="color:var(--muted);">Knee flexion rate L/R:</span> <strong style="color:\${lFRc}">\${vRate(fm.lFlexRate)}</strong> / <strong style="color:\${rFRc}">\${vRate(fm.rFlexRate)}</strong>
-            <span style="display:block;font-size:.68rem;color:var(--muted);">&gt;350°/s soft · 200–350 moderate · &lt;200°/s stiff lander</span></div>
-        </div>
-      </div>\`;
-    })()}`;
+      if(!fm || (fm.lValgusRate == null && fm.lFlexRate == null)) return '';
+      const vRate = (v) => v == null ? '—' : v + '°/s';
+      const vCol = (v, t1, t2) => v == null ? 'inherit' : v > t2 ? '#ef4444' : v > t1 ? '#f59e0b' : '#10b981';
+      const lVRc = vCol(fm.lValgusRate, 80, 150);
+      const rVRc = vCol(fm.rValgusRate, 80, 150);
+      const lFRc = fm.lFlexRate == null ? 'inherit' : fm.lFlexRate < 200 ? '#ef4444' : fm.lFlexRate < 350 ? '#f59e0b' : '#10b981';
+      const rFRc = fm.rFlexRate == null ? 'inherit' : fm.rFlexRate < 200 ? '#ef4444' : fm.rFlexRate < 350 ? '#f59e0b' : '#10b981';
+      return '<div style="margin-bottom:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">'
+        + '<div style="font-size:.66rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">⚡ Angular Velocity at Contact (Butterworth-filtered)</div>'
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.78rem;line-height:1.9;">'
+        + '<div><span style="color:var(--muted);">Knee valgus rate L/R:</span> '
+        + '<strong style="color:' + lVRc + '">' + vRate(fm.lValgusRate) + '</strong> / '
+        + '<strong style="color:' + rVRc + '">' + vRate(fm.rValgusRate) + '</strong>'
+        + '<span style="display:block;font-size:.68rem;color:var(--muted);">&lt;80°/s normal · &gt;150°/s high-risk (Hewett)</span></div>'
+        + '<div><span style="color:var(--muted);">Knee flexion rate L/R:</span> '
+        + '<strong style="color:' + lFRc + '">' + vRate(fm.lFlexRate) + '</strong> / '
+        + '<strong style="color:' + rFRc + '">' + vRate(fm.rFlexRate) + '</strong>'
+        + '<span style="display:block;font-size:.68rem;color:var(--muted);">&gt;350°/s soft · 200–350 moderate · &lt;200°/s stiff lander</span></div>'
+        + '</div></div>';
+    })()}
   }
 
   const sagittalTitle = isLanding ? 'Sagittal Plane — Knee Flexion & Trunk Lean' : 'Sagittal Plane — Hip, Knee & Ankle';
@@ -8686,9 +8687,9 @@ function renderDenseCurves(curves, movement) {
     + `<div style="font-size:.66rem;color:var(--muted);margin-top:6px;">
         ${curves.length} frames · MediaPipe Heavy + foot refinement · 
         ${isLanding ? 'Contact window (18%–78% of clip)' : 'Stride window'} · 
-        \${window._denseFilteredMetrics?.canFilter
-          ? '<span style="color:var(--teal);">Butterworth 6Hz zero-phase filtered (fs≈' + window._denseFilteredMetrics.effectiveFs + 'Hz) · landmarks refined</span>'
-          : '<span style="color:var(--amber);">Raw curves (fps too low for filtering — use 60fps+ video)</span>'}
+        ${window._denseFilteredMetrics?.canFilter
+          ? '<span style="color:var(--teal);">Butterworth 6Hz filtered (fs≈' + window._denseFilteredMetrics.effectiveFs + 'Hz)</span>'
+          : '<span style="color:var(--amber);">Raw curves (60fps+ video needed for filtering)</span>'}
       </div>`;
 
   section.style.display = 'block';
