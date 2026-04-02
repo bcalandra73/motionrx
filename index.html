@@ -1313,6 +1313,7 @@ async function handleFile(file) {
     vid.src = url; vid.controls = true; vid.muted = true; vid.playsInline = true;
     vid.style.cssText = 'width:100%;max-height:280px;object-fit:contain;display:block;';
     wrap.appendChild(vid); wrap.appendChild(badge);
+    window._primaryVidEl = vid; // store ref for dense pass (avoids fragile querySelector)
     startFrameExtraction(file, vid);
   }
 }
@@ -7336,6 +7337,8 @@ function renderDenseCurves(curves, movement) {
     {key:'Right Knee Flexion',  label:'R Knee Flexion',   color:'#f97316', transform: v => v!=null ? 180-v : null},
     {key:'Left Knee Valgus',    label:'L Knee Valgus',    color:'#3b82f6', transform: v => v},
     {key:'Right Knee Valgus',   label:'R Knee Valgus',    color:'#ef4444', transform: v => v},
+    {key:'Left Hip Adduction',  label:'L Hip Add',        color:'#06b6d4', transform: v => v},
+    {key:'Right Hip Adduction', label:'R Hip Add',        color:'#f43f5e', transform: v => v},
     {key:'Trunk Lean',          label:'Trunk Lean',       color:'#8b5cf6', transform: v => v},
   ] : [
     {key:'Left Hip Flexion',    label:'L Hip Flex',       color:'#0ea5e9', transform: v => v},
@@ -7470,7 +7473,7 @@ function renderDenseCurves(curves, movement) {
       const rF = c.angles['Right Knee Flexion'];
       const lFlex = lF != null ? 180 - lF : null;
       const rFlex = rF != null ? 180 - rF : null;
-      const flex = (lFlex ?? 0 + rFlex ?? 0) / (lFlex!=null&&rFlex!=null?2:1);
+      const flex = ((lFlex ?? 0) + (rFlex ?? 0)) / (lFlex!=null&&rFlex!=null?2:1);
       if(flex > firstFlexThresh) { contactMs = c.tMs; break; }
     }
 
@@ -7715,7 +7718,7 @@ async function runAnalysis() {
   let denseCurves = null;
   if(isDynamicForDense && mpReady && poseLandmarkerInstance) {
     try {
-      const vidElForDense = document.querySelector('video');
+      const vidElForDense = window._primaryVidEl || document.querySelector('video');
       const durForDense   = vidElForDense?.duration;
       if(vidElForDense && durForDense && isFinite(durForDense)) {
         statusEl.textContent = 'Running dense movement analysis pass...';
