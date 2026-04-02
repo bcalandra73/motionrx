@@ -8165,6 +8165,191 @@ function proceedFromReview() {
   if(_rvResolve) { _rvResolve(_rvLandmarks); _rvResolve = null; }
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Signal Processing — Butterworth filter + Angular Velocity
+// Standard in all professional MoCap systems (Vicon, Kinovea, DARI, etc.)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── 2nd-order Butterworth LP filter design (bilinear transform) ───────────────
+// Returns {b:[b0,b1,b2], a:[1,a1,a2]} for use with filtfilt / filterIIR.
+// fc = cutoff Hz, fs = sampling rate Hz.
+function designButterworth2(fc, fs) {
+  const Wc  = 2 * Math.tan(Math.PI * fc / fs); // pre-warped cutoff
+  const Wc2 = Wc * Wc;
+  const k1  = Math.SQRT2 * Wc;
+  const D   = 4 + k1 + Wc2;
+  return {
+    b: [Wc2/D, 2*Wc2/D, Wc2/D],
+    a: [1, (2*Wc2 - 8)/D, (4 - k1 + Wc2)/D],
+  };
+}
+
+// ── Direct-form II transposed IIR filter (single pass) ───────────────────────
+function filterIIR(b, a, x) {
+  const n = x.length;
+  const y = new Array(n);
+  let z0 = 0, z1 = 0;
+  for(let i = 0; i < n; i++) {
+    y[i] = b[0]*x[i] + z0;
+    z0 = b[1]*x[i] - a[1]*y[i] + z1;
+    z1 = b[2]*x[i] - a[2]*y[i];
+  }
+  return y;
+}
+
+// ── Zero-phase forward-backward filter (scipy filtfilt equivalent) ────────────
+// Reflection-pads the signal to reduce edge transients.
+function filtfilt(b, a, x) {
+  const n = x.length;
+  if(n < 4) return x.slice();
+  const pad = Math.min(n - 1, Math.max(6, Math.floor(n * 0.2)));
+  // Reflect-pad: mirror first/last `pad` samples beyond signal edges
+  const xp = [];
+  for(let i = pad; i >= 1; i--) xp.push(2*x[0]  - x[i]);
+  x.forEach(v => xp.push(v));
+  for(let i = n-2; i >= n-1-pad; i--) xp.push(2*x[n-1] - x[i]);
+  // Forward pass
+  const yf = filterIIR(b, a, xp);
+  // Backward pass (reverse, filter, reverse)
+  const yb = filterIIR(b, a, yf.slice().reverse()).reverse();
+  // Trim padding and return
+  return yb.slice(pad, pad + n);
+}
+
+// ── Central-difference angular velocity (°/s) ─────────────────────────────────
+function angularVelocity(vals, timesMs) {
+  return vals.map((v, i) => {
+    if(v == null) return null;
+    let dv, dt;
+    if(i > 0 && i < vals.length-1 && vals[i-1]!=null && vals[i+1]!=null) {
+      dv = vals[i+1]-vals[i-1]; dt = (timesMs[i+1]-timesMs[i-1])/1000;
+    } else if(i===0 && vals[1]!=null) {
+      dv = vals[1]-vals[0]; dt = (timesMs[1]-timesMs[0])/1000;
+    } else if(i===vals.length-1 && vals[i-1]!=null) {
+      dv = vals[i]-vals[i-1]; dt = (timesMs[i]-timesMs[i-1])/1000;
+    } else return null;
+    return dt > 0 ? dv/dt : null;
+  });
+}
+
+// ── Master metric computation — called once after dense pass, before Claude ───
+// Filters each angle series, computes angular velocities, and stores the
+// results on window._denseFilteredMetrics for use by both renderDenseCurves
+// and buildDensePassPromptSection.
+//
+function computeDenseFilteredMetrics(curves, movement) {
+  if(!curves || curves.length < 6) return null;
+
+  const times = curves.map(c => c.tMs);
+  const durSec = (times[times.length-1] - times[0]) / 1000;
+  const effectiveFs = durSec > 0 ? (curves.length - 1) / durSec : 0;
+  // Butterworth requires Nyquist (fs/2) > cutoff (6 Hz) → fs > 12 Hz
+  const canFilter = effectiveFs >= 12;
+  const fc = 6; // 6 Hz cutoff — standard for joint kinematics (Robertson et al.)
+  const {b, a} = canFilter ? designButterworth2(fc, effectiveFs) : {};
+
+  // Filter one angle series, handling nulls via linear interpolation
+  const filterSeries = (key, transform) => {
+    const raw = curves.map(c => {
+      const v = transform(c.angles[key]);
+      return (v != null && isFinite(v)) ? v : null;
+    });
+    if(!canFilter || !b) return raw;
+    if(raw.filter(v=>v!==null).length < 6) return raw;
+    // Interpolate nulls so filtfilt sees a continuous signal
+    const interp = raw.map((v, i) => {
+      if(v !== null) return v;
+      let lo = null, hi = null;
+      for(let j=i-1;j>=0;j--)          if(raw[j]!==null){lo=j;break;}
+      for(let j=i+1;j<raw.length;j++) if(raw[j]!==null){hi=j;break;}
+      if(lo===null && hi===null) return 0;
+      if(lo===null) return raw[hi];
+      if(hi===null) return raw[lo];
+      const t = (i-lo)/(hi-lo);
+      return raw[lo] + t*(raw[hi]-raw[lo]);
+    });
+    const filt = filtfilt(b, a, interp);
+    return raw.map((v,i) => v===null ? null : filt[i]);
+  };
+
+  const peak  = (arr, higher=true) => arr.reduce((m,v) => v!=null&&(higher?v>m:v<m)?v:m, higher?-Infinity:Infinity);
+  const round = (v) => v!=null&&isFinite(v) ? Math.round(v) : null;
+
+  const isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+  const isRunning = /running|gait|walk/i.test(movement);
+  const metrics = { effectiveFs: Math.round(effectiveFs*10)/10, canFilter };
+
+  if(isLanding) {
+    const lKF = filterSeries('Left Knee Flexion',   v => v!=null ? 180-v : null);
+    const rKF = filterSeries('Right Knee Flexion',  v => v!=null ? 180-v : null);
+    const lVG = filterSeries('Left Knee Valgus',    v => v);
+    const rVG = filterSeries('Right Knee Valgus',   v => v);
+    const lHA = filterSeries('Left Hip Adduction',  v => v);
+    const rHA = filterSeries('Right Hip Adduction', v => v);
+    const lTL = filterSeries('Trunk Lean',          v => v);
+
+    const lKFv = angularVelocity(lKF, times);
+    const rKFv = angularVelocity(rKF, times);
+    const lVGv = angularVelocity(lVG, times);
+    const rVGv = angularVelocity(rVG, times);
+
+    // Estimate contact frame: first frame where bilateral avg knee flex > 15°
+    let contactIdx = null;
+    for(let i=0; i<lKF.length; i++) {
+      const lf = lKF[i], rf = rKF[i];
+      const avg = ((lf??0)+(rf??0)) / (lf!=null&&rf!=null?2:1);
+      if(avg > 15) { contactIdx = i; break; }
+    }
+
+    const atContact = (arr) => {
+      if(contactIdx===null || !arr[contactIdx]) return null;
+      return round(Math.abs(arr[contactIdx]));
+    };
+
+    metrics.series       = {lKF, rKF, lVG, rVG, lHA, rHA, lTL};
+    metrics.contactMs    = contactIdx!=null ? times[contactIdx] : null;
+    metrics.lKFpeak      = round(peak(lKF, true));
+    metrics.rKFpeak      = round(peak(rKF, true));
+    metrics.lVGpeak      = round(peak(lVG, true));
+    metrics.rVGpeak      = round(peak(rVG, true));
+    metrics.lHApeak      = round(peak(lHA, true));
+    metrics.rHApeak      = round(peak(rHA, true));
+    metrics.lValgusRate  = atContact(lVGv);   // °/s at contact
+    metrics.rValgusRate  = atContact(rVGv);
+    metrics.lFlexRate    = atContact(lKFv);   // °/s at contact
+    metrics.rFlexRate    = atContact(rKFv);
+
+  } else if(isRunning) {
+    const lHF = filterSeries('Left Hip Flexion',           v => v);
+    const rHF = filterSeries('Right Hip Flexion',          v => v);
+    const lKF = filterSeries('Left Knee Flexion',          v => v!=null?180-v:null);
+    const rKF = filterSeries('Right Knee Flexion',         v => v!=null?180-v:null);
+    const lAD = filterSeries('Left Ankle Dorsiflexion',    v => v);
+    const rAD = filterSeries('Right Ankle Dorsiflexion',   v => v);
+    metrics.series   = {lHF, rHF, lKF, rKF, lAD, rAD};
+    metrics.lKFpeak  = round(peak(lKF, true));
+    metrics.rKFpeak  = round(peak(rKF, true));
+  }
+
+  return metrics;
+}
+
+// Map from seriesConfig key to _denseFilteredMetrics.series field name
+const _DENSE_SERIES_MAP = {
+  'Left Knee Flexion':          'lKF',
+  'Right Knee Flexion':         'rKF',
+  'Left Knee Valgus':           'lVG',
+  'Right Knee Valgus':          'rVG',
+  'Left Hip Adduction':         'lHA',
+  'Right Hip Adduction':        'rHA',
+  'Trunk Lean':                 'lTL',
+  'Left Hip Flexion':           'lHF',
+  'Right Hip Flexion':          'rHF',
+  'Left Ankle Dorsiflexion':    'lAD',
+  'Right Ankle Dorsiflexion':   'rAD',
+};
+
 // ── Dense Dynamic Analysis Pass ──────────────────────────────────────────────────
 // Runs MediaPipe Heavy on 24-32 frames within the clinically critical movement window,
 // then applies foot landmark refinement to each frame.
@@ -8324,11 +8509,14 @@ function renderDenseCurves(curves, movement) {
     const px = (t) => PAD.l + ((t - tMin) / tRange) * plotW;
     const py = (v) => PAD.t + plotH - ((v - yMin) / yRange) * plotH;
 
-    // Build polylines
+    // Build polylines — use Butterworth-filtered values when available
+    const _fmBC = window._denseFilteredMetrics;
     const lines = activeSeries.map(s => {
-      const pts = curves.map(c => {
-        const raw = c.angles[s.key];
-        const v = s.transform(raw);
+      const pts = curves.map((c, ci) => {
+        let v = null;
+        const sn = _DENSE_SERIES_MAP[s.key];
+        if(_fmBC?.series?.[sn]?.[ci] != null) { v = _fmBC.series[sn][ci]; }
+        else { v = s.transform(c.angles[s.key]); }
         if(v == null) return null;
         return `${px(c.tMs).toFixed(1)},${py(v).toFixed(1)}`;
       }).filter(Boolean).join(' ');
@@ -8383,6 +8571,16 @@ function renderDenseCurves(curves, movement) {
 
   // Compute peak/timing metrics for clinical summary
   const getPeakAndTiming = (key, transform, higher=true) => {
+    const _fmPT = window._denseFilteredMetrics;
+    const snPT  = _DENSE_SERIES_MAP[key];
+    if(_fmPT?.series?.[snPT]) {
+      const arr = _fmPT.series[snPT];
+      let best = null, bestT = null;
+      arr.forEach((v, ci) => {
+        if(v!=null&&(best===null||(higher?v>best:v<best))){best=v;bestT=curves[ci]?.tMs??null;}
+      });
+      return {val: best!=null?Math.round(best):null, tMs: bestT};
+    }
     let best = null, bestT = null;
     curves.forEach(c => {
       const raw = c.angles[key];
@@ -8455,7 +8653,28 @@ function renderDenseCurves(curves, movement) {
       High contact valgus = initial position deficit (hip control). Valgus that worsens to peak = progressive collapse under load (quad-dominant strategy, fatigue). 
       ${contactMs != null ? `Contact estimated at ${contactMs}ms into clip.` : 'Contact moment estimated from knee flexion onset.'}
       ${trunkPk.val != null ? ` Peak trunk lean: <strong style="color:${trunkPk.val>35?'#ef4444':trunkPk.val>20?'#f59e0b':'inherit'}">${trunkPk.val}°</strong> at ${trunkPk.tMs}ms.` : ''}
-    </div>`;
+    </div>
+    ${(() => {
+      const fm = window._denseFilteredMetrics;
+      if(!fm?.lValgusRate && !fm?.lFlexRate) return '';
+      const vRate = (v) => v==null ? '—' : `${v}°/s`;
+      const vColor = (v, thresh1, thresh2) => v==null?'inherit':v>thresh2?'#ef4444':v>thresh1?'#f59e0b':'#10b981';
+      // Valgus rate: >150°/s = high risk (Hewett normative data)
+      const lVRc = vColor(fm.lValgusRate, 80, 150);
+      const rVRc = vColor(fm.rValgusRate, 80, 150);
+      // Flex rate: <200°/s = stiff lander, >350°/s = soft lander
+      const lFRc = fm.lFlexRate==null?'inherit':fm.lFlexRate<200?'#ef4444':fm.lFlexRate<350?'#f59e0b':'#10b981';
+      const rFRc = fm.rFlexRate==null?'inherit':fm.rFlexRate<200?'#ef4444':fm.rFlexRate<350?'#f59e0b':'#10b981';
+      return \`<div style="margin-bottom:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">
+        <div style="font-size:.66rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">⚡ Angular Velocity at Contact (Butterworth-filtered)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.78rem;line-height:1.9;">
+          <div><span style="color:var(--muted);">Knee valgus rate L/R:</span> <strong style="color:\${lVRc}">\${vRate(fm.lValgusRate)}</strong> / <strong style="color:\${rVRc}">\${vRate(fm.rValgusRate)}</strong>
+            <span style="display:block;font-size:.68rem;color:var(--muted);">&lt;80°/s normal · &gt;150°/s high-risk (Hewett)</span></div>
+          <div><span style="color:var(--muted);">Knee flexion rate L/R:</span> <strong style="color:\${lFRc}">\${vRate(fm.lFlexRate)}</strong> / <strong style="color:\${rFRc}">\${vRate(fm.rFlexRate)}</strong>
+            <span style="display:block;font-size:.68rem;color:var(--muted);">&gt;350°/s soft · 200–350 moderate · &lt;200°/s stiff lander</span></div>
+        </div>
+      </div>\`;
+    })()}`;
   }
 
   const sagittalTitle = isLanding ? 'Sagittal Plane — Knee Flexion & Trunk Lean' : 'Sagittal Plane — Hip, Knee & Ankle';
@@ -8467,7 +8686,9 @@ function renderDenseCurves(curves, movement) {
     + `<div style="font-size:.66rem;color:var(--muted);margin-top:6px;">
         ${curves.length} frames · MediaPipe Heavy + foot refinement · 
         ${isLanding ? 'Contact window (18%–78% of clip)' : 'Stride window'} · 
-        <span style="color:var(--teal);">Ankle/heel landmarks refined via multi-scale MediaPipe crop</span>
+        \${window._denseFilteredMetrics?.canFilter
+          ? '<span style="color:var(--teal);">Butterworth 6Hz zero-phase filtered (fs≈' + window._denseFilteredMetrics.effectiveFs + 'Hz) · landmarks refined</span>'
+          : '<span style="color:var(--amber);">Raw curves (fps too low for filtering — use 60fps+ video)</span>'}
       </div>`;
 
   section.style.display = 'block';
@@ -8745,6 +8966,10 @@ async function runAnalysis() {
             });
           }
           if(upgraded > 0) console.log(`[DensePass] Upgraded ${upgraded} peak metrics from dense curves`);
+          // Pre-compute Butterworth-filtered metrics + angular velocities for the dense pass
+          window._denseFilteredMetrics = computeDenseFilteredMetrics(denseCurves, movement);
+          if(window._denseFilteredMetrics?.canFilter)
+            console.log(`[DenseFilter] Butterworth 6Hz applied (fs≈${window._denseFilteredMetrics.effectiveFs}Hz)`);
         }
       }
     } catch(denseErr) {
@@ -9068,12 +9293,26 @@ ${(() => {
     const rVG = getPeak('Right Knee Valgus',  true);
     const lHA = getPeak('Left Hip Adduction', true);
     const rHA = getPeak('Right Hip Adduction',true);
-    if(lKF!=null) lines.push(`Left peak knee flexion (dense): ${180-lKF}° — more accurate than 8-frame estimate`);
-    if(rKF!=null) lines.push(`Right peak knee flexion (dense): ${180-rKF}°`);
-    if(lVG!=null) lines.push(`Left peak knee valgus (dense, ${curves.length}-frame curve): ${lVG}°`);
-    if(rVG!=null) lines.push(`Right peak knee valgus (dense, ${curves.length}-frame curve): ${rVG}°`);
-    if(lHA!=null) lines.push(`Left peak hip adduction (dense): ${lHA}°`);
-    if(rHA!=null) lines.push(`Right peak hip adduction (dense): ${rHA}°`);
+    // Use Butterworth-filtered peaks when available (more accurate — removes frame noise)
+    const fm = window._denseFilteredMetrics;
+    const lKFdisp = fm?.lKFpeak ?? (lKF!=null ? 180-lKF : null);
+    const rKFdisp = fm?.rKFpeak ?? (rKF!=null ? 180-rKF : null);
+    const lVGdisp = fm?.lVGpeak ?? lVG;
+    const rVGdisp = fm?.rVGpeak ?? rVG;
+    const lHAdisp = fm?.lHApeak ?? lHA;
+    const rHAdisp = fm?.rHApeak ?? rHA;
+    const filtered = fm?.canFilter ? ' (Butterworth 6Hz filtered)' : ' (raw)';
+    if(lKFdisp!=null) lines.push(`Left peak knee flexion${filtered}: ${lKFdisp}° — use this over 8-frame estimate`);
+    if(rKFdisp!=null) lines.push(`Right peak knee flexion${filtered}: ${rKFdisp}°`);
+    if(lVGdisp!=null) lines.push(`Left peak knee valgus${filtered}: ${lVGdisp}°`);
+    if(rVGdisp!=null) lines.push(`Right peak knee valgus${filtered}: ${rVGdisp}°`);
+    if(lHAdisp!=null) lines.push(`Left peak hip adduction${filtered}: ${lHAdisp}°`);
+    if(rHAdisp!=null) lines.push(`Right peak hip adduction${filtered}: ${rHAdisp}°`);
+    // Angular velocity at contact — clinically important for ACL mechanism
+    if(fm?.lValgusRate!=null) lines.push(`Left knee valgus rate at contact: ${fm.lValgusRate}°/s (normal <80, high-risk >150 — Hewett 2005)`);
+    if(fm?.rValgusRate!=null) lines.push(`Right knee valgus rate at contact: ${fm.rValgusRate}°/s`);
+    if(fm?.lFlexRate!=null)  lines.push(`Left knee flexion rate at contact: ${fm.lFlexRate}°/s (>350=soft lander, <200=stiff lander)`);
+    if(fm?.rFlexRate!=null)  lines.push(`Right knee flexion rate at contact: ${fm.rFlexRate}°/s`);
 
     // Valgus onset: value at first frame of curve vs peak
     const firstVgL = curves[0]?.angles['Left Knee Valgus'];
