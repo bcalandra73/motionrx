@@ -8424,7 +8424,8 @@ async function runAnalysis() {
 
       // ── Stage 3b-i: Foot/ankle crop refinement (posterior view) ──────────────
       let refinedLandmarks2 = fusedLandmarks2;
-      if(isDynamicMovement && mpReady && poseLandmarkerInstance) {
+      const isDynamic3b = /running|gait|walk|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+      if(isDynamic3b && mpReady && poseLandmarkerInstance) {
         statusEl.textContent = 'Refining posterior foot landmarks...';
         refinedLandmarks2 = await Promise.all(
           fusedLandmarks2.map((lms, i) =>
