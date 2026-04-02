@@ -652,6 +652,19 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
               <label class="tape-loc-chip"><input type="checkbox" name="tapeLocB" value="knee"> Knee</label>
             </div>
           </div>
+          <!-- Tape detection test button -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+            <button onclick="runTapeDetectionTest()" id="tapeTestBtn"
+              style="padding:7px 16px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-family:'Inter',sans-serif;font-size:.78rem;font-weight:600;cursor:pointer;">
+              🔍 Test tape detection on uploaded frame
+            </button>
+            <span id="tapeTestStatus" style="font-size:.75rem;color:var(--muted);"></span>
+          </div>
+          <div id="tapeTestPreview" style="display:none;margin-bottom:10px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+            <div style="background:var(--navy);padding:4px 10px;font-size:.68rem;font-weight:600;color:#fff;letter-spacing:.05em;text-transform:uppercase;">
+              Blob Detection Preview — gold circles = detected, cross = assigned to landmark</div>
+            <canvas id="tapeTestCanvas" style="width:100%;display:block;"></canvas>
+          </div>
           <div style="padding:9px 13px;background:var(--teal-light);border-radius:6px;font-size:.73rem;color:var(--teal);line-height:1.65;">
             💡 <strong>Placement guide —</strong>
             <strong>Lateral view:</strong> near-leg = lateral malleolus, heel, 5th metatarsal head; far-leg = medial malleolus, heel, 1st metatarsal head ·
@@ -3025,7 +3038,7 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
   return allFrameLandmarks;
 }
 
-function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
+function applyTibiaAnkleReprojection(allFrameLandmarks, view='side', movement='') {
   if(allFrameLandmarks.length < 4) return allFrameLandmarks;
   const isSide = (view === 'side');
 
@@ -3192,7 +3205,11 @@ function applyTibiaAnkleReprojection(allFrameLandmarks, view='side') {
         if(hip && a && (hip.visibility||0) > 0.4) {
           const hipToAnkleDy = a.y - hip.y; // positive = ankle below hip (correct)
           // Ankle must be at least 35% of frame height below the hip
-          if(hipToAnkleDy < 0.35) {
+          // Running posterior: swing leg can fold the ankle to within 20% of hip height —
+          // that's anatomically valid. Only reject if ankle is impossibly close (< 20% for running,
+          // < 35% for walking/other) to avoid false reprojection during high-knee-flexion swing.
+          const nearHipThresh = /running/i.test(movement) ? 0.20 : 0.35;
+          if(hipToAnkleDy < nearHipThresh) {
             nearHip = true;
             console.log(`[TibiaReproj] ${name} f${fi+1}: ankle near hip (dy=${(hipToAnkleDy*100).toFixed(1)}%) → misplaced`);
           }
@@ -3469,7 +3486,7 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
     // This corrects the most common treadmill failure: far-side ankle placed on belt
     if(/running|gait|walk/i.test(movement)) {
       statusEl.textContent = 'Correcting ankle landmarks (tibia projection)...';
-      allLandmarks = applyTibiaAnkleReprojection(allLandmarks, view);
+      allLandmarks = applyTibiaAnkleReprojection(allLandmarks, view, movement);
     }
 
     statusEl.textContent = 'Applying bilateral symmetry fallback...';
@@ -3708,9 +3725,12 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
           if(isFoot) {
             // Foot landmarks: use distinct color scheme to flag their reliability
             // Special case: tibia-projected ankles get a distinct purple ring
-            const isProjected = p.source && (p.source.includes('tibia-projected') || p.source.includes('tibia-blended'));
+            const isProjected  = p.source && (p.source.includes('tibia-projected') || p.source.includes('tibia-blended'));
+            const isTapeRefined = p.source && p.source.includes('tape-');
             const isGroundCorrected = p.source && p.source.includes('ground-corrected');
-            if(isProjected) {
+            if(isTapeRefined) {
+              ctx.fillStyle = '#ffd700'; // gold = tape-marker refined (physical landmark)
+            } else if(isProjected) {
               ctx.fillStyle = '#c084fc'; // purple = tibia-projected (estimated from knee direction)
             } else if(isGroundCorrected) {
               ctx.fillStyle = '#fb923c'; // orange-red = ground-plane corrected
@@ -3735,7 +3755,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
             }
             ctx.beginPath();
             ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
-            ctx.fillStyle = isProjected ? '#c084fc' : isGroundCorrected ? '#fb923c'
+            ctx.fillStyle = isTapeRefined ? '#ffd700' : isProjected ? '#c084fc' : isGroundCorrected ? '#fb923c'
                           : (isSwingPhase && (i===27||i===28)) ? '#facc15'
                           : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
           } else if(conf >= 0.6) {
@@ -3840,6 +3860,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         ctx.font = `${Math.max(10, W/70)}px sans-serif`;
         // Dynamic legend — only show states actually present in this frame
         const lms = poseResult?.poseLandmarks || [];
+        const hasTapeRefined     = lms.some(p => p?.source?.includes('tape-'));
         const hasProjected       = lms.some(p => p?.source?.includes('tibia-projected') || p?.source?.includes('tibia-blended'));
         const hasGroundCorrected = lms.some(p => p?.source?.includes('ground-corrected'));
         const hasSwingAnkle      = isSwingPhase;
@@ -3847,6 +3868,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         const hasEstimated       = lms.some(p => p && (p.visibility||0) >= 0.35 && (p.visibility||0) < 0.60);
         const hasLowConf         = lms.some(p => p && (p.visibility||0) > 0 && (p.visibility||0) < 0.35);
         const legendItems = [
+          {color:'#ffd700',               label:'Tape-refined (physical marker)',   show:hasTapeRefined},
           {color:'#00e5cc',               label:'High confidence',                 show:true},
           {color:'#a8ff78',               label:'Foot landmark (verify!)',          show:hasFootLM},
           {color:'#c084fc',               label:'Ankle: tibia-projected (est.)',   show:hasProjected},
@@ -7318,6 +7340,109 @@ async function refineFootLandmarks(imageBase64, coarseLandmarks) {
 }
 
 
+
+// ── Tape Detection Diagnostic ─────────────────────────────────────────────────
+// Runs the blob detector on the first uploaded frame and renders detected blobs
+// onto a preview canvas inside the tape config card. Lets the clinician verify
+// that tape colors are being detected before committing to a full analysis.
+//
+async function runTapeDetectionTest() {
+  const btn    = document.getElementById('tapeTestBtn');
+  const status = document.getElementById('tapeTestStatus');
+  const preview= document.getElementById('tapeTestPreview');
+  const cv     = document.getElementById('tapeTestCanvas');
+
+  if(!extractedFrames || !extractedFrames.length) {
+    status.textContent = '⚠️ Upload a video first — no frames available yet.';
+    return;
+  }
+  const tc = readTapeConfig();
+  if(!tc) {
+    status.textContent = '⚠️ Enable tape refinement and configure at least one color first.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Running...';
+  status.textContent = '';
+
+  try {
+    // Use the first extracted frame as the test image
+    const imgB64 = extractedFrames[Math.floor(extractedFrames.length / 3)]?.imageData
+                || extractedFrames[0].imageData;
+
+    // Load image to get dimensions
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => rej(new Error('load'));
+      im.src = 'data:image/jpeg;base64,' + imgB64;
+    });
+
+    cv.width  = img.naturalWidth;
+    cv.height = img.naturalHeight;
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+
+    const W = img.naturalWidth, H = img.naturalHeight;
+    let totalFound = 0;
+    const colorLabels = [];
+
+    // Run detection for each configured color and draw results
+    const colors = [tc.colorA, tc.colorB].filter(Boolean);
+    const DRAW_COLORS = {
+      orange:'#ff8c00', green:'#00e676', yellow:'#ffee00',
+      blue:'#00b0ff', pink:'#ff4081', red:'#ff1744', white:'#ffffff'
+    };
+
+    for(const conf of colors) {
+      const blobs = await detectColorBlobs(imgB64, conf.color, 5); // low threshold for preview
+      colorLabels.push(`${conf.color}: ${blobs.length} blob${blobs.length!==1?'s':''}`);
+      totalFound += blobs.length;
+
+      const dc = DRAW_COLORS[conf.color] || '#fff';
+      blobs.forEach((blob, bi) => {
+        const bx = blob.x * W, by = blob.y * H;
+        const r  = Math.max(8, Math.sqrt(blob.pixelCount) * 0.8);
+        // Outer ring
+        ctx.beginPath(); ctx.arc(bx, by, r + 3, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 3; ctx.stroke();
+        // Color ring
+        ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2);
+        ctx.strokeStyle = dc; ctx.lineWidth = 2.5; ctx.stroke();
+        // Centroid dot
+        ctx.beginPath(); ctx.arc(bx, by, 3, 0, Math.PI*2);
+        ctx.fillStyle = dc; ctx.fill();
+        // Pixel count label
+        ctx.font = `bold ${Math.max(10, W/90)}px sans-serif`;
+        ctx.strokeStyle='rgba(0,0,0,0.9)'; ctx.lineWidth=2.5;
+        ctx.strokeText(`${blob.pixelCount}px`, bx + r + 4, by + 4);
+        ctx.fillStyle = dc;
+        ctx.fillText(`${blob.pixelCount}px`, bx + r + 4, by + 4);
+      });
+    }
+
+    // Summary overlay at top
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(0, 0, W, Math.max(32, H/18));
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.max(11, W/70)}px sans-serif`;
+    ctx.fillText(`Tape blobs — ${colorLabels.join('  ·  ')}  (minPx=15)`, 8, Math.max(20, H/24));
+
+    preview.style.display = 'block';
+    status.textContent = totalFound > 0
+      ? `✅ ${totalFound} blob${totalFound!==1?'s':''} detected — ${colorLabels.join(', ')}`
+      : '❌ No blobs detected — check color selection or tape visibility in video';
+    status.style.color = totalFound > 0 ? 'var(--teal)' : 'var(--red)';
+
+  } catch(e) {
+    status.textContent = '⚠️ Test failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 Test tape detection on uploaded frame';
+  }
+}
+
 // ── Tape Marker Config Reader ─────────────────────────────────────────────────
 // Reads the tape marker UI card state into a config object.
 // Returns null if tape refinement is disabled or card is hidden.
@@ -7368,17 +7493,17 @@ function readTapeConfig() {
 // Returns: array of {x, y, pixelCount, widthPx, heightPx} sorted by pixelCount desc
 //          x/y are normalized 0-1 frame coordinates of blob centroid.
 //
-async function detectColorBlobs(imageBase64, colorName, minPixels = 30) {
+async function detectColorBlobs(imageBase64, colorName, minPixels = 15) {
   // HSV match functions — neon tape has high saturation and value, making it
   // robust even under variable gym/field lighting.
   const HSV = {
-    orange: (h,s,v) => (h>=14&&h<=40)   && s>0.55 && v>0.38,
-    green:  (h,s,v) => (h>=78&&h<=138)  && s>0.48 && v>0.32,
-    yellow: (h,s,v) => (h>=42&&h<=68)   && s>0.55 && v>0.48,
-    blue:   (h,s,v) => (h>=195&&h<=252) && s>0.45 && v>0.18,
-    pink:   (h,s,v) => (h>=285&&h<=345) && s>0.38 && v>0.40,
-    red:    (h,s,v) => (h>=340||h<=12)  && s>0.58 && v>0.32,
-    white:  (h,s,v) => v>0.82 && s<0.18,
+    orange: (h,s,v) => (h>=12&&h<=42)   && s>0.42 && v>0.30, // relaxed for gym LED lighting
+    green:  (h,s,v) => (h>=72&&h<=145)  && s>0.38 && v>0.26, // relaxed for gym LED lighting
+    yellow: (h,s,v) => (h>=40&&h<=70)   && s>0.48 && v>0.45,
+    blue:   (h,s,v) => (h>=192&&h<=255) && s>0.42 && v>0.16,
+    pink:   (h,s,v) => (h>=280&&h<=348) && s>0.30 && v>0.36,
+    red:    (h,s,v) => (h>=338||h<=14)  && s>0.48 && v>0.28,
+    white:  (h,s,v) => v>0.80 && s<0.20,
   };
   const matchFn = HSV[colorName];
   if(!matchFn) return [];
@@ -7508,7 +7633,14 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
       .sort((a,b) => b.conf - a.conf);
 
     const used = new Set();
-    const RADIUS = 0.15; // 15% of frame height — generous but anatomically bounded
+    // Standard radius = 15% frame height. If the prior landmark was itself a tibia
+    // projection (already estimated, not MP-detected), it may be significantly off.
+    // Expand to 25% in that case so a correctly-placed tape blob can still override it.
+    const isProjectedPrior = (idx) => {
+      const lm = merged[idx];
+      return lm?.source?.includes('tibia-projected') || lm?.source?.includes('tibia-blended');
+    };
+    const RADIUS = 0.15; // base — may be widened per-landmark below
 
     for(const tgt of targets) {
       const prior = merged[tgt.idx];
@@ -7519,7 +7651,8 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
         if(used.has(bi)) return;
         const dx = blob.x - prior.x, dy = blob.y - prior.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
-        if(dist < RADIUS && dist < bestDist) { bestDist = dist; bestBlob = blob; bestBi = bi; }
+        const r = isProjectedPrior(tgt.idx) ? 0.25 : RADIUS;
+        if(dist < r && dist < bestDist) { bestDist = dist; bestBlob = blob; bestBi = bi; }
       });
 
       if(bestBlob) {
