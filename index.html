@@ -678,7 +678,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             <strong>Lateral view:</strong> near-leg = lateral malleolus, heel, 5th metatarsal head; far-leg = medial malleolus, heel, 1st metatarsal head ·
             <strong>Posterior view:</strong> Achilles insertion, calcaneus centre, plantar heel ·
             <strong>Jump:</strong> lateral femoral condyle (knee), lateral malleolus, 5th metatarsal head ·
-            Strips work best; ~1 cm wide × 2–3 cm long oriented perpendicular to the limb.
+            Strips work best; ~1 cm wide × 2–3 cm long oriented perpendicular to the limb. · <strong>Frontal view:</strong> ensure tape is below clothing hem and fully visible from camera — knee tape must not be covered by shorts.
           </div>
         </div>
       </div>
@@ -7503,11 +7503,22 @@ async function runTapeDetectionTest() {
     ctx.fillText(`${colorLabels.join('  ·  ')}${roiNote}`, 8, Math.max(22, H/22));
 
     preview.style.display = 'block';
+    const zeroColors = [tc.colorA, tc.colorB].filter((c,ci) => c && colorLabels[ci]?.includes(': 0'));
+    const zeroHints = zeroColors.map(c =>
+      `${c.color} = 0: check (1) tape is below clothing hem and facing camera, ` +
+      `(2) try a more saturated/brighter shade, (3) ensure ${c.leg.replace('_',' ')} landmarks visible`
+    );
     const msg = totalIn > 0
       ? `✅ ${totalIn} usable blob${totalIn!==1?'s':''} within ROI — ${colorLabels.join(', ')}${totalOut ? `  (${totalOut} excluded by ROI)` : ''}`
-      : `❌ No blobs within ROI — adjust colors or check tape visibility`;
+      : `❌ No usable blobs — ${zeroHints.join(' | ') || 'check tape visibility and color selection'}`;
     status.textContent = msg;
     status.style.color = totalIn > 0 ? 'var(--teal)' : 'var(--red)';
+    // Per-color hints below status line
+    if(zeroColors.length > 0 && totalIn === 0) {
+      status.innerHTML += `<br><span style="font-size:.72rem;color:var(--muted);display:block;margin-top:4px;">
+        💡 Common causes: clothing covering tape · tape not facing camera · tape color too muted under gym lighting · shorts/sleeves blocking knee/shoulder markers
+      </span>`;
+    }
 
   } catch(e) {
     status.textContent = '⚠️ Test failed: ' + e.message;
@@ -8350,20 +8361,34 @@ async function runAnalysis() {
           let upgraded = 0;
           upgradeKeys.forEach(k => {
             if(denseAgg[k] && aggregated[k]) {
-              // Use dense max for valgus/adduction (worst-case peak matters)
-              // Use dense for ankle (more frames in stance window = better DF estimate)
               aggregated[k] = {
                 ...aggregated[k],
                 max: Math.max(aggregated[k].max, denseAgg[k].max),
                 min: Math.min(aggregated[k].min, denseAgg[k].min),
-                // keep avg from original phase-gated 8 frames (more representative)
               };
               upgraded++;
             } else if(denseAgg[k] && !aggregated[k]) {
-              aggregated[k] = denseAgg[k]; // dense found a metric the 8 frames missed
+              aggregated[k] = denseAgg[k];
               upgraded++;
             }
           });
+          // Landing only: upgrade peak knee flexion from dense pass.
+          // The 8-frame pass often misses the exact peak-flexion frame;
+          // dense 24-frame window is far more likely to capture it.
+          if(/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement)) {
+            ['Left Knee Flexion','Right Knee Flexion'].forEach(k => {
+              if(denseAgg[k] && aggregated[k]) {
+                aggregated[k] = {
+                  ...aggregated[k],
+                  min: Math.min(aggregated[k].min, denseAgg[k].min), // lower = more flexed = better peak
+                };
+                upgraded++;
+              } else if(denseAgg[k] && !aggregated[k]) {
+                aggregated[k] = denseAgg[k];
+                upgraded++;
+              }
+            });
+          }
           if(upgraded > 0) console.log(`[DensePass] Upgraded ${upgraded} peak metrics from dense curves`);
         }
       }
@@ -9146,6 +9171,15 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const peakNote = usePeak ? ' <span style="font-size:.65rem;color:var(--muted)">peak</span>' : '';
 
           let ankleCaveat = '';
+          // Trunk lean from frontal view uses MediaPipe 3D depth which is unreliable
+          // in the sagittal plane when the camera is positioned frontally. Flag it.
+          let trunkLeanCaveat = '';
+          if((label === 'Trunk Lean (peak)' || label === 'Trunk Lean') && cameraView === 'front') {
+            trunkLeanCaveat = `<tr><td colspan="4" style="font-size:.68rem;color:var(--amber);padding:2px 10px 8px;background:#fffbf0;">
+              ⚠️ <strong>Frontal-view note:</strong> Forward trunk lean is a sagittal-plane metric — accuracy is reduced from a frontal camera.
+              Value may be overestimated. Add a side-view video for reliable trunk lean measurement.
+            </td></tr>`;
+          }
           if(label === 'Ankle Dorsiflexion') {
             const lPlausible = lVal == null || (lVal >= -12 && lVal <= 35);
             const rPlausible = rVal == null || (rVal >= -12 && rVal <= 35);
@@ -9173,7 +9207,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
             <td>${lCell}</td>
             <td>${rCell}</td>
             <td class="ref">${ref}</td>
-          </tr>${ankleCaveat}`;
+          </tr>${ankleCaveat}${trunkLeanCaveat}`;
         });
         tableHtml += '</tbody></table>';
 
