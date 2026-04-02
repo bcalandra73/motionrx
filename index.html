@@ -547,7 +547,13 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             <div style="font-size:.68rem;color:var(--muted);margin-top:3px;">Sets ACL LSI threshold comparisons in the report</div>
           </div>
           <div class="form-group">
-            <label class="form-label">Protocol / Box Height</label>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+              <label class="form-label" style="margin-bottom:0;">Protocol / Box Height</label>
+              <button type="button" onclick="document.getElementById('jumpProtocolModal').classList.add('open')"
+                style="display:flex;align-items:center;gap:4px;background:var(--navy-light);border:1px solid var(--border);border-radius:5px;padding:3px 9px;font-family:'Inter',sans-serif;font-size:.72rem;font-weight:500;color:var(--navy-mid);cursor:pointer;">
+                ℹ️ Protocol guide
+              </button>
+            </div>
             <select id="jumpProtocol">
               <option value="">Standard / not specified</option>
               <option value="30cm">Drop Jump — 30cm box</option>
@@ -614,6 +620,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
                 <option value="left_knee">Left knee only</option>
                 <option value="right_knee">Right knee only</option>
                 <option value="both_knees">Both knees</option>
+                <option value="both_feet">Both feet</option>
               </select>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;padding-left:64px;">
@@ -643,6 +650,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
                 <option value="left_knee">Left knee only</option>
                 <option value="right_knee">Right knee only</option>
                 <option value="both_knees">Both knees</option>
+                <option value="both_feet">Both feet</option>
               </select>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;padding-left:64px;">
@@ -5160,7 +5168,8 @@ function extractAngles(lm, view='side', movement='') {
         const heelDy = heelLM.y - ankleLM.y;
         const heelLen = Math.hypot(heelDx, heelDy);
         if(heelLen < 0.005) return null;
-        if(heelLen > legLen * 0.8) return null; // heel too far from ankle — misplaced
+        const heelMaxRatio = (heelLM?.source?.includes('tape-')) ? 0.90 : 0.80;
+        if(heelLen > legLen * heelMaxRatio) return null; // heel too far from ankle — misplaced
         // Cross product sign gives eversion direction; magnitude gives angle
         const cross = (legDx / legLen) * (heelDy / heelLen) - (legDy / legLen) * (heelDx / heelLen);
         const dot   = (legDx / legLen) * (heelDx / heelLen) + (legDy / legLen) * (heelDy / heelLen);
@@ -5178,10 +5187,11 @@ function extractAngles(lm, view='side', movement='') {
       // Raised from 0.55 → 0.65: at 0.55 MediaPipe frequently places the heel at a
       // plausible-looking but wrong position (e.g. on the treadmill belt edge).
       const minHeelConf = 0.65;
+      const isTapeHeel = (lmItem) => lmItem?.source?.includes('tape-');
       const lKneePost = v(25), lAnkPost = v(27);
       const rKneePost = v(26), rAnkPost = v(28);
-      const lHeelPost = lm[29] && combinedConf(lm[29]) > minHeelConf ? lm[29] : null;
-      const rHeelPost = lm[30] && combinedConf(lm[30]) > minHeelConf ? lm[30] : null;
+      const lHeelPost = lm[29] && (isTapeHeel(lm[29]) || combinedConf(lm[29]) > minHeelConf) ? lm[29] : null;
+      const rHeelPost = lm[30] && (isTapeHeel(lm[30]) || combinedConf(lm[30]) > minHeelConf) ? lm[30] : null;
 
       // Only compute pronation when the ankle is clearly in stance (near the belt).
       // Stance proxy: ankle Y > 0.60 (ankle in lower 40% of frame).
@@ -7323,6 +7333,7 @@ async function refineFootLandmarks(imageBase64, coarseLandmarks) {
         _wx: ref._wx ?? orig?._wx ?? null,
         _wy: ref._wy ?? orig?._wy ?? null,
         _wz: ref._wz ?? orig?._wz ?? null,
+        presence: Math.max(orig?.presence ?? 0, refConf), // boost presence to match refined visibility
         source: `foot-refined(was-${origConf.toFixed(2)}→${refConf.toFixed(2)})`,
       };
     });
@@ -7523,6 +7534,7 @@ function readTapeConfig() {
     left_knee:  {knee:25},
     right_knee: {knee:26},
     both_knees: {knee:[25,26]},
+    both_feet:  {ankle:[27,28], heel:[29,30], toe:[31,32]},
   };
 
   const readColor = (suffix) => {
@@ -7562,7 +7574,7 @@ async function detectColorBlobs(imageBase64, colorName, minPixels = 15, maxPixel
   // robust even under variable gym/field lighting.
   const HSV = {
     orange: (h,s,v) => (h>=14&&h<=40)   && s>0.62 && v>0.52, // neon: high S eliminates skin (S<0.55)
-    green:  (h,s,v) => (h>=72&&h<=145)  && s>0.52 && v>0.30, // neon green vs background foliage
+    green:  (h,s,v) => (h>=72&&h<=145)  && s>0.45 && v>0.28, // relaxed slightly for indoor flat lighting
     yellow: (h,s,v) => (h>=40&&h<=70)   && s>0.60 && v>0.55,
     blue:   (h,s,v) => (h>=192&&h<=255) && s>0.50 && v>0.20,
     pink:   (h,s,v) => (h>=278&&h<=348) && s>0.50 && v>0.42,
@@ -7796,6 +7808,7 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
           x:          bestBlob.x,
           y:          bestBlob.y,
           visibility: Math.max(origConf, 0.88),
+          presence:   Math.max(prior?.presence ?? 0, 0.88), // tape blob = physically confirmed → boost presence too
           source:     `tape-${colorConf.color}(was-${origConf.toFixed(2)},d=${bestDist.toFixed(3)},px=${bestBlob.pixelCount})`,
         };
         console.log(`[TapeRefine] LM${tgt.idx}(${tgt.loc}) ← ${colorConf.color} blob @(${bestBlob.x.toFixed(3)},${bestBlob.y.toFixed(3)}) dist=${bestDist.toFixed(3)} px=${bestBlob.pixelCount}`);
@@ -10771,5 +10784,66 @@ window.addEventListener('unhandledrejection', e => {
 });
 
 </script>
+
+<!-- Jump Protocol Guide Modal -->
+<div class="guide-modal" id="jumpProtocolModal">
+  <div class="guide-box" style="max-width:560px;max-height:82vh;overflow-y:auto;">
+    <h3>Jump &amp; Landing Protocols</h3>
+    <div class="guide-sub">Select the protocol that matches your clinical assessment goals. Each targets different aspects of neuromuscular control and ACL risk.</div>
+
+    <div class="guide-tip">
+      <div class="guide-icon">📦</div>
+      <div class="guide-tip-text">
+        <strong>Drop Jump — 30cm box</strong>
+        <span>Subject steps (does not jump) off a 30cm box and lands bilaterally. Standard ACL screening height. Assesses knee valgus at initial contact, hip/knee flexion depth, and bilateral landing symmetry. Recommended starting point for all patients.</span>
+      </div>
+    </div>
+    <div class="guide-tip">
+      <div class="guide-icon">📦</div>
+      <div class="guide-tip-text">
+        <strong>Drop Jump — 45cm box</strong>
+        <span>Higher-demand version for competitive athletes. The increased drop height amplifies valgus tendencies, making it more sensitive for ACL risk stratification. Use after the 30cm screen shows compensations worth further stress-testing.</span>
+      </div>
+    </div>
+    <div class="guide-tip">
+      <div class="guide-icon">⬆️</div>
+      <div class="guide-tip-text">
+        <strong>Drop Vertical Jump (DVJ)</strong>
+        <span>Drop from box then immediately perform a maximal vertical jump. Combines eccentric loading with explosive concentric demand. Used in the Hewett et al. ACL injury prediction research. Key metric: knee abduction angle and moment at initial contact.</span>
+      </div>
+    </div>
+    <div class="guide-tip">
+      <div class="guide-icon">🦘</div>
+      <div class="guide-tip-text">
+        <strong>Countermovement Jump (CMJ)</strong>
+        <span>Standing bilateral jump — rapidly descend then jump maximally. No box required. Assesses reactive neuromuscular power and landing symmetry. Standard athlete monitoring tool. Also used to measure fatigue-related landing quality changes.</span>
+      </div>
+    </div>
+    <div class="guide-tip">
+      <div class="guide-icon">🦵</div>
+      <div class="guide-tip-text">
+        <strong>Single-Leg Landing</strong>
+        <span>Step or drop off a surface and land on one limb. Direct simulation of the ACL injury mechanism (sudden deceleration, single-leg loading). Highest clinical challenge. Asymmetry in landing strategy is the primary return-to-sport risk indicator. Requires 120fps+ for reliable contact detection.</span>
+      </div>
+    </div>
+    <div class="guide-tip">
+      <div class="guide-icon">🏃</div>
+      <div class="guide-tip-text">
+        <strong>Tuck Jump</strong>
+        <span>Bilateral jump bringing both knees to the chest. Myer et al. Tuck Jump Assessment (TJA) — 10-item observational checklist. Standard ACL risk screen, particularly validated for female athletes. Key observations: knee valgus, foot separation, asymmetric arm swing, landing stiffness.</span>
+      </div>
+    </div>
+    <div class="guide-tip" style="border-bottom:none;">
+      <div class="guide-icon">↔️</div>
+      <div class="guide-tip-text">
+        <strong>Triple Hop for Distance</strong>
+        <span>Three consecutive maximal single-leg hops for maximum distance. Limb Symmetry Index (LSI) standard: LSI &gt;90% is the typical return-to-sport threshold. Record both limbs. MotionRx measures landing mechanics on each contact; distance must be measured manually and entered in clinical notes.</span>
+      </div>
+    </div>
+
+    <button class="guide-close" onclick="document.getElementById('jumpProtocolModal').classList.remove('open')">Got it</button>
+  </div>
+</div>
+
 </body>
 </html>
