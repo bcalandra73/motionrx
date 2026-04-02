@@ -9,7 +9,7 @@
 <!-- Legacy @mediapipe/pose loaded on-demand inside initMediaPipeLegacyFallback() only if new API fails -->
 <script src="https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js" crossorigin="anonymous" onerror="(function(){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';s.crossOrigin='anonymous';document.head.appendChild(s);})()"></script>
 <script src="https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js" crossorigin="anonymous" onerror="(function(){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js';s.crossOrigin='anonymous';document.head.appendChild(s);})()"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous" onerror="(function(){var s=document.createElement('script');s.src='https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js';s.crossOrigin='anonymous';document.head.appendChild(s);})()"></script>
 <style>
 :root {
   --navy:#0f2744; --navy-mid:#1a3a5c; --navy-light:#e8f0f8;
@@ -9185,6 +9185,24 @@ function clearSavedSessions() {
 
 // ── PDF Export ──
 async function exportPDF() {
+  // Guard: window.jspdf may be undefined if CDN failed to load at page start.
+  // Attempt a dynamic on-demand load before giving up.
+  if(!window.jspdf) {
+    try {
+      await new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = 'https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js';
+        s.crossOrigin = 'anonymous';
+        s.onload = res;
+        s.onerror = () => rej(new Error('jsPDF CDN unreachable'));
+        document.head.appendChild(s);
+      });
+    } catch(e) {
+      alert('PDF library failed to load — check your internet connection and try again.');
+      return;
+    }
+  }
+  if(!window.jspdf) { alert('PDF library not available — please reload the page.'); return; }
   const { jsPDF } = window.jspdf;
   if(!jsPDF) { alert('PDF library not loaded — please check your internet connection.'); return; }
 
