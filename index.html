@@ -340,6 +340,29 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .tape-loc-chip{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border:1.5px solid var(--border);border-radius:5px;cursor:pointer;font-size:.76rem;color:var(--muted);user-select:none;background:var(--surface);transition:all .15s}
 .tape-loc-chip:has(input:checked){border-color:var(--teal);color:var(--teal);background:var(--teal-light);font-weight:500}
 .tape-loc-chip input{display:none}
+
+/* ── Landmark Review Panel ── */
+#reviewPanel{display:none;padding:24px 0;background:var(--bg);}
+.review-panel-inner{max-width:1040px;margin:0 auto;padding:0 24px;}
+.review-header{margin-bottom:18px;}
+.review-header h2{font-family:'Source Serif 4',serif;font-size:1.3rem;font-weight:600;color:var(--navy);margin-bottom:4px;}
+.review-header p{font-size:.82rem;color:var(--muted);}
+.review-thumbs{display:flex;gap:8px;margin-bottom:16px;overflow-x:auto;padding-bottom:8px;}
+.review-thumb{cursor:pointer;border:2px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0;width:130px;background:var(--surface);box-shadow:var(--shadow);transition:border-color .15s;position:relative;}
+.review-thumb:hover{border-color:var(--teal);}
+.review-thumb.rt-active{border-color:var(--teal);box-shadow:0 0 0 3px rgba(14,124,106,.18);}
+.review-thumb.rt-edited::after{content:'✎';position:absolute;top:5px;right:5px;background:var(--teal);color:#fff;font-size:.68rem;font-weight:700;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;line-height:18px;text-align:center;}
+.review-thumb img{width:100%;display:block;max-height:90px;object-fit:cover;}
+.review-thumb-label{font-size:.64rem;font-weight:700;color:var(--navy);padding:4px 6px;background:rgba(255,255,255,.92);text-align:center;text-transform:uppercase;letter-spacing:.04em;border-top:1px solid var(--border);}
+.review-canvas-wrap{background:#111;border-radius:10px;overflow:hidden;margin-bottom:12px;position:relative;cursor:crosshair;}
+#reviewCanvas{display:block;width:100%;height:auto;touch-action:none;user-select:none;}
+.review-hint{font-size:.76rem;color:var(--muted);margin-bottom:14px;padding:9px 14px;background:var(--navy-light);border-radius:6px;line-height:1.6;}
+.review-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+.review-btn-secondary{padding:9px 18px;border:1px solid var(--border);background:var(--surface);color:var(--navy-mid);border-radius:6px;font-family:'Inter',sans-serif;font-size:.82rem;font-weight:500;cursor:pointer;transition:all .15s;}
+.review-btn-secondary:hover{border-color:var(--teal);color:var(--teal);}
+.review-btn-proceed{padding:11px 28px;border:none;background:var(--navy);color:#fff;border-radius:8px;font-family:'Inter',sans-serif;font-size:.9rem;font-weight:600;cursor:pointer;transition:background .2s;display:flex;align-items:center;gap:8px;margin-left:auto;}
+.review-btn-proceed:hover{background:var(--teal);}
+.review-frame-info{font-size:.74rem;color:var(--muted);margin-top:6px;text-align:center;}
 </style>
 </head>
 <body>
@@ -948,6 +971,13 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     </div>
 
     <div class="error-box" id="errorBox"></div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 14px;background:var(--navy-light);border-radius:8px;border:1px solid var(--border);">
+      <input type="checkbox" id="enableLandmarkReview" style="width:16px;height:16px;accent-color:var(--teal);flex-shrink:0;">
+      <label for="enableLandmarkReview" style="cursor:pointer;">
+        <span style="font-size:.82rem;font-weight:600;color:var(--navy);">✏️ Review &amp; correct landmarks before report</span>
+        <span style="display:block;font-size:.72rem;color:var(--muted);margin-top:1px;">Pause after tracking to drag any misplaced joint markers to the correct position</span>
+      </label>
+    </div>
     <button class="analyze-btn" onclick="runAnalysis()">
       <span>🔬</span> Generate Clinical Report
     </button>
@@ -970,7 +1000,36 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
   </div>
 
   <!-- RESULTS -->
-  <div id="resultsSection">
+  
+<!-- Landmark Review & Correction Panel -->
+<div id="reviewPanel">
+  <div class="review-panel-inner">
+    <div class="review-header">
+      <h2>Review Landmark Positions</h2>
+      <p>MediaPipe has placed joint markers on each frame. Click a frame thumbnail, then <strong>drag any misplaced marker</strong> to its correct anatomical position. Edited frames show a ✎ badge. When done, click Generate Report.</p>
+    </div>
+    <div class="review-thumbs" id="reviewThumbs"></div>
+    <div class="review-canvas-wrap">
+      <canvas id="reviewCanvas"></canvas>
+    </div>
+    <div class="review-frame-info" id="reviewFrameInfo"></div>
+    <div class="review-hint">
+      🎯 <strong>Drag tip:</strong> Grab any coloured dot and drag it to the correct joint position.
+      <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#06b6d4;display:inline-block;"></span>Hips</span>
+      <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#3b82f6;display:inline-block;"></span>Knees</span>
+      <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#fbbf24;display:inline-block;"></span>Ankles</span>
+      <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#a3e635;display:inline-block;"></span>Heel/Toe</span>
+      <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#e879f9;display:inline-block;"></span>Shoulders</span>
+    </div>
+    <div class="review-actions">
+      <button class="review-btn-secondary" onclick="resetReviewFrame()">↺ Reset this frame</button>
+      <button class="review-btn-secondary" onclick="resetAllReviewFrames()">↺ Reset all frames</button>
+      <button class="review-btn-proceed" onclick="proceedFromReview()">🔬 Generate Report →</button>
+    </div>
+  </div>
+</div>
+
+<div id="resultsSection">
     <div class="report-header">
       <div>
         <div class="report-title">Clinical Motion Assessment Report</div>
@@ -7835,6 +7894,277 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
   return merged;
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Landmark Review & Correction Module
+// ══════════════════════════════════════════════════════════════════════════════
+
+let _rvLandmarks    = null;  // [frameIdx] → [33 landmarks] (mutable clones)
+let _rvOriginals    = null;  // [frameIdx] → [33 landmarks] (immutable reference)
+let _rvRawFrames    = null;  // extractedFrames reference
+let _rvAnnotated    = null;  // annotatedFrames reference (updated after edit)
+let _rvFusedResults = null;  // fusedResults reference
+let _rvActiveFrame  = 0;
+let _rvEdited       = [];    // bool per frame
+let _rvResolve      = null;  // Promise resolver
+let _rvDragging     = null;  // {lmIdx} | null
+let _rvImgCache     = {};    // frameIdx → ImageBitmap/Image
+
+// Landmark styling
+const _RV_PRIMARY   = new Set([11,12,23,24,25,26,27,28,29,30,31,32]);
+const _RV_SECONDARY = new Set([0,13,14,15,16]);
+const _RV_COLOR = (i) => {
+  if(i===23||i===24) return '#06b6d4';
+  if(i===25||i===26) return '#3b82f6';
+  if(i===27||i===28) return '#fbbf24';
+  if(i===29||i===30||i===31||i===32) return '#a3e635';
+  if(i===11||i===12) return '#e879f9';
+  if(i===13||i===14||i===15||i===16) return '#fb923c';
+  return '#94a3b8';
+};
+const _RV_CONNECTIONS = [
+  [0,11],[0,12],[11,12],[11,23],[12,24],[23,24],
+  [23,25],[24,26],[25,27],[26,28],
+  [27,29],[28,30],[29,31],[30,32],
+  [13,15],[14,16],[11,13],[12,14],
+];
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFrames, fusedResults) {
+  return new Promise(resolve => {
+    _rvResolve      = resolve;
+    _rvRawFrames    = extractedFrames;
+    _rvAnnotated    = annotatedFrames;
+    _rvFusedResults = fusedResults;
+    _rvEdited       = new Array(extractedFrames.length).fill(false);
+    _rvImgCache     = {};
+
+    // Deep clone landmarks so originals are preserved for reset
+    _rvOriginals = refinedLandmarks.map(lms =>
+      lms ? lms.map(lm => lm ? {...lm} : null) : null
+    );
+    _rvLandmarks = refinedLandmarks.map(lms =>
+      lms ? lms.map(lm => lm ? {...lm} : null) : null
+    );
+
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('reviewPanel').style.display  = 'block';
+    window.scrollTo({top:0, behavior:'smooth'});
+
+    _rvBuildThumbs();
+    _rvShowFrame(0);
+  });
+}
+
+// ── Build thumbnail strip ─────────────────────────────────────────────────────
+function _rvBuildThumbs() {
+  const strip = document.getElementById('reviewThumbs');
+  strip.innerHTML = '';
+  (_rvAnnotated || _rvRawFrames).forEach((fr, i) => {
+    const card = document.createElement('div');
+    card.className = 'review-thumb' + (i===0?' rt-active':'');
+    card.onclick = () => _rvShowFrame(i);
+    card.id = `_rvThumb_${i}`;
+
+    const img = document.createElement('img');
+    img.src = 'data:image/jpeg;base64,' + (fr.base64 || _rvRawFrames[i].imageData);
+    img.style.cssText = 'width:100%;max-height:90px;object-fit:cover;display:block;';
+    card.appendChild(img);
+
+    const lbl = document.createElement('div');
+    lbl.className = 'review-thumb-label';
+    lbl.textContent = _rvRawFrames[i].phase
+      ? _rvRawFrames[i].phase.replace(/-/g,' ')
+      : `Frame ${i+1}`;
+    card.appendChild(lbl);
+    strip.appendChild(card);
+  });
+}
+
+// ── Switch active frame ───────────────────────────────────────────────────────
+function _rvShowFrame(idx) {
+  _rvActiveFrame = idx;
+  // Update thumb highlighting
+  document.querySelectorAll('.review-thumb').forEach((el,i) => {
+    el.classList.toggle('rt-active', i===idx);
+  });
+  const total = _rvRawFrames.length;
+  document.getElementById('reviewFrameInfo').textContent =
+    `Frame ${idx+1} of ${total}${_rvEdited[idx]?' — edited ✎':''}`;
+  _rvRenderCanvas();
+}
+
+// ── Render canvas for current frame ─────────────────────────────────────────
+function _rvRenderCanvas() {
+  const cv = document.getElementById('reviewCanvas');
+  const ctx = cv.getContext('2d');
+  const fi  = _rvActiveFrame;
+  const b64 = _rvRawFrames[fi]?.imageData;
+  if(!b64) return;
+
+  const img = new Image();
+  img.onload = () => {
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    cv.width  = img.naturalWidth  * dpr;
+    cv.height = img.naturalHeight * dpr;
+    cv.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+    ctx.scale(dpr, dpr);
+    const W = img.naturalWidth, H = img.naturalHeight;
+    ctx.drawImage(img, 0, 0, W, H);
+    _rvDrawSkeleton(ctx, W, H, _rvLandmarks[fi]);
+  };
+  img.src = 'data:image/jpeg;base64,' + b64;
+}
+
+// ── Draw skeleton on canvas ───────────────────────────────────────────────────
+function _rvDrawSkeleton(ctx, W, H, lms) {
+  if(!lms) return;
+  const conf = (i) => lms[i]?.visibility ?? 0;
+
+  // Connections
+  ctx.lineWidth = Math.max(1.5, W/300);
+  _RV_CONNECTIONS.forEach(([a,b]) => {
+    const la = lms[a], lb = lms[b];
+    if(!la||!lb||conf(a)<0.15||conf(b)<0.15) return;
+    const c = Math.min(conf(a), conf(b));
+    ctx.globalAlpha = 0.55 + c*0.35;
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.beginPath();
+    ctx.moveTo(la.x*W, la.y*H);
+    ctx.lineTo(lb.x*W, lb.y*H);
+    ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+
+  // Landmarks
+  lms.forEach((lm, i) => {
+    if(!lm || (lm.visibility||0) < 0.12) return;
+    const isPrimary = _RV_PRIMARY.has(i);
+    const isSecondary = _RV_SECONDARY.has(i);
+    if(!isPrimary && !isSecondary) return;
+    const r = isPrimary ? Math.max(8, W/65) : Math.max(5, W/95);
+    const col = _RV_COLOR(i);
+
+    ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r+2.5, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r, 0, Math.PI*2);
+    ctx.fillStyle = col; ctx.fill();
+    // White dot center for grab affordance
+    if(isPrimary) {
+      ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r*0.32, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+    }
+    // Manual-corrected star
+    if(lm.source === 'manual-corrected') {
+      ctx.font = `bold ${Math.max(9,W/100)}px sans-serif`;
+      ctx.fillStyle = '#fff';
+      ctx.fillText('✎', lm.x*W + r + 2, lm.y*H - r);
+    }
+  });
+}
+
+// ── Find nearest draggable landmark ──────────────────────────────────────────
+function _rvNearestLM(normX, normY) {
+  const lms = _rvLandmarks[_rvActiveFrame];
+  if(!lms) return null;
+  let best = null, bestD = Infinity;
+  lms.forEach((lm, i) => {
+    if(!lm || !(_RV_PRIMARY.has(i)||_RV_SECONDARY.has(i))) return;
+    if((lm.visibility||0) < 0.12) return;
+    const dx = lm.x - normX, dy = lm.y - normY;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    if(d < bestD) { bestD = d; best = {i, d}; }
+  });
+  // Accept nearest within 0.08 normalised (generous for touch)
+  return (best && best.d < 0.08) ? best.i : null;
+}
+
+// ── Canvas input helpers ──────────────────────────────────────────────────────
+function _rvCanvasNorm(clientX, clientY) {
+  const cv   = document.getElementById('reviewCanvas');
+  const rect = cv.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left)  / rect.width,
+    y: (clientY - rect.top)   / rect.height,
+  };
+}
+function _rvHandleStart(clientX, clientY) {
+  const {x, y} = _rvCanvasNorm(clientX, clientY);
+  const li = _rvNearestLM(x, y);
+  if(li != null) {
+    _rvDragging = li;
+    document.getElementById('reviewCanvas').style.cursor = 'grabbing';
+  }
+}
+function _rvHandleMove(clientX, clientY) {
+  if(_rvDragging == null) return;
+  const {x, y} = _rvCanvasNorm(clientX, clientY);
+  const lms = _rvLandmarks[_rvActiveFrame];
+  if(!lms || !lms[_rvDragging]) return;
+  lms[_rvDragging] = {
+    ...lms[_rvDragging],
+    x: Math.max(0, Math.min(1, x)),
+    y: Math.max(0, Math.min(1, y)),
+    visibility: 0.98,
+    presence: 0.98,
+    source: 'manual-corrected',
+  };
+  _rvEdited[_rvActiveFrame] = true;
+  // Badge the thumbnail
+  const thumb = document.getElementById(`_rvThumb_${_rvActiveFrame}`);
+  if(thumb) thumb.classList.add('rt-edited');
+  document.getElementById('reviewFrameInfo').textContent =
+    `Frame ${_rvActiveFrame+1} of ${_rvRawFrames.length} — edited ✎`;
+  _rvRenderCanvas();
+}
+function _rvHandleEnd() {
+  _rvDragging = null;
+  document.getElementById('reviewCanvas').style.cursor = 'crosshair';
+}
+
+// ── Attach canvas event listeners (called once on DOM ready) ─────────────────
+function _rvAttachCanvasEvents() {
+  const cv = document.getElementById('reviewCanvas');
+  if(!cv) return;
+  cv.addEventListener('mousedown',  e => { e.preventDefault(); _rvHandleStart(e.clientX, e.clientY); });
+  cv.addEventListener('mousemove',  e => { _rvHandleMove(e.clientX, e.clientY); });
+  cv.addEventListener('mouseup',    () => _rvHandleEnd());
+  cv.addEventListener('mouseleave', () => _rvHandleEnd());
+  cv.addEventListener('touchstart', e => { e.preventDefault(); _rvHandleStart(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
+  cv.addEventListener('touchmove',  e => { e.preventDefault(); _rvHandleMove(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
+  cv.addEventListener('touchend',   e => { e.preventDefault(); _rvHandleEnd(); }, {passive:false});
+}
+document.addEventListener('DOMContentLoaded', _rvAttachCanvasEvents);
+
+// ── Reset buttons ─────────────────────────────────────────────────────────────
+function resetReviewFrame() {
+  const fi = _rvActiveFrame;
+  _rvLandmarks[fi] = _rvOriginals[fi]
+    ? _rvOriginals[fi].map(lm => lm ? {...lm} : null) : null;
+  _rvEdited[fi] = false;
+  const thumb = document.getElementById(`_rvThumb_${fi}`);
+  if(thumb) thumb.classList.remove('rt-edited');
+  document.getElementById('reviewFrameInfo').textContent =
+    `Frame ${fi+1} of ${_rvRawFrames.length}`;
+  _rvRenderCanvas();
+}
+function resetAllReviewFrames() {
+  if(!confirm('Reset all frames to original landmark positions?')) return;
+  _rvLandmarks = _rvOriginals.map(lms =>
+    lms ? lms.map(lm => lm ? {...lm} : null) : null
+  );
+  _rvEdited.fill(false);
+  document.querySelectorAll('.review-thumb').forEach(el => el.classList.remove('rt-edited'));
+  _rvRenderCanvas();
+}
+
+// ── Proceed to report ─────────────────────────────────────────────────────────
+function proceedFromReview() {
+  document.getElementById('reviewPanel').style.display = 'none';
+  document.getElementById('loadingState').style.display = 'block';
+  if(_rvResolve) { _rvResolve(_rvLandmarks); _rvResolve = null; }
+}
+
 // ── Dense Dynamic Analysis Pass ──────────────────────────────────────────────────
 // Runs MediaPipe Heavy on 24-32 frames within the clinically critical movement window,
 // then applies foot landmark refinement to each frame.
@@ -8263,6 +8593,31 @@ async function runAnalysis() {
       if(mpResult && mpResult.poseLandmarks) {
         allAngles.push(extractAngles(mpResult.poseLandmarks, cameraView, movement));
       }
+    }
+
+    // ── Optional Landmark Review & Correction ────────────────────────────────
+    // If the user checked "Review & correct landmarks", pause here, show the
+    // interactive editor, and wait for them to click "Generate Report".
+    // After they confirm, re-draw skeletons and re-extract angles for edited frames.
+    if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
+      const correctedLms = await showLandmarkReviewPanel(
+        extractedFrames, refinedLandmarks, annotatedFrames, fusedResults
+      );
+      // Re-process only edited frames
+      for(let _ri = 0; _ri < extractedFrames.length; _ri++) {
+        if(!_rvEdited[_ri] || !correctedLms[_ri]) continue;
+        const corrMpResult = {poseLandmarks: correctedLms[_ri], _raw: fusedResults[_ri]?._raw};
+        // Re-draw skeleton with corrected landmarks
+        const redrawn = await drawSkeleton(
+          extractedFrames[_ri].imageData, corrMpResult, null, cameraView, extractedFrames[_ri].phase
+        );
+        annotatedFrames[_ri] = {base64: redrawn.base64, canvas: redrawn.canvas, phase: extractedFrames[_ri].phase};
+        // Re-extract angles — only re-export if allAngles already has an entry at this index
+        if(_ri < allAngles.length) {
+          allAngles[_ri] = extractAngles(correctedLms[_ri], cameraView, movement);
+        }
+      }
+      console.log(`[Review] Applied corrections to ${_rvEdited.filter(Boolean).length} frame(s)`);
     }
   } else {
     // No MediaPipe — raw frames, still attempt color-based bar detection
