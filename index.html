@@ -7396,7 +7396,8 @@ async function runTapeDetectionTest() {
     };
 
     for(const conf of colors) {
-      const blobs = await detectColorBlobs(imgB64, conf.color, 5); // low threshold for preview
+      const roiTest = computeTapeROI(null, conf); // null landmarks → full-frame ROI for preview
+      const blobs = await detectColorBlobs(imgB64, conf.color, 5, 300, roiTest); // low threshold for preview
       colorLabels.push(`${conf.color}: ${blobs.length} blob${blobs.length!==1?'s':''}`);
       totalFound += blobs.length;
 
@@ -7493,17 +7494,17 @@ function readTapeConfig() {
 // Returns: array of {x, y, pixelCount, widthPx, heightPx} sorted by pixelCount desc
 //          x/y are normalized 0-1 frame coordinates of blob centroid.
 //
-async function detectColorBlobs(imageBase64, colorName, minPixels = 15) {
+async function detectColorBlobs(imageBase64, colorName, minPixels = 15, maxPixels = 220, roi = null) {
   // HSV match functions — neon tape has high saturation and value, making it
   // robust even under variable gym/field lighting.
   const HSV = {
-    orange: (h,s,v) => (h>=12&&h<=42)   && s>0.42 && v>0.30, // relaxed for gym LED lighting
-    green:  (h,s,v) => (h>=72&&h<=145)  && s>0.38 && v>0.26, // relaxed for gym LED lighting
-    yellow: (h,s,v) => (h>=40&&h<=70)   && s>0.48 && v>0.45,
-    blue:   (h,s,v) => (h>=192&&h<=255) && s>0.42 && v>0.16,
-    pink:   (h,s,v) => (h>=280&&h<=348) && s>0.30 && v>0.36,
-    red:    (h,s,v) => (h>=338||h<=14)  && s>0.48 && v>0.28,
-    white:  (h,s,v) => v>0.80 && s<0.20,
+    orange: (h,s,v) => (h>=14&&h<=40)   && s>0.62 && v>0.52, // neon: high S eliminates skin (S<0.55)
+    green:  (h,s,v) => (h>=72&&h<=145)  && s>0.52 && v>0.30, // neon green vs background foliage
+    yellow: (h,s,v) => (h>=40&&h<=70)   && s>0.60 && v>0.55,
+    blue:   (h,s,v) => (h>=192&&h<=255) && s>0.50 && v>0.20,
+    pink:   (h,s,v) => (h>=278&&h<=348) && s>0.50 && v>0.42,
+    red:    (h,s,v) => (h>=338||h<=12)  && s>0.60 && v>0.35,
+    white:  (h,s,v) => v>0.85 && s<0.15,
   };
   const matchFn = HSV[colorName];
   if(!matchFn) return [];
@@ -7589,7 +7590,14 @@ async function detectColorBlobs(imageBase64, colorName, minPixels = 15) {
       }
 
       const blobs = Object.values(stats)
-        .filter(s => s.n >= minPixels)
+        .filter(s => s.n >= minPixels && s.n <= maxPixels)
+        .filter(s => {
+          // ROI gate: discard blobs whose centroid falls outside the search region
+          if(!roi) return true;
+          const cx = s.sx/s.n/W, cy = s.sy/s.n/H;
+          return cx >= (roi.xMin||0) && cx <= (roi.xMax||1)
+              && cy >= (roi.yMin||0) && cy <= (roi.yMax||1);
+        })
         .map(s => ({
           x: s.sx/s.n/W,  // normalized centroid
           y: s.sy/s.n/H,
@@ -7612,6 +7620,67 @@ async function detectColorBlobs(imageBase64, colorName, minPixels = 15) {
 // claim their nearest blob first to resolve 3-blob (ankle+heel+toe) ambiguity.
 // Called after refineFootLandmarks() in both 8-frame and dense passes.
 //
+
+// ── Tape Search ROI ───────────────────────────────────────────────────────────
+// Computes a normalized [0-1] bounding box for the blob search based on which
+// landmarks the color is assigned to. Restricts detection to anatomically
+// plausible regions, eliminating skin, faces, and background objects.
+//
+//  Ankle / heel / toe  → search from just above the highest knee to frame bottom
+//  Knee                → search in a band around the knee landmarks
+//  Fallback            → full frame (no constraint)
+//
+// xBounds are derived from the outermost visible hip/ankle/knee landmarks plus
+// a 35% margin on each side — wide enough for arm swing but excludes far edges.
+//
+function computeTapeROI(landmarks, colorConf) {
+  const lm = landmarks;
+  if(!lm || !colorConf?.locs) return null;
+
+  const v = (i) => (lm[i] && (lm[i].visibility||0) > 0.20) ? lm[i] : null;
+  const hasAnkleHeel = colorConf.locs.some(l => l === 'ankle' || l === 'heel' || l === 'toe');
+  const hasKnee      = colorConf.locs.includes('knee');
+
+  // ── Y bounds ──
+  let yMin = 0, yMax = 1;
+
+  if(hasAnkleHeel) {
+    // Search from just above the HIGHER of the two knee landmarks
+    const lKnee = v(25), rKnee = v(26);
+    const kneeYs = [lKnee?.y, rKnee?.y].filter(y => y != null);
+    if(kneeYs.length) {
+      yMin = Math.max(0, Math.min(...kneeYs) - 0.06); // 6% above the higher knee
+    } else {
+      yMin = 0.45; // fallback: bottom 55% of frame
+    }
+    yMax = 1.0;
+  } else if(hasKnee && !hasAnkleHeel) {
+    // Search in a band around the knee landmarks
+    const lKnee = v(25), rKnee = v(26);
+    const lHip  = v(23), rHip  = v(24);
+    const kneeYs = [lKnee?.y, rKnee?.y].filter(y => y != null);
+    const hipYs  = [lHip?.y,  rHip?.y ].filter(y => y != null);
+    if(kneeYs.length) {
+      const kneeTop = Math.min(...kneeYs);
+      const hipBase = hipYs.length ? Math.max(...hipYs) : kneeTop - 0.25;
+      yMin = Math.max(0,   hipBase  - 0.05);
+      yMax = Math.min(1.0, Math.max(...kneeYs) + 0.12);
+    }
+  }
+
+  // ── X bounds — body column ± 35% frame width ──
+  const bodyXs = [23,24,25,26,27,28].map(i => v(i)?.x).filter(x => x != null);
+  let xMin = 0, xMax = 1;
+  if(bodyXs.length >= 2) {
+    const bodyL = Math.min(...bodyXs);
+    const bodyR = Math.max(...bodyXs);
+    xMin = Math.max(0,   bodyL - 0.35);
+    xMax = Math.min(1.0, bodyR + 0.35);
+  }
+
+  return {yMin, yMax, xMin, xMax};
+}
+
 async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
   if(!tapeConfig || !landmarks) return landmarks;
 
@@ -7620,7 +7689,8 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
   const processColor = async (colorConf) => {
     if(!colorConf?.indices?.length) return;
 
-    const blobs = await detectColorBlobs(imageBase64, colorConf.color);
+    const roi   = computeTapeROI(merged, colorConf);
+    const blobs = await detectColorBlobs(imageBase64, colorConf.color, 15, 220, roi);
     if(!blobs.length) {
       console.log(`[TapeRefine] 0 blobs found for color=${colorConf.color}`);
       return;
