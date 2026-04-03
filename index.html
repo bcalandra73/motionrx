@@ -7973,7 +7973,7 @@ function _rvBuildThumbs() {
 
     const lbl = document.createElement('div');
     lbl.className = 'review-thumb-label';
-    lbl.textContent = _rvRawFrames[i].phase
+    lbl.textContent = (typeof _rvRawFrames[i].phase === 'string')
       ? _rvRawFrames[i].phase.replace(/-/g,' ')
       : `Frame ${i+1}`;
     card.appendChild(lbl);
@@ -7989,8 +7989,9 @@ function _rvShowFrame(idx) {
     el.classList.toggle('rt-active', i===idx);
   });
   const total = _rvRawFrames.length;
+  const phaseLabel = (typeof (_rvRawFrames[idx]?.phase) === 'string') ? ' — ' + _rvRawFrames[idx].phase.replace(/-/g,' ') : '';
   document.getElementById('reviewFrameInfo').textContent =
-    `Frame ${idx+1} of ${total}${_rvEdited[idx]?' — edited ✎':''}`;
+    `Frame ${idx+1} of ${total}${phaseLabel}${_rvEdited[idx]?' — edited ✎':''}`;
   _rvRenderCanvas();
 }
 
