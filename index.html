@@ -5073,6 +5073,9 @@ function extractAngles(lm, view='side', movement='') {
     return Math.abs(ankleLM._wz - kneeLM._wz) > 0.48;
   };
 
+  // Ankle DF is a sagittal-plane metric — only valid from side view.
+  // From frontal/posterior, knee→ankle→toe angle is a frontal-plane projection and meaningless.
+  if(!isFrontalView) {
   if(lKneeP && lAnkleP && lDistalPick && !worldZReject(lAnkleP, lKneeP)) {
     const raw = calcAngle(lKneeP, lAnkleP, lDistalPick.lm);
     if(raw != null) {
@@ -5099,6 +5102,7 @@ function extractAngles(lm, view='side', movement='') {
       }
     }
   }
+  } // end !isFrontalView
 
   // ── Frontal-plane metrics (front/posterior view only) ─────────────────────
   // These are physically invalid from a side view — only compute when frontal.
