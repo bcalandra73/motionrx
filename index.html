@@ -7028,14 +7028,15 @@ function renderStrideMetrics(metrics, aggregated={}) {
     level==='ok' ? 'stride-kpi-flag-ok' : level==='warn' ? 'stride-kpi-flag-warn'
     : level==='info' ? '' : 'stride-kpi-flag-poor';
 
-  // ── Archetype tile ──
+  // ── Archetype tile (built here, prepended to html after html is initialised) ──
   const _arch = classifyRunningArchetype(metrics, aggregated);
+  let _archHtml = '';
   if(_arch && _arch.primary) {
     const _p = _arch.primary, _s = _arch.secondary;
     const _drvHtml = (drv, col) => drv.map(d =>
       '<span style="background:' + col + '18;color:' + col + ';font-size:.68rem;font-weight:600;padding:2px 8px;border-radius:12px;">' + d + '</span>'
     ).join('');
-    html += '<div style="background:var(--surface);border:2px solid ' + _p.color + '33;'
+    _archHtml = '<div style="background:var(--surface);border:2px solid ' + _p.color + '33;'
       + 'border-left:4px solid ' + _p.color + ';border-radius:10px;padding:14px 18px;margin-bottom:16px;">'
       + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">'
       + '<span style="font-size:1.3rem;">' + _p.icon + '</span>'
@@ -7111,7 +7112,7 @@ function renderStrideMetrics(metrics, aggregated={}) {
     }] : []),
   ];
 
-  let html = '<div class="stride-kpi-grid">';
+  let html = _archHtml + '<div class="stride-kpi-grid">';
   kpis.forEach(k => {
     html += `<div class="stride-kpi ${kpiClass(k.flag)}">
       <div class="stride-kpi-label">${k.label}</div>
@@ -9142,14 +9143,33 @@ async function runAnalysis() {
     // ── Optional Landmark Review & Correction ────────────────────────────────
     if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
       const _hasDual = hasDualView; // now safely accessible
+      // ── Secondary skeleton pass for review panel ───────────────────────────
+      // Run a lightweight MP pass on the secondary video frames so the PT can
+      // see and correct landmarks on those frames too. This is especially important
+      // for posterior running — the frames where pronation is measured.
+      let _sec2Lms = null, _sec2Ann = null;
+      if(_hasDual && mpReady && poseLandmarkerInstance) {
+        try {
+          statusEl.textContent = 'Preparing secondary frames for review...';
+          const _sec2Mp = await runMediaPipeOnFrames(extractedFrames2);
+          _sec2Lms = _sec2Mp.map(r => r?.poseLandmarks ?? null);
+          _sec2Ann = [];
+          for(let _si = 0; _si < extractedFrames2.length; _si++) {
+            const _sRes = {poseLandmarks: _sec2Lms[_si]};
+            const _sDrawn = await drawSkeleton(extractedFrames2[_si].imageData, _sRes, null, cameraView2, extractedFrames2[_si].phase);
+            _sec2Ann.push({base64: _sDrawn.base64, canvas: _sDrawn.canvas, phase: extractedFrames2[_si].phase});
+          }
+        } catch(_se) {
+          console.warn('[Review] Secondary skeleton pass failed:', _se.message);
+          _sec2Lms = null; _sec2Ann = null;
+        }
+      }
+
       const corrResult = await showLandmarkReviewPanel(
         extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
-        // Secondary: pass raw extractedFrames2 for thumbnails (annotatedFrames2 is still empty
-        // here — Stage 3b runs after review). refinedLandmarks2 not available yet so pass null;
-        // correction positions will be applied when Stage 3b runs.
         _hasDual ? extractedFrames2 : null,
-        null,  // no refined landmarks for secondary yet
-        _hasDual ? extractedFrames2.map(f => ({base64: f.imageData})) : null
+        _hasDual ? _sec2Lms : null,
+        _hasDual ? (_sec2Ann || extractedFrames2.map(f => ({base64: f.imageData}))) : null
       );
       const correctedLms  = corrResult?.primary   ?? corrResult;
       const correctedLms2 = corrResult?.secondary ?? null;
