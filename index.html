@@ -9132,12 +9132,15 @@ async function runAnalysis() {
       }
     }
 
+    // ── Second video state — declared here so review hook and Stage 3b both have access ──
+    let annotatedFrames2 = [];
+    let allAngles2 = [];
+    let aggregated2 = {};
+    let angleLines2 = '';
+
     // ── Optional Landmark Review & Correction ────────────────────────────────
-    // If the user checked "Review & correct landmarks", pause here, show the
-    // interactive editor, and wait for them to click "Generate Report".
-    // After they confirm, re-draw skeletons and re-extract angles for edited frames.
     if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
-      const _hasDual = !!(uploadedFile2 && extractedFrames2.length > 0); // hasDualView not declared yet
+      const _hasDual = hasDualView; // now safely accessible
       const corrResult = await showLandmarkReviewPanel(
         extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
         _hasDual ? extractedFrames2  : null,
@@ -9311,10 +9314,6 @@ async function runAnalysis() {
   }
 
   // ── Stage 3b: Second video pipeline (if uploaded) ──
-  let annotatedFrames2 = [];
-  let allAngles2 = [];
-  let aggregated2 = {};
-  let angleLines2 = '';
   const hasDualView = uploadedFile2 && extractedFrames2.length > 0;
 
   if(hasDualView) {
