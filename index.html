@@ -7913,6 +7913,13 @@ let _rvEdited       = [];    // bool per frame
 let _rvResolve      = null;  // Promise resolver
 let _rvDragging     = null;  // {lmIdx} | null
 let _rvImgCache     = {};    // frameIdx → ImageBitmap/Image
+// Secondary video state (dual-plane review)
+let _rvLandmarks2   = null;
+let _rvOriginals2   = null;
+let _rvRawFrames2   = null;
+let _rvAnnotated2   = null;
+let _rvEdited2      = [];
+let _rvN1           = 0;     // number of primary frames (secondary starts at _rvN1)
 
 // Landmark styling
 const _RV_PRIMARY   = new Set([11,12,23,24,25,26,27,28,29,30,31,32]);
@@ -7934,7 +7941,8 @@ const _RV_CONNECTIONS = [
 ];
 
 // ── Entry point ───────────────────────────────────────────────────────────────
-function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFrames, fusedResults) {
+function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
+                                  extractedFrames2, refinedLandmarks2, annotatedFrames2) {
   return new Promise(resolve => {
     _rvResolve      = resolve;
     _rvRawFrames    = extractedFrames;
@@ -7942,14 +7950,26 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     _rvFusedResults = fusedResults;
     _rvEdited       = new Array(extractedFrames.length).fill(false);
     _rvImgCache     = {};
+    _rvN1           = extractedFrames.length;
 
-    // Deep clone landmarks so originals are preserved for reset
+    // Deep clone primary landmarks
     _rvOriginals = refinedLandmarks.map(lms =>
       lms ? lms.map(lm => lm ? {...lm} : null) : null
     );
     _rvLandmarks = refinedLandmarks.map(lms =>
       lms ? lms.map(lm => lm ? {...lm} : null) : null
     );
+
+    // Secondary video (if provided)
+    _rvRawFrames2  = extractedFrames2  || null;
+    _rvAnnotated2  = annotatedFrames2  || null;
+    _rvEdited2     = extractedFrames2  ? new Array(extractedFrames2.length).fill(false) : [];
+    if(refinedLandmarks2) {
+      _rvOriginals2 = refinedLandmarks2.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null);
+      _rvLandmarks2 = refinedLandmarks2.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null);
+    } else {
+      _rvOriginals2 = null; _rvLandmarks2 = null;
+    }
 
     document.getElementById('loadingState').style.display = 'none';
     document.getElementById('reviewPanel').style.display  = 'block';
@@ -7964,38 +7984,61 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
 function _rvBuildThumbs() {
   const strip = document.getElementById('reviewThumbs');
   strip.innerHTML = '';
-  (_rvAnnotated || _rvRawFrames).forEach((fr, i) => {
-    const card = document.createElement('div');
-    card.className = 'review-thumb' + (i===0?' rt-active':'');
-    card.onclick = () => _rvShowFrame(i);
-    card.id = `_rvThumb_${i}`;
 
-    const img = document.createElement('img');
-    img.src = 'data:image/jpeg;base64,' + (fr.base64 || _rvRawFrames[i].imageData);
-    img.style.cssText = 'width:100%;max-height:90px;object-fit:cover;display:block;';
-    card.appendChild(img);
+  // Helper: add one set of thumbnails
+  const addSet = (frames, annotated, rawFrames, startGlobal, viewLabel, viewColor) => {
+    // Divider header for this view
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'flex-shrink:0;display:flex;align-items:center;padding:0 6px;font-size:.63rem;font-weight:700;color:#fff;letter-spacing:.06em;text-transform:uppercase;background:' + viewColor + ';border-radius:5px;white-space:nowrap;height:28px;';
+    hdr.textContent = viewLabel;
+    strip.appendChild(hdr);
 
-    const lbl = document.createElement('div');
-    lbl.className = 'review-thumb-label';
-    lbl.textContent = (typeof _rvRawFrames[i].phase === 'string')
-      ? _rvRawFrames[i].phase.replace(/-/g,' ')
-      : `Frame ${i+1}`;
-    card.appendChild(lbl);
-    strip.appendChild(card);
-  });
+    frames.forEach((fr, i) => {
+      const gi = startGlobal + i; // global index
+      const card = document.createElement('div');
+      card.className = 'review-thumb' + (gi===0?' rt-active':'');
+      card.onclick = () => _rvShowFrame(gi);
+      card.id = '_rvThumb_' + gi;
+
+      const imgEl = document.createElement('img');
+      imgEl.src = 'data:image/jpeg;base64,' + (fr.base64 || rawFrames[i].imageData);
+      imgEl.style.cssText = 'width:100%;max-height:90px;object-fit:cover;display:block;';
+      card.appendChild(imgEl);
+
+      const lbl = document.createElement('div');
+      lbl.className = 'review-thumb-label';
+      lbl.textContent = (typeof rawFrames[i]?.phase === 'string')
+        ? rawFrames[i].phase.replace(/-/g,' ')
+        : 'Frame ' + (i+1);
+      card.appendChild(lbl);
+      strip.appendChild(card);
+    });
+  };
+
+  const frames1 = _rvAnnotated || _rvRawFrames;
+  addSet(frames1, _rvAnnotated, _rvRawFrames, 0, 'Primary view', 'var(--navy)');
+
+  if(_rvRawFrames2 && _rvRawFrames2.length > 0) {
+    const frames2 = _rvAnnotated2 || _rvRawFrames2;
+    addSet(frames2, _rvAnnotated2, _rvRawFrames2, _rvN1, 'Secondary view', 'var(--teal)');
+  }
 }
 
 // ── Switch active frame ───────────────────────────────────────────────────────
 function _rvShowFrame(idx) {
   _rvActiveFrame = idx;
-  // Update thumb highlighting
   document.querySelectorAll('.review-thumb').forEach((el,i) => {
     el.classList.toggle('rt-active', i===idx);
   });
-  const total = _rvRawFrames.length;
-  const phaseLabel = (typeof (_rvRawFrames[idx]?.phase) === 'string') ? ' — ' + _rvRawFrames[idx].phase.replace(/-/g,' ') : '';
+  const is2 = idx >= _rvN1;
+  const li  = is2 ? idx - _rvN1 : idx;
+  const rawFrames = is2 ? _rvRawFrames2 : _rvRawFrames;
+  const edited    = is2 ? _rvEdited2    : _rvEdited;
+  const total     = is2 ? (rawFrames?.length||0) : _rvRawFrames.length;
+  const viewTag   = is2 ? ' [Secondary]' : ' [Primary]';
+  const phaseLabel = (typeof rawFrames?.[li]?.phase === 'string') ? ' — ' + rawFrames[li].phase.replace(/-/g,' ') : '';
   document.getElementById('reviewFrameInfo').textContent =
-    `Frame ${idx+1} of ${total}${phaseLabel}${_rvEdited[idx]?' — edited ✎':''}`;
+    'Frame ' + (li+1) + ' of ' + total + viewTag + phaseLabel + (edited[li] ? ' — edited ✎' : '');
   _rvRenderCanvas();
 }
 
@@ -8003,8 +8046,12 @@ function _rvShowFrame(idx) {
 function _rvRenderCanvas() {
   const cv = document.getElementById('reviewCanvas');
   const ctx = cv.getContext('2d');
-  const fi  = _rvActiveFrame;
-  const b64 = _rvRawFrames[fi]?.imageData;
+  const idx = _rvActiveFrame;
+  const is2 = idx >= _rvN1;
+  const li  = is2 ? idx - _rvN1 : idx;
+  const rawFrames = is2 ? _rvRawFrames2 : _rvRawFrames;
+  const lms       = is2 ? (_rvLandmarks2?.[li] ?? null) : (_rvLandmarks?.[li] ?? null);
+  const b64 = rawFrames?.[li]?.imageData;
   if(!b64) return;
 
   const img = new Image();
@@ -8012,11 +8059,11 @@ function _rvRenderCanvas() {
     const dpr = Math.min(window.devicePixelRatio||1, 2);
     cv.width  = img.naturalWidth  * dpr;
     cv.height = img.naturalHeight * dpr;
-    cv.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+    cv.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight;
     ctx.scale(dpr, dpr);
     const W = img.naturalWidth, H = img.naturalHeight;
     ctx.drawImage(img, 0, 0, W, H);
-    _rvDrawSkeleton(ctx, W, H, _rvLandmarks[fi]);
+    _rvDrawSkeleton(ctx, W, H, lms);
   };
   img.src = 'data:image/jpeg;base64,' + b64;
 }
@@ -8070,7 +8117,9 @@ function _rvDrawSkeleton(ctx, W, H, lms) {
 
 // ── Find nearest draggable landmark ──────────────────────────────────────────
 function _rvNearestLM(normX, normY) {
-  const lms = _rvLandmarks[_rvActiveFrame];
+  const is2 = _rvActiveFrame >= _rvN1;
+  const li  = is2 ? _rvActiveFrame - _rvN1 : _rvActiveFrame;
+  const lms = is2 ? (_rvLandmarks2?.[li] ?? null) : (_rvLandmarks?.[li] ?? null);
   if(!lms) return null;
   let best = null, bestD = Infinity;
   lms.forEach((lm, i) => {
@@ -8104,22 +8153,22 @@ function _rvHandleStart(clientX, clientY) {
 function _rvHandleMove(clientX, clientY) {
   if(_rvDragging == null) return;
   const {x, y} = _rvCanvasNorm(clientX, clientY);
-  const lms = _rvLandmarks[_rvActiveFrame];
+  const is2_mv = _rvActiveFrame >= _rvN1;
+  const li_mv  = is2_mv ? _rvActiveFrame - _rvN1 : _rvActiveFrame;
+  const lms = is2_mv ? (_rvLandmarks2?.[li_mv] ?? null) : (_rvLandmarks?.[li_mv] ?? null);
   if(!lms || !lms[_rvDragging]) return;
   lms[_rvDragging] = {
     ...lms[_rvDragging],
     x: Math.max(0, Math.min(1, x)),
     y: Math.max(0, Math.min(1, y)),
-    visibility: 0.98,
-    presence: 0.98,
-    source: 'manual-corrected',
+    visibility: 0.98, presence: 0.98, source: 'manual-corrected',
   };
-  _rvEdited[_rvActiveFrame] = true;
-  // Badge the thumbnail
-  const thumb = document.getElementById(`_rvThumb_${_rvActiveFrame}`);
+  if(is2_mv) { _rvEdited2[li_mv] = true; }
+  else        { _rvEdited[li_mv]  = true; }
+  const thumb = document.getElementById('_rvThumb_' + _rvActiveFrame);
   if(thumb) thumb.classList.add('rt-edited');
   document.getElementById('reviewFrameInfo').textContent =
-    `Frame ${_rvActiveFrame+1} of ${_rvRawFrames.length} — edited ✎`;
+    'Frame ' + (li_mv+1) + (is2_mv?' [Secondary]':' [Primary]') + ' — edited ✎';
   _rvRenderCanvas();
 }
 function _rvHandleEnd() {
@@ -8143,22 +8192,26 @@ document.addEventListener('DOMContentLoaded', _rvAttachCanvasEvents);
 
 // ── Reset buttons ─────────────────────────────────────────────────────────────
 function resetReviewFrame() {
-  const fi = _rvActiveFrame;
-  _rvLandmarks[fi] = _rvOriginals[fi]
-    ? _rvOriginals[fi].map(lm => lm ? {...lm} : null) : null;
-  _rvEdited[fi] = false;
-  const thumb = document.getElementById(`_rvThumb_${fi}`);
+  const idx = _rvActiveFrame;
+  const is2 = idx >= _rvN1;
+  const li  = is2 ? idx - _rvN1 : idx;
+  if(is2) {
+    if(_rvOriginals2?.[li]) _rvLandmarks2[li] = _rvOriginals2[li].map(lm => lm ? {...lm} : null);
+    _rvEdited2[li] = false;
+  } else {
+    if(_rvOriginals?.[li]) _rvLandmarks[li] = _rvOriginals[li].map(lm => lm ? {...lm} : null);
+    _rvEdited[li] = false;
+  }
+  const thumb = document.getElementById('_rvThumb_' + idx);
   if(thumb) thumb.classList.remove('rt-edited');
-  document.getElementById('reviewFrameInfo').textContent =
-    `Frame ${fi+1} of ${_rvRawFrames.length}`;
   _rvRenderCanvas();
 }
 function resetAllReviewFrames() {
   if(!confirm('Reset all frames to original landmark positions?')) return;
-  _rvLandmarks = _rvOriginals.map(lms =>
-    lms ? lms.map(lm => lm ? {...lm} : null) : null
-  );
+  _rvLandmarks  = _rvOriginals?.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null) ?? null;
+  _rvLandmarks2 = _rvOriginals2?.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null) ?? null;
   _rvEdited.fill(false);
+  _rvEdited2.fill(false);
   document.querySelectorAll('.review-thumb').forEach(el => el.classList.remove('rt-edited'));
   _rvRenderCanvas();
 }
@@ -8167,7 +8220,7 @@ function resetAllReviewFrames() {
 function proceedFromReview() {
   document.getElementById('reviewPanel').style.display = 'none';
   document.getElementById('loadingState').style.display = 'block';
-  if(_rvResolve) { _rvResolve(_rvLandmarks); _rvResolve = null; }
+  if(_rvResolve) { _rvResolve({primary: _rvLandmarks, secondary: _rvLandmarks2}); _rvResolve = null; }
 }
 
 
@@ -8827,24 +8880,40 @@ async function runAnalysis() {
     // interactive editor, and wait for them to click "Generate Report".
     // After they confirm, re-draw skeletons and re-extract angles for edited frames.
     if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
-      const correctedLms = await showLandmarkReviewPanel(
-        extractedFrames, refinedLandmarks, annotatedFrames, fusedResults
+      const corrResult = await showLandmarkReviewPanel(
+        extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
+        hasDualView ? extractedFrames2  : null,
+        hasDualView ? refinedLandmarks  : null,  // secondary uses fusedLandmarks2 — passed as alias
+        hasDualView ? annotatedFrames2  : null
       );
-      // Re-process only edited frames
+      const correctedLms  = corrResult?.primary   ?? corrResult; // backward compat if no secondary
+      const correctedLms2 = corrResult?.secondary ?? null;
+
+      // Re-process edited primary frames
       for(let _ri = 0; _ri < extractedFrames.length; _ri++) {
-        if(!_rvEdited[_ri] || !correctedLms[_ri]) continue;
+        if(!_rvEdited[_ri] || !correctedLms?.[_ri]) continue;
         const corrMpResult = {poseLandmarks: correctedLms[_ri], _raw: fusedResults[_ri]?._raw};
-        // Re-draw skeleton with corrected landmarks
         const redrawn = await drawSkeleton(
           extractedFrames[_ri].imageData, corrMpResult, null, cameraView, extractedFrames[_ri].phase
         );
         annotatedFrames[_ri] = {base64: redrawn.base64, canvas: redrawn.canvas, phase: extractedFrames[_ri].phase};
-        // Re-extract angles — only re-export if allAngles already has an entry at this index
-        if(_ri < allAngles.length) {
-          allAngles[_ri] = extractAngles(correctedLms[_ri], cameraView, movement);
+        if(_ri < allAngles.length) allAngles[_ri] = extractAngles(correctedLms[_ri], cameraView, movement);
+      }
+      // Re-process edited secondary frames
+      if(hasDualView && correctedLms2) {
+        for(let _ri = 0; _ri < extractedFrames2.length; _ri++) {
+          if(!_rvEdited2[_ri] || !correctedLms2[_ri]) continue;
+          const corrMpResult2 = {poseLandmarks: correctedLms2[_ri]};
+          const redrawn2 = await drawSkeleton(
+            extractedFrames2[_ri].imageData, corrMpResult2, null, cameraView2, extractedFrames2[_ri].phase
+          );
+          annotatedFrames2[_ri] = {base64: redrawn2.base64, canvas: redrawn2.canvas, phase: extractedFrames2[_ri].phase};
+          if(_ri < allAngles2.length) allAngles2[_ri] = extractAngles(correctedLms2[_ri], cameraView2, movement);
         }
       }
-      console.log(`[Review] Applied corrections to ${_rvEdited.filter(Boolean).length} frame(s)`);
+      const n1ed = _rvEdited.filter(Boolean).length;
+      const n2ed = _rvEdited2.filter(Boolean).length;
+      console.log('[Review] Applied corrections: ' + n1ed + ' primary, ' + n2ed + ' secondary frame(s)');
     }
   } else {
     // No MediaPipe — raw frames, still attempt color-based bar detection
@@ -9088,6 +9157,84 @@ async function runAnalysis() {
       annotatedFrames2 = extractedFrames2.map(f => ({base64: f.imageData, canvas: null}));
     }
     aggregated2 = allAngles2.length > 0 ? aggregateAngles(allAngles2, extractedFrames2.map(f => f.phase || null)) : {};
+
+    // ── Stage 3b-iii: Dense pass on secondary video ──────────────────────────
+    // Runs 16 frames (lighter than primary's 24-32) on the secondary video.
+    // For running: improves pronation curve + hip adduction from posterior.
+    // For jumping: improves valgus/adduction curve from the second angle.
+    // No crop refinement on secondary (geometry differs; benefit is smaller).
+    const isDynamic3bDense = /running|gait|walk|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+    if(isDynamic3bDense && mpReady && poseLandmarkerInstance && window._secondaryVidEl) {
+      try {
+        const secVid = window._secondaryVidEl;
+        const secDur = isFinite(secVid.duration) && secVid.duration > 0 ? secVid.duration : null;
+        if(secDur) {
+          statusEl.textContent = 'Dense pass on secondary view (16 frames)...';
+          // Re-use same window function but with frameCount override via a wrapper
+          const sec_isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
+          const sec_wStart = sec_isLanding ? 0.18 : 0.05;
+          const sec_wEnd   = sec_isLanding ? 0.78 : 0.95;
+          const sec_fc     = 16; // lighter than primary
+          const sec_props  = Array.from({length: sec_fc}, (_, i) =>
+            sec_wStart + (i / (sec_fc - 1)) * (sec_wEnd - sec_wStart)
+          );
+          const secDenseFrames = [];
+          for(const prop of sec_props) {
+            const t = prop * secDur;
+            const b64 = await seekCapture(secVid, Math.max(0.05, Math.min(t, secDur - 0.05)));
+            if(b64) secDenseFrames.push({imageData: b64, t: prop});
+          }
+          if(secDenseFrames.length >= 6) {
+            const secMpRes = await runMediaPipeOnFrames(secDenseFrames);
+            // Apply tape (no crop refinement — geometry different from primary)
+            const secTapeCfg = readTapeConfig();
+            const secDenseLms = [];
+            for(let i = 0; i < secDenseFrames.length; i++) {
+              let lms = secMpRes[i];
+              if(lms && secTapeCfg) lms = await applyTapeRefinement(secDenseFrames[i].imageData, lms, secTapeCfg);
+              secDenseLms.push(lms);
+            }
+            const secCurves = secDenseLms.map((lms, i) => {
+              if(!lms) return null;
+              return {
+                t: secDenseFrames[i].t,
+                tMs: Math.round(secDenseFrames[i].t * secDur * 1000),
+                angles: extractAngles(lms, cameraView2, movement),
+              };
+            }).filter(Boolean);
+
+            if(secCurves.length >= 6) {
+              const secDenseAgg = aggregateAngles(secCurves.map(c => c.angles), secCurves.map(() => null));
+              // Upgrade aggregated2 with dense peaks for frontal metrics
+              const sec_upgradeKeys = [
+                'Left Knee Valgus','Right Knee Valgus',
+                'Left Hip Adduction','Right Hip Adduction',
+                'Left Pronation','Right Pronation',
+                'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
+              ];
+              let sec_upgraded = 0;
+              sec_upgradeKeys.forEach(k => {
+                if(secDenseAgg[k] && aggregated2[k]) {
+                  aggregated2[k] = {
+                    ...aggregated2[k],
+                    max: Math.max(aggregated2[k].max, secDenseAgg[k].max),
+                    min: Math.min(aggregated2[k].min, secDenseAgg[k].min),
+                  };
+                  sec_upgraded++;
+                } else if(secDenseAgg[k] && !aggregated2[k]) {
+                  aggregated2[k] = secDenseAgg[k];
+                  sec_upgraded++;
+                }
+              });
+              console.log('[DensePass3b] Secondary dense pass: ' + secCurves.length + ' frames, upgraded ' + sec_upgraded + ' metrics');
+            }
+          }
+        }
+      } catch(secDenseErr) {
+        console.warn('[DensePass3b] Non-critical:', secDenseErr.message);
+      }
+    }
+
     angleLines2 = Object.entries(aggregated2).map(([k,v]) =>
       `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles2.length} frames)`
     ).join('\n');
@@ -9220,7 +9367,7 @@ HIP STRATEGY: Only flag inadequate hip flexion if Hip Flexion (peak) < 30°. Val
 - Knee Valgus (Left/Right): measured from FRONT view as knee deviation from hip-ankle axis. Normal <5°. Values >10° suggest dynamic valgus collapse. Only valid from frontal camera. Side-view knee valgus data is not reliable — ignore if only side view available.
 - Hip Adduction (Left/Right): measured from FRONT view as the medial inclination angle of the thigh (hip→knee) from vertical during swing phase. Normal 0–8° (slight medial inclination is normal and efficient). Values >10° indicate the thigh is crossing the body midline (crossover gait) — associated with IT band syndrome and patellofemoral pain. Only valid from frontal camera.
 - Compensatory patterns: The report may include a "Compensatory Movement Patterns" section flagging when multiple metrics deviate together in clinically meaningful ways (e.g. low hip flexion + high trunk lean = lumbar compensation; pelvic drop + knee valgus = hip abductor weakness cascade; restricted knee flexion + elevated cadence = stiff-leg shuffling). If this section is present, these patterns should anchor your clinical impressions.
-- Knee Flexion: when a stride engine peak value is available (from dense 64-128 frame analysis), it supersedes gallery-frame estimates for the reference leg. The stride engine value is more accurate as it averages across 10-15+ strides.
+- Knee Flexion (RUNNING CONVENTION — CRITICAL): Values are peak swing-phase flexion degrees (0°=straight, higher=more bent). A HIGHER value = MORE flexion = BETTER shock absorption and stride mechanics. A value of 123° means MORE knee bend than 115° — do NOT describe the 123° limb as having 'reduced' or 'restricted' flexion compared to the 115° limb. Asymmetry is only clinically significant if one side is >15° lower (less bent) than the other, suggesting restricted swing mechanics on that side. When a stride engine peak value is available (from dense 64-128 frame analysis), it supersedes gallery-frame estimates for the reference leg.
 ${(() => {
   // Running context from manual inputs
   const sp = parseFloat(document.getElementById('treadmillSpeed')?.value||'');
@@ -11360,6 +11507,7 @@ function handleFile2(file) {
     vid.src = url; vid.controls = true; vid.muted = true; vid.playsInline = true;
     vid.style.cssText = 'width:100%;max-height:200px;object-fit:contain;display:block;';
     wrap.appendChild(vid); wrap.appendChild(badge);
+    window._secondaryVidEl = vid; // store ref for dense pass
     startFrameExtraction2(file, vid);
   }
 }
