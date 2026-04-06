@@ -9052,6 +9052,13 @@ async function runAnalysis() {
   barReferenceFrame = null;
   let frameHeight = 480;   // fallback
 
+  // ── Second video state — declared at function scope so accessible throughout ──
+  const hasDualView = uploadedFile2 && extractedFrames2.length > 0;
+  let annotatedFrames2 = [];
+  let allAngles2    = [];
+  let aggregated2   = {};
+  let angleLines2   = '';
+
   console.log('[Analysis] Stage 1: Starting MediaPipe');
   if(mpReady && poseInstance) {
     const mpResults = await runMediaPipeOnFrames(extractedFrames);
@@ -9132,21 +9139,17 @@ async function runAnalysis() {
       }
     }
 
-    // ── Second video state — declared here so review hook and Stage 3b both have access ──
-    const hasDualView = uploadedFile2 && extractedFrames2.length > 0;
-    let annotatedFrames2 = [];
-    let allAngles2 = [];
-    let aggregated2 = {};
-    let angleLines2 = '';
-
     // ── Optional Landmark Review & Correction ────────────────────────────────
     if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
       const _hasDual = hasDualView; // now safely accessible
       const corrResult = await showLandmarkReviewPanel(
         extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
-        _hasDual ? extractedFrames2  : null,
-        _hasDual ? refinedLandmarks  : null,
-        _hasDual ? annotatedFrames2  : null
+        // Secondary: pass raw extractedFrames2 for thumbnails (annotatedFrames2 is still empty
+        // here — Stage 3b runs after review). refinedLandmarks2 not available yet so pass null;
+        // correction positions will be applied when Stage 3b runs.
+        _hasDual ? extractedFrames2 : null,
+        null,  // no refined landmarks for secondary yet
+        _hasDual ? extractedFrames2.map(f => ({base64: f.imageData})) : null
       );
       const correctedLms  = corrResult?.primary   ?? corrResult;
       const correctedLms2 = corrResult?.secondary ?? null;
@@ -9447,7 +9450,8 @@ async function runAnalysis() {
             const secTapeCfg = readTapeConfig();
             const secDenseLms = [];
             for(let i = 0; i < secDenseFrames.length; i++) {
-              let lms = secMpRes[i];
+              // runMediaPipeOnFrames returns {poseLandmarks:[...]} objects — extract the array
+              let lms = secMpRes[i]?.poseLandmarks ?? secMpRes[i] ?? null;
               if(lms && secTapeCfg) lms = await applyTapeRefinement(secDenseFrames[i].imageData, lms, secTapeCfg);
               secDenseLms.push(lms);
             }
