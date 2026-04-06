@@ -1739,6 +1739,11 @@ function startFrameExtraction(file, vid) {
                 // Formula: atan2(|dx|, dy) where dy = knee.y - hip.y (image coords, Y-down)
                 lHip: (lH&&lK && lK.y-lH.y > -0.10) ? Math.min(90, Math.round(Math.atan2(Math.abs(lK.x-lH.x), lK.y-lH.y)*180/Math.PI)) : null,
                 rHip: (rH&&rK && rK.y-rH.y > -0.10) ? Math.min(90, Math.round(Math.atan2(Math.abs(rK.x-rH.x), rK.y-rH.y)*180/Math.PI)) : null,
+                hipMidY: (lH&&rH) ? (lH.y+rH.y)/2 : (lH?.y ?? rH?.y ?? null), // for vertical oscillation
+                hipMidX: (lH&&rH) ? (lH.x+rH.x)/2 : (lH?.x ?? rH?.x ?? null), // for overstride
+                lKneeX: lK?.x ?? null,  // for shin angle
+                lAnkXFull: lA?.x ?? null, // already captured as lAnkX
+                lKneeY: lK?.y ?? null,   // for shin angle
               };
             }).filter(Boolean);
 
@@ -6669,10 +6674,135 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   if(shoe === 'minimalist') flags.shoe = {level:'ok', msg:'Minimalist shoe: midfoot/forefoot strike expected — compare to heel strike findings'};
   if(inclinePct > 5) flags.incline = {level:'ok', msg:`Incline ${inclinePct}% — hip extension norms are elevated; reduced extension at high grade is expected`};
 
+  // ── Vertical Oscillation ───────────────────────────────────────────────────
+  // Hip midpoint Y excursion per stride, converted to cm using height calibration.
+  // Method: for each stride cycle, find max-min of hipMidY across that cycle's frames.
+  // Average across all detected strides for a reliable mean per-stride VO.
+  // Normal: 6–10cm recreational; <6cm elite; >10cm = energy-wasting bounce.
+  let verticalOscillationCm = null;
+  if(runParams.heightCm && strideCycles.length > 0) {
+    const pixPerCm_approx = (() => {
+      // Estimate: hip height from ground ≈ 50% of body height.
+      // In image coordinates, hip midpoint Y typically spans ~0.30–0.65 of frame height.
+      // We use body height proportionally: full height ≈ frame height * calibration factor.
+      // Better: hip-to-ankle distance in px → known anatomical length (~47% body height).
+      // Use median hip-ankle pixel length across stance frames as calibration.
+      const hipAnkleLengths = [];
+      perFrameData.forEach(f => {
+        if(f.hipMidY==null || f.lAnkY==null) return;
+        const dy = Math.abs(f.lAnkY - f.hipMidY);
+        if(dy > 0.03 && dy < 0.60) hipAnkleLengths.push(dy); // normalised frame fraction
+      });
+      if(hipAnkleLengths.length < 4) return null;
+      hipAnkleLengths.sort((a,b)=>a-b);
+      const medHAFrac = hipAnkleLengths[Math.floor(hipAnkleLengths.length/2)];
+      const hipAnkleCm = runParams.heightCm * 0.475; // hip-to-ankle ≈ 47.5% body height
+      return medHAFrac > 0 ? hipAnkleCm / medHAFrac : null; // px-fraction → cm
+    })();
+
+    if(pixPerCm_approx) {
+      const strideVOs = strideCycles.map(cycle => {
+        const hipYs = [];
+        for(let i = cycle.startIdx; i <= Math.min(cycle.endIdx, N-1); i++) {
+          const hy = perFrameData[i]?.hipMidY;
+          if(hy != null) hipYs.push(hy);
+        }
+        if(hipYs.length < 4) return null;
+        const excursionFrac = Math.max(...hipYs) - Math.min(...hipYs);
+        return excursionFrac * pixPerCm_approx;
+      }).filter(v => v != null && v > 0 && v < 25); // sanity clamp
+      if(strideVOs.length > 0) {
+        const voRaw = strideVOs.reduce((s,v)=>s+v,0) / strideVOs.length;
+        verticalOscillationCm = Math.round(voRaw * 10) / 10; // 1 decimal place
+      }
+    }
+  }
+
+  // ── Overstride Detection ────────────────────────────────────────────────────
+  // At initial contact, compare foot (ankle) X to hip midpoint X.
+  // If ankle is more than 5% of frame width ahead of hip → overstriding.
+  // "Ahead" means in the direction of travel: on treadmill (runner moves right→left
+  // in typical lateral filming) the leading foot has a LOWER X than the hip.
+  // We use the sign of ankle X - hip X averaged across contact frames to auto-detect
+  // direction of travel, then classify.
+  // Expressed in cm using the same height calibration as stride length.
+  let overstrideDistCm = null;
+  let overstrideGrade  = null; // 'none' | 'mild' | 'moderate' | 'severe'
+  if(runParams.heightCm && (lContactIdxs.length + rContactIdxs.length) > 0) {
+    const contactOffsets = []; // positive = foot ahead of hip (overstride)
+    const allContactIdxs = [...lContactIdxs, ...rContactIdxs];
+    allContactIdxs.forEach(ci => {
+      const f = perFrameData[ci];
+      if(!f || f.hipMidX==null) return;
+      const ankX = (f.lAnkX ?? f.rAnkX);  // whichever is the contacting leg
+      if(ankX == null) return;
+      const offset = ankX - f.hipMidX; // positive = ankle right of hip
+      contactOffsets.push(offset);
+    });
+    if(contactOffsets.length >= 2) {
+      // Auto-detect travel direction from sign of offsets
+      const meanOffset = contactOffsets.reduce((s,v)=>s+v,0)/contactOffsets.length;
+      // Convert frame fraction → cm using leg length calibration
+      const legLenCm = runParams.heightCm * 0.475;
+      // hip-ankle fraction median as calibration
+      const legFracs = perFrameData.map(f => {
+        if(f.hipMidY==null||f.lAnkY==null) return null;
+        const dy = Math.abs(f.lAnkY - f.hipMidY);
+        return (dy > 0.03 && dy < 0.60) ? dy : null;
+      }).filter(Boolean);
+      if(legFracs.length >= 4) {
+        legFracs.sort((a,b)=>a-b);
+        const medLegFrac = legFracs[Math.floor(legFracs.length/2)];
+        const cmPerFrac  = medLegFrac > 0 ? legLenCm / medLegFrac : null;
+        if(cmPerFrac) {
+          overstrideDistCm = Math.round(Math.abs(meanOffset) * cmPerFrac);
+          // Threshold: <5cm = none, 5-15cm = mild, 15-25cm = moderate, >25cm = severe
+          overstrideGrade = overstrideDistCm < 5  ? 'none'
+                          : overstrideDistCm < 15 ? 'mild'
+                          : overstrideDistCm < 25 ? 'moderate' : 'severe';
+        }
+      }
+    }
+  }
+
+  // ── Shin Angle at Initial Contact ──────────────────────────────────────────
+  // Angle of the tibia (knee → ankle vector) from vertical at initial contact.
+  // Positive = forward shin lean (foot ahead of knee = overstriding indicator).
+  // Normal at contact: 5–15° forward. >20° = significant overstriding / braking force risk.
+  // Computed per contact event, averaged.
+  let shinAngleAtContactDeg = null;
+  {
+    const shinAngles = [];
+    const allCI = [...lContactIdxs, ...rContactIdxs];
+    allCI.forEach(ci => {
+      const f = perFrameData[ci];
+      if(!f) return;
+      // Use the leg that matches the contact side
+      const kneeY = f.lKneeY; // note: we added lKneeY in perFrame
+      const ankY  = f.lAnkY;
+      const kneeX = f.lKneeX;
+      const ankX  = f.lAnkX;
+      if(kneeY==null||ankY==null||kneeX==null||ankX==null) return;
+      const dy = ankY - kneeY; // positive = ankle below knee (correct anatomy)
+      const dx = ankX - kneeX; // positive = ankle forward/right of knee
+      if(dy < 0.01) return;    // shin pointing up = bad landmark
+      // Angle from vertical: atan2(horizontal offset, vertical extent)
+      const angle = Math.atan2(Math.abs(dx), dy) * 180 / Math.PI;
+      if(angle >= 0 && angle < 60) shinAngles.push(angle); // sanity range
+    });
+    if(shinAngles.length >= 2) {
+      shinAngleAtContactDeg = Math.round(shinAngles.reduce((s,v)=>s+v,0)/shinAngles.length);
+    }
+  }
+
   return {
     // Timing
     strideDurationS:  +avgDuration.toFixed(3),
     cadenceSpm,
+    // New metrics
+    verticalOscillationCm,
+    overstrideDistCm, overstrideGrade,
+    shinAngleAtContactDeg,
     cadenceStride,
     cvStridePct:      cvDuration,
     gcPct:            avgGcPct,    // null = unreliable at this fps
@@ -6763,7 +6893,106 @@ function gaitDisplayVal(jointName, agg, movement) {
   return agg.avg;
 }
 
-function renderStrideMetrics(metrics) {
+
+// ── Running Style Archetype Classification ────────────────────────────────────
+function classifyRunningArchetype(sm, aggregated) {
+  if(!sm) return null;
+  const cadence    = sm.cadenceSpm ?? 0;
+  const vo         = sm.verticalOscillationCm ?? null;
+  const overstride = sm.overstrideGrade ?? 'none';
+  const shinAngle  = sm.shinAngleAtContactDeg ?? null;
+  const footStrike = sm.fsConsensus ?? 'unknown';
+  const hipExt     = sm.hipExtAtToeoff ?? null;
+  const peakKnee   = sm.peakKneeFlex ?? null;
+  const stepAsym   = sm.stepLengthAsymPct ?? null;
+  const strideNorm = sm.strideLengthNorm ?? null;
+
+  const get = (key) => {
+    const e = aggregated?.[key]; if(!e) return null;
+    const v = e.avg ?? e.max;
+    return (v != null && isFinite(v)) ? v : null;
+  };
+  const pelvicDrop = get('Pelvic Drop'), trunkLean = get('Trunk Lean');
+  const kvL = get('Left Knee Valgus'),  kvR = get('Right Knee Valgus');
+  const maxValgus = (kvL!=null&&kvR!=null)?Math.max(kvL,kvR):(kvL??kvR??null);
+  const haL = get('Left Hip Adduction'), haR = get('Right Hip Adduction');
+  const maxHipAdd = (haL!=null&&haR!=null)?Math.max(haL,haR):(haL??haR??null);
+
+  const scores  = {overstrider:0,bouncer:0,collapser:0,glutAmnesiac:0,shuffler:0,efficient:0};
+  const drivers = {overstrider:[],bouncer:[],collapser:[],glutAmnesiac:[],shuffler:[],efficient:[]};
+
+  // Overstrider
+  if(overstride==='severe')   {scores.overstrider+=3;drivers.overstrider.push('severe overstride');}
+  if(overstride==='moderate') {scores.overstrider+=2;drivers.overstrider.push('moderate overstride');}
+  if(overstride==='mild')     {scores.overstrider+=1;drivers.overstrider.push('mild overstride');}
+  if(shinAngle!=null&&shinAngle>20) {scores.overstrider+=2;drivers.overstrider.push('shin angle '+shinAngle+'\u00b0 at contact');}
+  else if(shinAngle!=null&&shinAngle>15){scores.overstrider+=1;drivers.overstrider.push('shin angle '+shinAngle+'\u00b0');}
+  if(footStrike==='heel'){scores.overstrider+=1;drivers.overstrider.push('heel strike');}
+
+  // Bouncer
+  if(vo!=null&&vo>12)    {scores.bouncer+=3;drivers.bouncer.push('VO '+vo+'cm — excessive');}
+  else if(vo!=null&&vo>10){scores.bouncer+=2;drivers.bouncer.push('VO '+vo+'cm — elevated');}
+  else if(vo!=null&&vo>8) {scores.bouncer+=1;drivers.bouncer.push('VO '+vo+'cm — borderline');}
+  if(cadence<160)        {scores.bouncer+=1;drivers.bouncer.push('cadence '+cadence+' spm');}
+
+  // Collapser
+  if(maxValgus!=null&&maxValgus>10){scores.collapser+=3;drivers.collapser.push('knee valgus '+Math.round(maxValgus)+'\u00b0');}
+  else if(maxValgus!=null&&maxValgus>5){scores.collapser+=1;drivers.collapser.push('knee valgus '+Math.round(maxValgus)+'\u00b0');}
+  if(pelvicDrop!=null&&pelvicDrop>7){scores.collapser+=2;drivers.collapser.push('pelvic drop '+Math.round(pelvicDrop)+'\u00b0');}
+  else if(pelvicDrop!=null&&pelvicDrop>4){scores.collapser+=1;drivers.collapser.push('pelvic drop '+Math.round(pelvicDrop)+'\u00b0');}
+  if(maxHipAdd!=null&&maxHipAdd>10){scores.collapser+=1;drivers.collapser.push('hip adduction '+Math.round(maxHipAdd)+'\u00b0');}
+
+  // Glut Amnesiac
+  if(hipExt!=null&&hipExt<8)   {scores.glutAmnesiac+=3;drivers.glutAmnesiac.push('hip ext only '+hipExt+'\u00b0 at toe-off');}
+  else if(hipExt!=null&&hipExt<12){scores.glutAmnesiac+=2;drivers.glutAmnesiac.push('limited hip ext '+hipExt+'\u00b0');}
+  if(trunkLean!=null&&trunkLean>18){scores.glutAmnesiac+=2;drivers.glutAmnesiac.push('trunk lean '+Math.round(trunkLean)+'\u00b0');}
+  else if(trunkLean!=null&&trunkLean>12){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('trunk lean '+Math.round(trunkLean)+'\u00b0');}
+  if(cadence<165&&overstride!=='none'){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('overstride + low cadence');}
+
+  // Shuffler
+  if(peakKnee!=null&&peakKnee<90)  {scores.shuffler+=3;drivers.shuffler.push('peak knee flex '+peakKnee+'\u00b0 — very stiff');}
+  else if(peakKnee!=null&&peakKnee<100){scores.shuffler+=1;drivers.shuffler.push('peak knee flex '+peakKnee+'\u00b0');}
+  if(cadence<160)                   {scores.shuffler+=1;drivers.shuffler.push('cadence '+cadence+' spm');}
+  if(strideNorm!=null&&strideNorm<1.5){scores.shuffler+=1;drivers.shuffler.push('stride '+strideNorm+'\u00d7 leg — short');}
+
+  // Efficient
+  if(cadence>=170) {scores.efficient+=1;drivers.efficient.push('cadence '+cadence+' spm');}
+  if(footStrike==='midfoot'||footStrike==='forefoot'){scores.efficient+=1;drivers.efficient.push(footStrike+' strike');}
+  if(vo!=null&&vo<=8)  {scores.efficient+=1;drivers.efficient.push('VO '+vo+'cm');}
+  if(overstride==='none'){scores.efficient+=1;drivers.efficient.push('no overstride');}
+  if(pelvicDrop!=null&&pelvicDrop<=3){scores.efficient+=1;drivers.efficient.push('pelvic drop '+Math.round(pelvicDrop)+'\u00b0');}
+  if(stepAsym!=null&&stepAsym<=4)    {scores.efficient+=1;drivers.efficient.push(stepAsym+'% step asym');}
+
+  const DYSFN = ['overstrider','bouncer','collapser','glutAmnesiac','shuffler'];
+  const maxD  = Math.max(...DYSFN.map(k=>scores[k]));
+
+  if(maxD < 2) {
+    const bl = DYSFN.filter(k=>scores[k]===1);
+    return {
+      primary:{id:'efficient',label:'Efficient',icon:'&#x2705;',color:'#10b981',
+        tagline:'Well-rounded mechanics \u2014 minor coaching points only',
+        drivers:bl.length>0?['Good overall form',...bl.flatMap(k=>drivers[k]).slice(0,3)]
+          :drivers.efficient.length>0?drivers.efficient:['Good overall form']},
+      secondary:null
+    };
+  }
+
+  const sorted = DYSFN.map(k=>({id:k,score:scores[k]})).sort((a,b)=>b.score-a.score).filter(x=>x.score>=2);
+  const META = {
+    overstrider: {label:'Overstrider',  icon:'&#x26A1;',  color:'#f59e0b',tagline:'Foot lands ahead of centre of mass \u2014 increased braking impulse and knee loading'},
+    bouncer:     {label:'Bouncer',      icon:'&#x2195;',  color:'#f97316',tagline:'Excessive vertical oscillation \u2014 energy wasted on upward movement'},
+    collapser:   {label:'Collapser',    icon:'&#x1F9B5;', color:'#ef4444',tagline:'Dynamic valgus / frontal plane instability \u2014 hip abductor deficit'},
+    glutAmnesiac:{label:'Glut Amnesiac',icon:'&#x1F3CB;', color:'#8b5cf6',tagline:'Restricted hip extension \u2014 gluteal under-recruitment forces trunk compensation'},
+    shuffler:    {label:'Shuffler',     icon:'&#x1F504;', color:'#6366f1',tagline:'Low knee lift and short stride \u2014 stiff gait, reduced shock absorption'},
+  };
+  const primary = sorted[0], secondary = sorted.length>1&&sorted[1].score>=2?sorted[1]:null;
+  return {
+    primary:  {...META[primary.id],  id:primary.id,  drivers:drivers[primary.id]},
+    secondary:secondary?{...META[secondary.id],id:secondary.id,drivers:drivers[secondary.id]}:null
+  };
+}
+
+function renderStrideMetrics(metrics, aggregated={}) {
   const section = document.getElementById('strideMetricsSection');
   const body    = document.getElementById('strideMetricsBody');
   const badge   = document.getElementById('strideMetricsBadge');
@@ -6798,6 +7027,28 @@ function renderStrideMetrics(metrics) {
   const kpiClass = (level) =>
     level==='ok' ? 'stride-kpi-flag-ok' : level==='warn' ? 'stride-kpi-flag-warn'
     : level==='info' ? '' : 'stride-kpi-flag-poor';
+
+  // ── Archetype tile ──
+  const _arch = classifyRunningArchetype(metrics, aggregated);
+  if(_arch && _arch.primary) {
+    const _p = _arch.primary, _s = _arch.secondary;
+    const _drvHtml = (drv, col) => drv.map(d =>
+      '<span style="background:' + col + '18;color:' + col + ';font-size:.68rem;font-weight:600;padding:2px 8px;border-radius:12px;">' + d + '</span>'
+    ).join('');
+    html += '<div style="background:var(--surface);border:2px solid ' + _p.color + '33;'
+      + 'border-left:4px solid ' + _p.color + ';border-radius:10px;padding:14px 18px;margin-bottom:16px;">'
+      + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">'
+      + '<span style="font-size:1.3rem;">' + _p.icon + '</span>'
+      + '<div><div style="font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;">Running Style Archetype</div>'
+      + '<div style="font-size:1.0rem;font-weight:700;color:' + _p.color + ';">' + _p.label
+      + (_s ? ' <span style="font-size:.78rem;color:var(--muted);font-weight:400;">+ ' + _s.icon + ' ' + _s.label + '</span>' : '')
+      + '</div></div></div>'
+      + '<div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;line-height:1.55;">' + _p.tagline + '</div>'
+      + '<div style="display:flex;gap:5px;flex-wrap:wrap;">'
+      + _drvHtml(_p.drivers, _p.color)
+      + (_s ? _drvHtml(_s.drivers.slice(0,2), _s.color) : '')
+      + '</div></div>';
+  }
 
   // ── KPI tiles ──
   const kpis = [
@@ -6963,6 +7214,12 @@ function renderStrideMetrics(metrics) {
         </span>
       </div>
     </div>
+    ${sm.verticalOscillationCm!=null ? `<div style="margin-bottom:6px;padding:8px 12px;background:var(--teal-light);border-radius:6px;font-size:.73rem;color:var(--teal);">
+      📊 <strong>Vertical oscillation ${sm.verticalOscillationCm}cm</strong> — hip excursion per stride.
+      ${sm.verticalOscillationCm < 6 ? 'Elite-level economy.' : sm.verticalOscillationCm <= 10 ? 'Normal recreational range.' : 'High bounce — energy inefficient. Check hip abductor strength and cadence.'}
+      ${sm.overstrideGrade && sm.overstrideGrade !== 'none' ? `<br>⚠ <strong>Overstride ${sm.overstrideDistCm ?? ''}cm (${sm.overstrideGrade})</strong> — foot landing ahead of hip at contact. ${sm.overstrideGrade === 'severe' ? 'Significant braking impulse risk.' : 'Consider shorter stride cue and cadence increase.'}` : ''}
+      ${sm.shinAngleAtContactDeg!=null ? `<br>📐 <strong>Shin angle at contact: ${sm.shinAngleAtContactDeg}°</strong> — ${sm.shinAngleAtContactDeg <= 15 ? 'within normal range.' : sm.shinAngleAtContactDeg <= 20 ? 'borderline — monitor landing position.' : 'excessive forward lean at contact — braking force risk.'}` : ''}
+    </div>` : ''}
     ⚠️ Cadence and stride duration are accurate at any frame rate. GCT and float time require 60fps+.
     Phase labels on gallery frames marked <strong style="color:#7ec8c0;">✓</strong> are biomechanically detected; those marked
     <strong style="color:var(--muted);">~</strong> are nearest-event interpolated and should be interpreted with caution.
@@ -9367,6 +9624,11 @@ HIP STRATEGY: Only flag inadequate hip flexion if Hip Flexion (peak) < 30°. Val
 - Knee Valgus (Left/Right): measured from FRONT view as knee deviation from hip-ankle axis. Normal <5°. Values >10° suggest dynamic valgus collapse. Only valid from frontal camera. Side-view knee valgus data is not reliable — ignore if only side view available.
 - Hip Adduction (Left/Right): measured from FRONT view as the medial inclination angle of the thigh (hip→knee) from vertical during swing phase. Normal 0–8° (slight medial inclination is normal and efficient). Values >10° indicate the thigh is crossing the body midline (crossover gait) — associated with IT band syndrome and patellofemoral pain. Only valid from frontal camera.
 - Compensatory patterns: The report may include a "Compensatory Movement Patterns" section flagging when multiple metrics deviate together in clinically meaningful ways (e.g. low hip flexion + high trunk lean = lumbar compensation; pelvic drop + knee valgus = hip abductor weakness cascade; restricted knee flexion + elevated cadence = stiff-leg shuffling). If this section is present, these patterns should anchor your clinical impressions.
+- Running Style Archetype: primary gait pattern classification. Archetypes: Efficient, Overstrider, Bouncer, Collapser, Glut Amnesiac, Shuffler. Use it as the anchor for clinical impressions.
+- Vertical Oscillation: hip centre-of-mass excursion per stride in cm. Normal 6–10cm recreational; elite <6cm; >10cm indicates energy-wasting bounce pattern, often paired with hip abductor weakness or cadence issues. Note: requires height input for calibration — only reported when height is entered.
+- Overstride: distance (cm) the foot lands ahead of the hip at initial contact. None (<5cm) = optimal. Mild (5–15cm) = monitor. Moderate (15–25cm) = increased braking impulse and knee extensor moment risk. Severe (>25cm) = significant intervention needed. Overstride is more clinically meaningful than stride length alone.
+- Shin Angle at Contact: tibia angle from vertical at initial contact. Normal 5–15° forward. >20° strongly associated with overstriding and high braking forces (increases GRF and knee extensor moment). Correlates with overstride distance.
+- Running style archetype: ${(() => { try { const a=classifyRunningArchetype(window_strideMetrics,aggregated); return a?.primary ? a.primary.label+(a.secondary?" + "+a.secondary.label:"")+" ("+a.primary.drivers.slice(0,2).join(", ")+")" : "not classified"; } catch(e){return "not classified";} })()}
 - Knee Flexion (RUNNING CONVENTION — CRITICAL): Values are peak swing-phase flexion degrees (0°=straight, higher=more bent). A HIGHER value = MORE flexion = BETTER shock absorption and stride mechanics. A value of 123° means MORE knee bend than 115° — do NOT describe the 123° limb as having 'reduced' or 'restricted' flexion compared to the 115° limb. Asymmetry is only clinically significant if one side is >15° lower (less bent) than the other, suggesting restricted swing mechanics on that side. When a stride engine peak value is available (from dense 64-128 frame analysis), it supersedes gallery-frame estimates for the reference leg.
 ${(() => {
   // Running context from manual inputs
@@ -10037,7 +10299,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     // Render stride metrics for gait/running
     if(/running|gait|walk/i.test(movement) && window_strideMetrics) {
-      renderStrideMetrics(window_strideMetrics);
+      renderStrideMetrics(window_strideMetrics, aggregated);
     } else {
       const sm = document.getElementById('strideMetricsSection');
       if(sm) sm.style.display = 'none';
@@ -11032,6 +11294,24 @@ async function exportPDF() {
       if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step timing'});
       if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
       if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'! overstriding':sm.overstrideFlag==='understride'?'! understriding':'optimal range'});
+      if(sm.verticalOscillationCm!=null) kpiDefs.push({
+        label:'Vertical Oscillation',
+        value:`${sm.verticalOscillationCm}cm`,
+        sub: sm.verticalOscillationCm < 6 ? 'Elite (<6cm)' : sm.verticalOscillationCm <= 10 ? 'Normal (6–10cm)' : '⚠ High bounce (>10cm)',
+        flag: sm.verticalOscillationCm <= 10 ? 'ok' : 'warn',
+      });
+      if(sm.overstrideGrade!=null && sm.overstrideGrade !== 'none') kpiDefs.push({
+        label:'Overstride',
+        value: sm.overstrideDistCm!=null ? `${sm.overstrideDistCm}cm` : sm.overstrideGrade,
+        sub: sm.overstrideGrade === 'mild' ? 'Mild — monitor' : sm.overstrideGrade === 'moderate' ? '⚠ Moderate — increased braking' : '⚠ Severe — high braking impulse',
+        flag: sm.overstrideGrade === 'mild' ? 'warn' : 'poor',
+      });
+      if(sm.shinAngleAtContactDeg!=null) kpiDefs.push({
+        label:'Shin Angle at Contact',
+        value:`${sm.shinAngleAtContactDeg}°`,
+        sub: sm.shinAngleAtContactDeg <= 15 ? 'Normal (5–15°)' : sm.shinAngleAtContactDeg <= 20 ? '⚠ Borderline (15–20°)' : '⚠ Excessive (>20°) — braking risk',
+        flag: sm.shinAngleAtContactDeg <= 15 ? 'ok' : sm.shinAngleAtContactDeg <= 20 ? 'warn' : 'poor',
+      });
 
       const KPI_COLS = 3;
       const kW = (CW - (KPI_COLS-1)*4) / KPI_COLS;
