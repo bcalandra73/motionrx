@@ -9137,13 +9137,14 @@ async function runAnalysis() {
     // interactive editor, and wait for them to click "Generate Report".
     // After they confirm, re-draw skeletons and re-extract angles for edited frames.
     if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
+      const _hasDual = !!(uploadedFile2 && extractedFrames2.length > 0); // hasDualView not declared yet
       const corrResult = await showLandmarkReviewPanel(
         extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
-        hasDualView ? extractedFrames2  : null,
-        hasDualView ? refinedLandmarks  : null,  // secondary uses fusedLandmarks2 — passed as alias
-        hasDualView ? annotatedFrames2  : null
+        _hasDual ? extractedFrames2  : null,
+        _hasDual ? refinedLandmarks  : null,
+        _hasDual ? annotatedFrames2  : null
       );
-      const correctedLms  = corrResult?.primary   ?? corrResult; // backward compat if no secondary
+      const correctedLms  = corrResult?.primary   ?? corrResult;
       const correctedLms2 = corrResult?.secondary ?? null;
 
       // Re-process edited primary frames
@@ -9157,7 +9158,7 @@ async function runAnalysis() {
         if(_ri < allAngles.length) allAngles[_ri] = extractAngles(correctedLms[_ri], cameraView, movement);
       }
       // Re-process edited secondary frames
-      if(hasDualView && correctedLms2) {
+      if(_hasDual && correctedLms2) {
         for(let _ri = 0; _ri < extractedFrames2.length; _ri++) {
           if(!_rvEdited2[_ri] || !correctedLms2[_ri]) continue;
           const corrMpResult2 = {poseLandmarks: correctedLms2[_ri]};
