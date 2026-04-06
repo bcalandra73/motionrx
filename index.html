@@ -9133,6 +9133,7 @@ async function runAnalysis() {
     }
 
     // ── Second video state — declared here so review hook and Stage 3b both have access ──
+    const hasDualView = uploadedFile2 && extractedFrames2.length > 0;
     let annotatedFrames2 = [];
     let allAngles2 = [];
     let aggregated2 = {};
@@ -9314,7 +9315,6 @@ async function runAnalysis() {
   }
 
   // ── Stage 3b: Second video pipeline (if uploaded) ──
-  const hasDualView = uploadedFile2 && extractedFrames2.length > 0;
 
   if(hasDualView) {
     // ── Re-extract secondary video at phase-aligned positions ───────────────
