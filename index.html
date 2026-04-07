@@ -1032,7 +1032,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     </div>
     <div class="review-frame-info" id="reviewFrameInfo"></div>
     <div class="review-hint">
-      🎯 <strong>Drag tip:</strong> Grab any coloured dot and drag it to the correct joint position.
+      🎯 <strong>Drag tip:</strong> Grab any coloured dot and drag it to the correct joint position. <span style="color:var(--amber);font-weight:600;">Dashed ? dots</span> = joints MediaPipe missed — drag them to their correct position.
       <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#06b6d4;display:inline-block;"></span>Hips</span>
       <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#3b82f6;display:inline-block;"></span>Knees</span>
       <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#fbbf24;display:inline-block;"></span>Ankles</span>
@@ -8221,6 +8221,16 @@ const _RV_COLOR = (i) => {
   if(i===13||i===14||i===15||i===16) return '#fb923c';
   return '#94a3b8';
 };
+const _RV_NAMES = {
+  11:'L Shoulder', 12:'R Shoulder', 13:'L Elbow', 14:'R Elbow',
+  15:'L Wrist',    16:'R Wrist',
+  23:'L Hip',      24:'R Hip',
+  25:'L Knee',     26:'R Knee',
+  27:'L Ankle',    28:'R Ankle',
+  29:'L Heel',     30:'R Heel',
+  31:'L Toe',      32:'R Toe',
+};
+let _rvHoverLM = null; // index of landmark currently hovered
 const _RV_CONNECTIONS = [
   [0,11],[0,12],[11,12],[11,23],[12,24],[23,24],
   [23,25],[24,26],[25,27],[26,28],
@@ -8331,6 +8341,8 @@ function _rvShowFrame(idx) {
 }
 
 // ── Render canvas for current frame ─────────────────────────────────────────
+let _rvResolvedLms = null; // cache of ghost-resolved landmarks for current frame
+
 function _rvRenderCanvas() {
   const cv = document.getElementById('reviewCanvas');
   const ctx = cv.getContext('2d');
@@ -8339,6 +8351,7 @@ function _rvRenderCanvas() {
   const li  = is2 ? idx - _rvN1 : idx;
   const rawFrames = is2 ? _rvRawFrames2 : _rvRawFrames;
   const lms       = is2 ? (_rvLandmarks2?.[li] ?? null) : (_rvLandmarks?.[li] ?? null);
+  _rvResolvedLms  = _rvResolveLms(lms); // cache for _rvNearestLM hover/drag
   const b64 = rawFrames?.[li]?.imageData;
   if(!b64) return;
 
@@ -8357,62 +8370,156 @@ function _rvRenderCanvas() {
 }
 
 // ── Draw skeleton on canvas ───────────────────────────────────────────────────
-function _rvDrawSkeleton(ctx, W, H, lms) {
-  if(!lms) return;
-  const conf = (i) => lms[i]?.visibility ?? 0;
+// ── Resolve ghost landmarks: for _RV_PRIMARY landmarks that are null or very low
+// confidence, synthesise a position from neighbours so the PT can still drag them.
+function _rvResolveLms(lms) {
+  if(!lms) return null;
+  const out = lms.slice(); // shallow copy — we never mutate originals here
+  // Anatomical defaults relative to frame (normalised) — rough fallback positions
+  // for when MediaPipe completely misses a joint. Posterior-view friendly.
+  const defaults = {
+    23:{x:0.38,y:0.38}, 24:{x:0.62,y:0.38}, // hips
+    25:{x:0.38,y:0.58}, 26:{x:0.62,y:0.58}, // knees
+    27:{x:0.38,y:0.78}, 28:{x:0.62,y:0.78}, // ankles
+    29:{x:0.37,y:0.84}, 30:{x:0.63,y:0.84}, // heels
+    31:{x:0.37,y:0.88}, 32:{x:0.63,y:0.88}, // toes
+    11:{x:0.36,y:0.22}, 12:{x:0.64,y:0.22}, // shoulders
+  };
+  // Symmetry partners (if one side is good, mirror the other)
+  const pairs = [[23,24],[25,26],[27,28],[29,30],[31,32],[11,12]];
+  pairs.forEach(([L,R]) => {
+    const lGood = out[L] && (out[L].visibility||0) > 0.10;
+    const rGood = out[R] && (out[R].visibility||0) > 0.10;
+    if(lGood && !rGood) {
+      // Mirror left onto right
+      out[R] = {...out[L], x: 1 - out[L].x, visibility: 0.04, presence: 0.04, _ghost: true};
+    } else if(rGood && !lGood) {
+      out[L] = {...out[R], x: 1 - out[R].x, visibility: 0.04, presence: 0.04, _ghost: true};
+    } else if(!lGood && !rGood) {
+      // Both missing: place anatomical defaults
+      if(defaults[L]) out[L] = {x:defaults[L].x, y:defaults[L].y, z:0, visibility:0.02, presence:0.02, _ghost:true};
+      if(defaults[R]) out[R] = {x:defaults[R].x, y:defaults[R].y, z:0, visibility:0.02, presence:0.02, _ghost:true};
+    }
+  });
+  return out;
+}
 
-  // Connections
+function _rvDrawSkeleton(ctx, W, H, lmsRaw) {
+  if(!lmsRaw) return;
+  const lms = _rvResolveLms(lmsRaw); // fill in missing joints as ghosts
+  const conf = (i) => lms[i]?.visibility ?? 0;
+  const isGhost = (i) => !!(lms[i]?._ghost);
+
+  // Connections — skip implausibly long bones, skip ghost-to-ghost
   ctx.lineWidth = Math.max(1.5, W/300);
   _RV_CONNECTIONS.forEach(([a,b]) => {
     const la = lms[a], lb = lms[b];
-    if(!la||!lb||conf(a)<0.15||conf(b)<0.15) return;
-    const c = Math.min(conf(a), conf(b));
-    ctx.globalAlpha = 0.55 + c*0.35;
-    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    if(!la||!lb) return;
+    if(isGhost(a) && isGhost(b)) return; // don't draw ghost-to-ghost bones
+    const dist = Math.sqrt(Math.pow(la.x-lb.x,2) + Math.pow((la.y-lb.y)*(H/W),2));
+    if(dist > 0.45) return;
+    const c = Math.min(Math.max(conf(a),0.04), Math.max(conf(b),0.04));
+    ctx.globalAlpha = isGhost(a)||isGhost(b) ? 0.25 : 0.55 + c*0.35;
+    ctx.strokeStyle = isGhost(a)||isGhost(b) ? 'rgba(255,255,100,0.6)' : 'rgba(255,255,255,0.75)';
+    if(isGhost(a)||isGhost(b)) {
+      ctx.setLineDash([4,4]);
+    }
     ctx.beginPath();
     ctx.moveTo(la.x*W, la.y*H);
     ctx.lineTo(lb.x*W, lb.y*H);
     ctx.stroke();
+    ctx.setLineDash([]);
   });
   ctx.globalAlpha = 1;
 
-  // Landmarks
+  // Landmarks — render ALL primary/secondary, ghosted ones shown faded with dashed ring
   lms.forEach((lm, i) => {
-    if(!lm || (lm.visibility||0) < 0.12) return;
+    if(!lm) return;
     const isPrimary = _RV_PRIMARY.has(i);
     const isSecondary = _RV_SECONDARY.has(i);
     if(!isPrimary && !isSecondary) return;
+    // Skip very-low-conf non-ghost non-primary landmarks to avoid clutter
+    if(!isPrimary && !lm._ghost && (lm.visibility||0) < 0.12) return;
+    const ghost    = !!lm._ghost;
+    const isHovered = (i === _rvHoverLM);
     const r = isPrimary ? Math.max(8, W/65) : Math.max(5, W/95);
     const col = _RV_COLOR(i);
 
+    ctx.globalAlpha = ghost ? 0.35 : 1;
+
+    // Hover glow ring
+    if(isHovered) {
+      ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r+6, 0, Math.PI*2);
+      ctx.fillStyle = col + '55'; ctx.fill();
+      ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r+3, 0, Math.PI*2);
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    ctx.lineWidth = Math.max(1.5, W/300);
     ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r+2.5, 0, Math.PI*2);
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
-    ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r, 0, Math.PI*2);
-    ctx.fillStyle = col; ctx.fill();
-    // White dot center for grab affordance
-    if(isPrimary) {
-      ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r*0.32, 0, Math.PI*2);
-      ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+
+    if(ghost && !isHovered) {
+      // Ghost: dashed ring only — no fill, so PT knows this is a placeholder
+      ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r, 0, Math.PI*2);
+      ctx.strokeStyle = col; ctx.lineWidth = 2;
+      ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+    } else {
+      ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r, 0, Math.PI*2);
+      ctx.fillStyle = isHovered ? '#ffffff' : col; ctx.fill();
+      if(isHovered) {
+        ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r*0.55, 0, Math.PI*2);
+        ctx.fillStyle = col; ctx.fill();
+      }
+      if(isPrimary && !isHovered) {
+        ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, r*0.32, 0, Math.PI*2);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+      }
     }
+    ctx.globalAlpha = 1;
+
     // Manual-corrected star
     if(lm.source === 'manual-corrected') {
-      ctx.font = `bold ${Math.max(9,W/100)}px sans-serif`;
+      ctx.font = 'bold ' + Math.max(9,W/100) + 'px sans-serif';
       ctx.fillStyle = '#fff';
-      ctx.fillText('✎', lm.x*W + r + 2, lm.y*H - r);
+      ctx.fillText('\u270e', lm.x*W + r + 2, lm.y*H - r);
+    }
+    // Ghost indicator — small "?" so PT knows this needs correction
+    if(ghost && !isHovered) {
+      ctx.font = 'bold ' + Math.max(8,W/110) + 'px sans-serif';
+      ctx.fillStyle = col; ctx.globalAlpha = 0.7;
+      ctx.fillText('?', lm.x*W - 3, lm.y*H + 4);
+      ctx.globalAlpha = 1;
+    }
+    // Landmark name label on hover
+    if(isHovered && _RV_NAMES[i]) {
+      const label = _RV_NAMES[i];
+      const fs = Math.max(11, W/50);
+      ctx.font = 'bold ' + fs + 'px Inter,sans-serif';
+      const tw = ctx.measureText(label).width;
+      const lx = Math.min(lm.x*W + r + 6, W - tw - 6);
+      const ly = Math.max(lm.y*H - r - 4, fs + 4);
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.beginPath();
+      ctx.roundRect(lx-4, ly-fs, tw+8, fs+6, 4);
+      ctx.fill();
+      ctx.fillStyle = col;
+      ctx.fillText(label, lx, ly);
     }
   });
 }
 
 // ── Find nearest draggable landmark ──────────────────────────────────────────
 function _rvNearestLM(normX, normY) {
-  const is2 = _rvActiveFrame >= _rvN1;
-  const li  = is2 ? _rvActiveFrame - _rvN1 : _rvActiveFrame;
-  const lms = is2 ? (_rvLandmarks2?.[li] ?? null) : (_rvLandmarks?.[li] ?? null);
+  // Use the ghost-resolved cache so ghost landmarks are hittable
+  const lms = _rvResolvedLms;
   if(!lms) return null;
   let best = null, bestD = Infinity;
   lms.forEach((lm, i) => {
     if(!lm || !(_RV_PRIMARY.has(i)||_RV_SECONDARY.has(i))) return;
-    if((lm.visibility||0) < 0.12) return;
+    // Include ghost landmarks — they need to be draggable to correct them
+    if(!lm._ghost && (lm.visibility||0) < 0.05) return;
     const dx = lm.x - normX, dy = lm.y - normY;
     const d = Math.sqrt(dx*dx + dy*dy);
     if(d < bestD) { bestD = d; best = {i, d}; }
@@ -8469,9 +8576,24 @@ function _rvAttachCanvasEvents() {
   const cv = document.getElementById('reviewCanvas');
   if(!cv) return;
   cv.addEventListener('mousedown',  e => { e.preventDefault(); _rvHandleStart(e.clientX, e.clientY); });
-  cv.addEventListener('mousemove',  e => { _rvHandleMove(e.clientX, e.clientY); });
+  cv.addEventListener('mousemove',  e => {
+    _rvHandleMove(e.clientX, e.clientY);
+    // Update hover highlight: find nearest landmark and redraw if changed
+    if(_rvDragging == null) {
+      const {x, y} = _rvCanvasNorm(e.clientX, e.clientY);
+      const near = _rvNearestLM(x, y);
+      if(near !== _rvHoverLM) {
+        _rvHoverLM = near ?? null;
+        cv.style.cursor = near != null ? 'grab' : 'crosshair';
+        _rvRenderCanvas();
+      }
+    }
+  });
   cv.addEventListener('mouseup',    () => _rvHandleEnd());
-  cv.addEventListener('mouseleave', () => _rvHandleEnd());
+  cv.addEventListener('mouseleave', () => {
+    _rvHandleEnd();
+    if(_rvHoverLM !== null) { _rvHoverLM = null; _rvRenderCanvas(); }
+  });
   cv.addEventListener('touchstart', e => { e.preventDefault(); _rvHandleStart(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
   cv.addEventListener('touchmove',  e => { e.preventDefault(); _rvHandleMove(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
   cv.addEventListener('touchend',   e => { e.preventDefault(); _rvHandleEnd(); }, {passive:false});
