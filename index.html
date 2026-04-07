@@ -7246,9 +7246,9 @@ function renderStrideMetrics(metrics, aggregated={}) {
       </div>
     </div>
     ${sm.verticalOscillationCm!=null ? `<div style="margin-bottom:6px;padding:8px 12px;background:var(--teal-light);border-radius:6px;font-size:.73rem;color:var(--teal);">
-      📊 <strong>Vertical oscillation ${sm.verticalOscillationCm}cm</strong> — hip excursion per stride.
-      ${sm.verticalOscillationCm < 6 ? 'Elite-level economy.' : sm.verticalOscillationCm <= 10 ? 'Normal recreational range.' : 'High bounce — energy inefficient. Check hip abductor strength and cadence.'}
-      ${sm.overstrideGrade && sm.overstrideGrade !== 'none' ? `<br>⚠ <strong>Overstride ${sm.overstrideDistCm ?? ''}cm (${sm.overstrideGrade})</strong> — foot landing ahead of hip at contact. ${sm.overstrideGrade === 'severe' ? 'Significant braking impulse risk.' : 'Consider shorter stride cue and cadence increase.'}` : ''}
+      📊 <strong>Vertical oscillation ${metrics.verticalOscillationCm}cm</strong> — hip excursion per stride.
+      ${metrics.verticalOscillationCm < 6 ? 'Elite-level economy.' : metrics.verticalOscillationCm <= 10 ? 'Normal recreational range.' : 'High bounce — energy inefficient. Check hip abductor strength and cadence.'}
+      ${metrics.overstrideGrade && metrics.overstrideGrade !== 'none' ? `<br>⚠ <strong>Overstride ${metrics.overstrideDistCm ?? ''}cm (${metrics.overstrideGrade})</strong> — foot landing ahead of hip at contact. ${metrics.overstrideGrade === 'severe' ? 'Significant braking impulse risk.' : 'Consider shorter stride cue and cadence increase.'}` : ''}
       ${sm.shinAngleAtContactDeg!=null ? `<br>📐 <strong>Shin angle at contact: ${sm.shinAngleAtContactDeg}°</strong> — ${sm.shinAngleAtContactDeg <= 15 ? 'within normal range.' : sm.shinAngleAtContactDeg <= 20 ? 'borderline — monitor landing position.' : 'excessive forward lean at contact — braking force risk.'}` : ''}
     </div>` : ''}
     ⚠️ Cadence and stride duration are accurate at any frame rate. GCT and float time require 60fps+.
