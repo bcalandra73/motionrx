@@ -9691,6 +9691,7 @@ async function runAnalysis() {
       // Re-process edited primary frames
       for(let _ri = 0; _ri < extractedFrames.length; _ri++) {
         if(!_rvEdited[_ri] || !correctedLms?.[_ri]) continue;
+        window._primaryCorrectionsMade = true; // mark that PT edited landmarks
         const corrMpResult = {poseLandmarks: correctedLms[_ri], _raw: fusedResults[_ri]?._raw};
         const redrawn = await drawSkeleton(
           extractedFrames[_ri].imageData, corrMpResult, null, cameraView, extractedFrames[_ri].phase
@@ -9699,6 +9700,8 @@ async function runAnalysis() {
         if(_ri < allAngles.length) allAngles[_ri] = extractAngles(correctedLms[_ri], cameraView, movement);
       }
       // Re-process edited secondary frames
+      // Flag primary corrections so Stage 3a knows to preserve manual edits
+      window._primaryCorrectionsMade = false;
       if(_hasDual && correctedLms2) {
         for(let _ri = 0; _ri < extractedFrames2.length; _ri++) {
           if(!_rvEdited2[_ri] || !correctedLms2[_ri]) continue;
@@ -9857,7 +9860,9 @@ async function runAnalysis() {
   // has time-based fractions (computed from stride engine), re-seek the original 120fps video
   // to those exact times and replace annotatedFrames with high-temporal-resolution images.
   const _isGaitMovement = /running|gait|walk/i.test(movement);
-  if(_isGaitMovement && window_primaryPhaseSelection && uploadedFile && mpReady && poseLandmarkerInstance) {
+  // Skip Stage 3a if PT made manual landmark corrections — re-extracting would discard them
+  const _skipStage3a = window._primaryCorrectionsMade === true;
+  if(!_skipStage3a && _isGaitMovement && window_primaryPhaseSelection && uploadedFile && mpReady && poseLandmarkerInstance) {
     try {
       statusEl.textContent = 'Re-extracting gallery frames at precise phase times...';
       const _p3aVid = document.createElement('video');
@@ -10002,7 +10007,13 @@ async function runAnalysis() {
         poseLandmarks: lms,
         _raw: mpResults2[i]
       }));
-      for(let i = 0; i < extractedFrames2.length; i++) {
+      // Clear + cap to 8 — prevents initial-extraction count leaking in
+      annotatedFrames2 = [];
+      const _s3bCount = Math.min(extractedFrames2.length, 8);
+      const _s3bStep  = extractedFrames2.length <= 8 ? 1 : extractedFrames2.length / _s3bCount;
+      const _s3bIdxs  = Array.from({length:_s3bCount}, (_,ii) =>
+        Math.min(extractedFrames2.length-1, Math.round(ii * _s3bStep)));
+      for(const i of _s3bIdxs) {
         const frame = extractedFrames2[i];
         const mpResult = fusedResults2[i];
         const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2, frame.phase);
