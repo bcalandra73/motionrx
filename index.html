@@ -2413,19 +2413,47 @@ function startFrameExtraction(file, vid) {
               // stored above from perFrame[best.li].t). This correctly positions the secondary
               // camera seek to the same moment in the clip, even if the detected stride is
               // mid-clip. Falls back to canonical phase time if not available.
+              // ── Compute phase fractions from stride engine timing — NOT sparse frame indices ──
+              // The GaitFSM perFrame array has only ~6 frames per stride (9fps equivalent
+              // across a 14.1s clip). At this density, adjacent phases share the same frame,
+              // making frame-index arithmetic useless for distinguishing e.g. Propulsion from
+              // ToeOff (both land at r0+2 frames at 670ms stride / 9fps).
+              //
+              // Instead: use the KNOWN stride duration from the stride engine (±8ms accuracy)
+              // plus the LR anchor time from the sparse array (±110ms accuracy) to compute
+              // each phase's expected video time. The video is 120fps → 8.3ms per frame,
+              // so the re-extracted frames will be phase-accurate to within one video frame.
+              //
+              // Calibrated offsets from LR (r0 = composite peak = Loading Response):
+              const _phaseOffsets = {
+                contact:-0.08, loading:0, midstance:0.13, propulsion:0.27,
+                toeoff:0.39, earlyswing:0.51, midswing:0.64, lateswing:0.78
+              };
+              // LR anchor: video fraction of the loading response frame
+              const _lrFrac = frames.find(f=>f.phase?._baseId==='loading')?.phase?._videoFraction
+                           ?? (perFrame[r0]?.t ?? 0.5);
+              const _strideDurNorm = (window_strideMetrics?.strideDurationS && window_strideMetrics?.videoDurationS)
+                ? window_strideMetrics.strideDurationS / window_strideMetrics.videoDurationS
+                : null;
+
               window_primaryPhaseSelection = {
                 fractions: frames.map(f => {
-                  // Prefer actual video fraction (set during gallery frame selection above)
+                  const baseId = f.phase?._baseId;
+                  // Time-based fraction if stride engine data is available
+                  if(_strideDurNorm && _phaseOffsets[baseId] != null) {
+                    const tf = _lrFrac + _phaseOffsets[baseId] * _strideDurNorm;
+                    return Math.max(0.01, Math.min(0.99, tf));
+                  }
+                  // Fallback: actual sparse frame time
                   if(f.phase?._videoFraction != null) return f.phase._videoFraction;
-                  // Fallback: canonical phase time (correct only if stride fills the whole clip)
-                  const bid = f.phase?._baseId;
-                  const ph = bid ? runningPhases.find(p => p.id === bid) : null;
+                  const ph = runningPhases.find(p => p.id === baseId);
                   return ph ? ph.time : 0.5;
                 }),
                 labels: frames.map(f => f.phase),
               };
-              console.log(`[GaitFSM v4] Final ${frames.length}: ${frames.map(f=>f.phase?.label||'?').join(' | ')}`);
-              console.log(`[GaitFSM v4] Phase fractions for view2: ${window_primaryPhaseSelection.fractions.map(x=>x.toFixed(2)).join(', ')}`);
+              const _strideDurMs = window_strideMetrics?.strideDurationS ? (window_strideMetrics.strideDurationS*1000).toFixed(0) : '?';
+              console.log('[GaitFSM v4] Phase fractions (time-based, strideDur=' + _strideDurMs + 'ms): ' + window_primaryPhaseSelection.fractions.map(x=>x.toFixed(3)).join(', '));
+              console.log('[GaitFSM v4] Phases: ' + frames.map(f=>f.phase?.label||'?').join(' | '));
 
               // ── Store dense landmarks for angle computation ────────────────────────
               // extractAngles only runs on the 8 gallery frames, missing the true peak
@@ -9823,6 +9851,70 @@ async function runAnalysis() {
     }
   }
 
+  // ── Stage 3a: Re-extract primary gallery at accurate phase-aligned positions ──
+  // The GaitFSM dense array has only ~6 frames per stride (~9fps equivalent across the clip).
+  // Each gallery frame could be off by up to 110ms. Now that window_primaryPhaseSelection
+  // has time-based fractions (computed from stride engine), re-seek the original 120fps video
+  // to those exact times and replace annotatedFrames with high-temporal-resolution images.
+  const _isGaitMovement = /running|gait|walk/i.test(movement);
+  if(_isGaitMovement && window_primaryPhaseSelection && uploadedFile && mpReady && poseLandmarkerInstance) {
+    try {
+      statusEl.textContent = 'Re-extracting gallery frames at precise phase times...';
+      const _p3aVid = document.createElement('video');
+      _p3aVid.muted = true; _p3aVid.preload = 'auto';
+      const _p3aUrl = URL.createObjectURL(uploadedFile);
+      _p3aVid.src = _p3aUrl;
+      await new Promise(res => {
+        _p3aVid.oncanplay = res; _p3aVid.onloadeddata = res;
+        _p3aVid.onerror = res; setTimeout(res, 8000);
+      });
+      const _p3aDur = isFinite(_p3aVid.duration) && _p3aVid.duration > 0 ? _p3aVid.duration : null;
+      if(_p3aDur) {
+        const _phSel = window_primaryPhaseSelection;
+        const _newFrames = [];
+        for(let _i = 0; _i < _phSel.fractions.length; _i++) {
+          const _t = Math.max(0.05, Math.min(_phSel.fractions[_i] * _p3aDur, _p3aDur - 0.05));
+          const _b64 = await seekCapture(_p3aVid, _t);
+          if(_b64) _newFrames.push({imageData: _b64, phase: _phSel.labels[_i]});
+        }
+        if(_newFrames.length >= 4) {
+          // Run MP + skeleton on re-extracted frames
+          const _newMp = await runMediaPipeOnFrames(_newFrames);
+          const _newFused = await fusedLandmarkPipeline(
+            _newMp, _newFrames.map(f=>f.imageData), movement, cameraView
+          );
+          // Foot refinement for gait
+          let _newRef = _newFused;
+          if(mpReady && poseLandmarkerInstance) {
+            _newRef = await Promise.all(_newFused.map((lms,i) =>
+              lms ? refineFootLandmarks(_newFrames[i].imageData, lms) : Promise.resolve(null)
+            ));
+            const _tapeCfgP3a = readTapeConfig();
+            if(_tapeCfgP3a) {
+              _newRef = await Promise.all(_newRef.map((lms,i) =>
+                lms ? applyTapeRefinement(_newFrames[i].imageData, lms, _tapeCfgP3a) : Promise.resolve(null)
+              ));
+            }
+          }
+          const _newAnnotated = [];
+          for(let _i = 0; _i < _newFrames.length; _i++) {
+            const _mp = {poseLandmarks: _newRef[_i]};
+            const {canvas, base64} = await drawSkeleton(_newFrames[_i].imageData, _mp, null, cameraView, _newFrames[_i].phase);
+            _newAnnotated.push({base64, canvas, phase: _newFrames[_i].phase});
+          }
+          if(_newAnnotated.length >= 4) {
+            annotatedFrames.length = 0;
+            _newAnnotated.forEach(f => annotatedFrames.push(f));
+            console.log('[Analysis] Stage 3a: Primary gallery re-extracted at accurate phase times (' + _newAnnotated.length + ' frames)');
+          }
+        }
+      }
+      URL.revokeObjectURL(_p3aUrl);
+    } catch(_p3aErr) {
+      console.warn('[Analysis] Stage 3a: Primary re-extraction failed (will use GaitFSM frames):', _p3aErr.message);
+    }
+  }
+
   // ── Stage 3b: Second video pipeline (if uploaded) ──
 
   if(hasDualView) {
@@ -9920,7 +10012,13 @@ async function runAnalysis() {
         }
       }
     } else {
-      annotatedFrames2 = extractedFrames2.map(f => ({base64: f.imageData, canvas: null}));
+      // MP not available — use raw frames, capped to 8
+      const _eIdxs = Array.from({length: Math.min(extractedFrames2.length, 8)},
+        (_, ii) => Math.min(extractedFrames2.length-1,
+          Math.round(ii * extractedFrames2.length / Math.min(extractedFrames2.length, 8))));
+      annotatedFrames2 = _eIdxs.map(i => ({
+        base64: extractedFrames2[i].imageData, canvas: null, phase: extractedFrames2[i].phase
+      }));
     }
     aggregated2 = allAngles2.length > 0 ? aggregateAngles(allAngles2, extractedFrames2.map(f => f.phase || null)) : {};
 
