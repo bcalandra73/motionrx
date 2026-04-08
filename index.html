@@ -1983,23 +1983,66 @@ function startFrameExtraction(file, vid) {
               const argMaxR=(arr,from,to)=>{let b=-Infinity,bi=from;for(let i=from;i<=to&&i<arr.length;i++){if(arr[i]!=null&&arr[i]>b){b=arr[i];bi=i;}}return bi;};
 
               const r0=cycleStart, r1=cycleEnd;
-              // REF leg: contact(0%) → loading(8-18%) → midstance(18-35%) → propulsion(35-50%) → toeoff(25-55%) → midswing(55-100%)
-              const refContactIdx  = r0;
 
-              // Loading Response: peak knee flexion in early stance (0.06-0.22 of cycle).
-              // The knee bends maximally during weight acceptance — this is the clinical
-              // Loading Response phase. argMinR on included angle gives most-bent frame.
-              const refLoadingIdx  = argMinR(refKneeS, r0+Math.round(cycleLen*.06), r0+Math.round(cycleLen*.22));
+              // ── PHASE DETECTION — CORRECTED ────────────────────────────────────────────
+              // ROOT CAUSE OF PREVIOUS MISLABELLING:
+              // The composite contact signal (ankle Y high + knee extended) peaks at the
+              // LOADING RESPONSE to early MID-STANCE transition (~10% into the IC-to-IC cycle),
+              // NOT at true Initial Contact. This caused every gallery phase to be labelled
+              // 1–2 phases too late (IC showed mid-stance visually, loading showed propulsion).
+              //
+              // FIX: Treat the composite peak (r0) as the MID-STANCE ANCHOR, then search
+              // BACKWARD from r0 for true IC (knee at maximum pre-stance extension).
+              //
+              // Phase timing relative to composite peak (r0 = mid-stance anchor, 0%):
+              //   True IC:            r0 − 10–20% of cycle  (knee maximally extended before loading)
+              //   Loading Response:   IC + 3–18% (peak knee flexion during weight acceptance)
+              //   Mid Stance:         r0 (composite peak itself — body centred over foot)
+              //   Propulsion:         r0 + 15–35% (hip extending, ankle plantarflexing)
+              //   Toe Off:            r0 + 30–50% (hip at minimum during stance→swing)
+              //   Early Swing:        derived from OPP leg contact (~r0+40–55%)
+              //   Mid Swing:          r0 + 50–80% (ankle at highest point in swing)
+              //   Late Swing:         derived from OPP leg toeoff (~r0+65–85%)
 
-              const refMidstIdx    = argMinR(refKneeS, r0, r0+Math.round(cycleLen*.35));
+              // ── 1. True Initial Contact: backward search for knee extension peak ────────
+              // At IC the knee is at its maximum extension immediately before the rapid
+              // flexion of loading response. Search backward from r0 up to 22% of cycle.
+              const icLookback = Math.round(cycleLen * 0.22);
+              const icSearchSt = Math.max(0, r0 - icLookback);
+              const icSearchEd = Math.max(icSearchSt + 1, r0 - Math.round(cycleLen * 0.01));
+              let refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.13)); // default fallback
+              if(icSearchEd > icSearchSt) {
+                const candidateIC = argMaxR(refKneeS, icSearchSt, icSearchEd);
+                // Accept if the candidate has MORE knee extension than r0
+                // (guards against finding a bad frame where the knee signal is noisy)
+                if(refKneeS[candidateIC] != null &&
+                   (refKneeS[r0] == null || refKneeS[candidateIC] > refKneeS[r0])) {
+                  refContactIdx = candidateIC;
+                }
+              }
 
-              // Propulsion: the phase between midstance and toe-off where the ankle
-              // is plantarflexing and hip is extending. Use the midpoint of the
-              // midstance→toeoff interval as the best stable estimate.
-              const refToeoffIdx   = argMinR(refHipS, r0+Math.round(cycleLen*.20), r0+Math.round(cycleLen*.55));
-              const refPropIdx     = Math.round((refMidstIdx + refToeoffIdx) / 2);
+              // ── 2. Loading Response: peak knee flexion after IC ────────────────────────
+              // Search within IC+3% to IC+20% of the cycle.
+              const refLoadingIdx = argMinR(refKneeS,
+                Math.min(N-1, refContactIdx + Math.round(cycleLen * 0.03)),
+                Math.min(N-1, refContactIdx + Math.round(cycleLen * 0.20)));
 
-              const refMidswingIdx = argMinR(refAnkS, r0+Math.round(cycleLen*.50), r1);
+              // ── 3. Mid Stance: the composite peak itself ─────────────────────────────
+              const refMidstIdx = r0;
+
+              // ── 4. Toe Off + Propulsion: relative to mid-stance anchor ───────────────
+              // Toe-off: hip reaches minimum (near extension) as weight transfers to swing.
+              // Search r0+18% to r0+52%.
+              const refToeoffIdx = argMinR(refHipS,
+                Math.min(N-1, r0 + Math.round(cycleLen * 0.18)),
+                Math.min(N-1, r0 + Math.round(cycleLen * 0.52)));
+              const refPropIdx   = Math.round((refMidstIdx + refToeoffIdx) / 2);
+
+              // ── 5. Mid Swing: ankle at minimum Y (highest during swing) ──────────────
+              // Search r0+45% to r1 (not r0+50% which was missing the early swing peak).
+              const refMidswingIdx = argMinR(refAnkS,
+                Math.min(N-1, r0 + Math.round(cycleLen * 0.45)),
+                r1);
 
               // OPP leg events: offset ~50% into cycle
               const oppMidRaw=r0+Math.round(cycleLen*.5);
@@ -2012,9 +2055,9 @@ function startFrameExtraction(file, vid) {
 
               // g) Build timeline — deduplicate by (side+phaseId) first, then by frameIndex
               // All 8 events are labeled as REF side — the gallery shows ONE complete
-              // reference leg cycle. OPP events provide timing landmarks but their
-              // frames are relabeled as the corresponding REF leg phase:
-              //   OPP contact    ≈ REF early swing  (opp heel strike = ref takes off)
+              // reference leg cycle anchored at the composite contact peak (≈mid-stance).
+              // OPP events provide timing landmarks for the swing phases:
+              //   OPP contact    ≈ REF early swing  (opp heel strike = ref in early swing)
               //   OPP midstance  ≈ REF mid swing     (opp weight-bearing = ref swing peak)
               //   OPP toeoff     ≈ REF late swing    (opp push-off = ref prepares to land)
               const rawEv=[
@@ -2046,6 +2089,7 @@ function startFrameExtraction(file, vid) {
                 .sort((a,b)=>a.i-b.i);
 
               console.log('[GaitFSM v4] Timeline:',timeline.map(e=>`${e.i}:${e.side}${e.phaseId}`).join(' | '));
+              console.log('[GaitFSM v4] Anchor: r0='+r0+' (mid-stance), IC='+refContactIdx+' ('+(refContactIdx<r0?'backward ':'')+(Math.abs(refContactIdx-r0))+' frames from r0)');
 
               // h) Build phase label objects with leg side
               const makeLabel=(side,phaseId)=>{
@@ -10475,6 +10519,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     // Render stride metrics for gait/running
     if(/running|gait|walk/i.test(movement) && window_strideMetrics) {
+      window._lastAggregated = aggregated; // cache for exportPDF archetype card
       renderStrideMetrics(window_strideMetrics, aggregated);
     } else {
       const sm = document.getElementById('strideMetricsSection');
@@ -11237,8 +11282,14 @@ async function exportPDF() {
         // Pre-compute JPEG + aspect for every group
         const groupData = groups.map(group => {
           const slots     = group.querySelectorAll('.phase-view-slot');
-          const imgs      = [...slots].map(s=>s.querySelector('img')).filter(Boolean);
-          const viewLabels= [...slots].map(s=>s.querySelector('.phase-view-label')?.textContent?.trim()||'');
+          // Keep img and label paired by slot index — don't filter before zipping
+          // (filtering imgs first shifts indices, giving the wrong label to secondary frames)
+          const slotData  = [...slots].map(s => ({
+            img:   s.querySelector('img'),
+            label: s.querySelector('.phase-view-label')?.textContent?.trim() || '',
+          })).filter(sd => sd.img); // keep only slots that have an image, but label travels with it
+          const imgs      = slotData.map(sd => sd.img);
+          const viewLabels= slotData.map(sd => sd.label);
           // Extract clean phase name: get all text content from header, strip icons/badges
           const hdrEl = group.querySelector('.phase-group-header');
           let phaseName = '';
@@ -11436,6 +11487,44 @@ async function exportPDF() {
       const sm = window_strideMetrics;
       guard(SECTION_HEAD_H + 60);
       sectionHead('Running Stride Metrics', C.teal);
+
+      // ── Archetype card in PDF ─────────────────────────────────────────────
+      const _pdfArch = classifyRunningArchetype(sm, window._lastAggregated || {});
+      if(_pdfArch?.primary) {
+        const _pa = _pdfArch.primary, _ps = _pdfArch.secondary;
+        const archW = CW, archH = 18;
+        guard(archH + 4);
+        // Coloured left bar
+        setFill(_pa.color); doc.roundedRect(ML, y, 3, archH, 1, 1, 'F');
+        // Background
+        setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.2);
+        doc.roundedRect(ML+3, y, archW-3, archH, 1, 1, 'FD');
+        // Label
+        doc.setFont('helvetica','bold'); doc.setFontSize(5.5); setColor(C.muted);
+        doc.text('RUNNING STYLE ARCHETYPE', ML+8, y+5.5);
+        // Archetype name
+        doc.setFont('helvetica','bold'); doc.setFontSize(9);
+        // Convert hex color to RGB for jsPDF
+        const hexToRgb = (hex) => {
+          const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+          return [r/255, g/255, b/255];
+        };
+        const [r,g,b] = hexToRgb(_pa.color);
+        doc.setTextColor(r,g,b);
+        const archLabel = _pa.label + (_ps ? ' + ' + _ps.label : '');
+        doc.text(archLabel, ML+8, y+13);
+        // Tagline
+        setColor(C.muted); doc.setFont('helvetica','normal'); doc.setFontSize(5.5);
+        const tagline = _pa.tagline.length > 90 ? _pa.tagline.slice(0,87)+'...' : _pa.tagline;
+        doc.text(tagline, ML+8 + doc.getTextWidth(archLabel) + 6, y+13);
+        // Driver pills
+        if(_pa.drivers.length > 0) {
+          doc.setFontSize(5); setColor(C.muted);
+          const drvText = _pa.drivers.slice(0,4).join('  ·  ');
+          doc.text(drvText, ML+8, y+17.5);
+        }
+        y += archH + 4;
+      }
 
       // KPI grid: 3 per row
       const kpiDefs = [
