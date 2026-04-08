@@ -1027,12 +1027,34 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <p>MediaPipe has placed joint markers on each frame. Click a frame thumbnail, then <strong>drag any misplaced marker</strong> to its correct anatomical position. Edited frames show a ✎ badge. When done, click Generate Report.</p>
     </div>
     <div class="review-thumbs" id="reviewThumbs"></div>
-    <div class="review-canvas-wrap">
-      <canvas id="reviewCanvas"></canvas>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <button id="reviewPrevBtn" onclick="reviewNavFrame(-1)"
+        style="flex-shrink:0;width:44px;height:44px;border-radius:50%;background:var(--surface);
+               border:2px solid var(--border);color:var(--navy);font-size:1.3rem;cursor:pointer;
+               display:flex;align-items:center;justify-content:center;transition:all .15s;
+               box-shadow:var(--shadow);"
+        title="Previous frame (← arrow key)">&#8592;</button>
+      <div class="review-canvas-wrap" style="flex:1;position:relative;">
+        <canvas id="reviewCanvas"></canvas>
+        <div id="rvZoomLevel" style="position:absolute;top:8px;right:10px;background:rgba(0,0,0,.55);
+             color:#fff;font-size:.72rem;font-weight:700;padding:2px 8px;border-radius:12px;
+             pointer-events:none;letter-spacing:.04em;"></div>
+        <button onclick="_rvResetZoom()" id="rvResetZoomBtn"
+          style="position:absolute;top:8px;left:10px;background:rgba(0,0,0,.55);
+                 border:none;color:#fff;font-size:.72rem;font-weight:600;padding:3px 10px;
+                 border-radius:12px;cursor:pointer;display:none;"
+          title="Reset zoom (double-click canvas)">Reset zoom</button>
+      </div>
+      <button id="reviewNextBtn" onclick="reviewNavFrame(1)"
+        style="flex-shrink:0;width:44px;height:44px;border-radius:50%;background:var(--surface);
+               border:2px solid var(--border);color:var(--navy);font-size:1.3rem;cursor:pointer;
+               display:flex;align-items:center;justify-content:center;transition:all .15s;
+               box-shadow:var(--shadow);"
+        title="Next frame (→ arrow key)">&#8594;</button>
     </div>
     <div class="review-frame-info" id="reviewFrameInfo"></div>
     <div class="review-hint">
-      🎯 <strong>Drag tip:</strong> Grab any coloured dot and drag it to the correct joint position. <span style="color:var(--amber);font-weight:600;">Dashed ? dots</span> = joints MediaPipe missed — drag them to their correct position.
+      🎯 <strong>Drag tip:</strong> Grab any coloured dot and drag it to the correct joint position. <span style="color:var(--amber);font-weight:600;">Dashed ? dots</span> = joints MediaPipe missed — drag them to their correct position. &nbsp;⌨️ <strong>Keys:</strong> ← → or A/D to navigate · R to reset frame · +/- to zoom · 0 to reset zoom · Ctrl+Enter to generate report &nbsp;🖱️ <strong>Mouse:</strong> scroll to zoom · drag to pan when zoomed · double-click to zoom 2× or reset
       <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#06b6d4;display:inline-block;"></span>Hips</span>
       <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#3b82f6;display:inline-block;"></span>Knees</span>
       <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#fbbf24;display:inline-block;"></span>Ankles</span>
@@ -1040,9 +1062,11 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <span style="display:inline-flex;align-items:center;gap:4px;margin:0 4px;"><span style="width:10px;height:10px;border-radius:50%;background:#e879f9;display:inline-block;"></span>Shoulders</span>
     </div>
     <div class="review-actions">
-      <button class="review-btn-secondary" onclick="resetReviewFrame()">↺ Reset this frame</button>
-      <button class="review-btn-secondary" onclick="resetAllReviewFrames()">↺ Reset all frames</button>
-      <button class="review-btn-proceed" onclick="proceedFromReview()">🔬 Generate Report →</button>
+      <button class="review-btn-secondary" onclick="resetReviewFrame()" title="Shortcut: R">↺ Reset frame</button>
+      <button class="review-btn-secondary" onclick="reviewNavFrame(-1)" title="Shortcut: ← or A">◀ Prev</button>
+      <button class="review-btn-secondary" onclick="reviewNavFrame(1)" title="Shortcut: → or D">Next ▶</button>
+      <button class="review-btn-secondary" onclick="resetAllReviewFrames()">↺ Reset all</button>
+      <button class="review-btn-proceed" onclick="proceedFromReview()" title="Shortcut: Ctrl+Enter">🔬 Generate Report →</button>
     </div>
   </div>
 </div>
@@ -1955,6 +1979,15 @@ function startFrameExtraction(file, vid) {
 
               const OPP = REF==='L' ? 'R' : 'L';
 
+              // Ankle forward-of-hip signals — defined after REF is known
+              const lAnkFwdS = smooth5(perFrame.map(f =>
+                f.lAnkRelX != null ? -facingDir * f.lAnkRelX : null
+              ));
+              const rAnkFwdS = smooth5(perFrame.map(f =>
+                f.rAnkRelX != null ? -facingDir * f.rAnkRelX : null
+              ));
+              const refAnkFwdS = REF==='L' ? lAnkFwdS : rAnkFwdS;
+
               const refAnkS  = REF==='L' ? lAnkS  : rAnkS;
               const refKneeS = REF==='L' ? lKneeS : rKneeS;
               const refHipS  = REF==='L' ? lHipS  : rHipS;
@@ -2006,34 +2039,65 @@ function startFrameExtraction(file, vid) {
               // ── Loading Response = r0 (verified) ──────────────────────────────────────
               const refLoadingIdx = r0;
 
-              // ── Initial Contact: backward search for maximum knee extension ─────────
-              // Knee is most extended just before the rapid flexion of loading response.
-              // Search r0−16% to r0−2%. No extension guard — just take the max.
-              const icSt = Math.max(0,   r0 - Math.round(cycleLen * 0.16));
-              const icEd = Math.max(icSt+1, r0 - Math.round(cycleLen * 0.02));
+              // ── Initial Contact: composite score — knee extension × ankle forward ───────
+              // At IC: knee near maximum extension AND ankle forward of hip.
+              // Combining both signals eliminates propulsion frames (knee extended but ankle BEHIND)
+              // and mid-stance frames (ankle under hip, knee flexing).
+              // Side view only — ankle forward signal not meaningful from posterior/frontal.
+              const icSt = Math.max(0,   r0 - Math.round(cycleLen * 0.18));
+              const icEd = Math.max(icSt+1, r0 - Math.round(cycleLen * 0.01));
               let refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.08)); // fixed fallback
               if(icEd > icSt) {
-                refContactIdx = argMaxR(refKneeS, icSt, icEd);
-                // Sanity: IC must be before or at r0
+                if(cameraView === 'side' && refAnkFwdS.some(v=>v!=null)) {
+                  const icKneeNorm = normSig(refKneeS.slice(icSt, icEd+1));
+                  const icFwdNorm  = normSig(refAnkFwdS.slice(icSt, icEd+1));
+                  const icScore = icKneeNorm.map((k, ii) => {
+                    const f = icFwdNorm[ii];
+                    if(k == null && f == null) return null;
+                    return (k ?? 0.5) * 0.55 + (f ?? 0.5) * 0.45;
+                  });
+                  let bestScore = -Infinity, bestIdx = icSt;
+                  icScore.forEach((s, ii) => {
+                    if(s != null && s > bestScore) { bestScore = s; bestIdx = icSt + ii; }
+                  });
+                  refContactIdx = bestIdx;
+                  console.log('[GaitFSM] IC composite: frame=' + refContactIdx + ' score=' + bestScore.toFixed(3));
+                } else {
+                  refContactIdx = argMaxR(refKneeS, icSt, icEd);
+                }
                 if(refContactIdx >= r0) refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.08));
               }
 
-              // ── Mid Stance: ~r0+13%, refine using ankle composite minimum (ankle settled) ─
-              const msSt = Math.min(N-1, r0 + Math.round(cycleLen * 0.08));
-              const msEd = Math.min(N-1, r0 + Math.round(cycleLen * 0.20));
-              const refMidstIdx = (msSt < msEd)
-                ? argMinR(refKneeS, msSt, msEd)   // most bent knee = deepest loading = true mid-stance
-                : Math.min(N-1, r0 + Math.round(cycleLen * 0.13));
+              // ── Mid Stance: ankle directly under hip (|ankleRelX| minimum) ───────────
+              // At mid-stance the foot is directly under the body's CoM.
+              // For side view: |ankleRelX| is smallest when ankle X ≈ hip X.
+              // Search r0+8% to r0+20%; find frame where ankle is closest under the hip.
+              const msFixedIdx = Math.min(N-1, r0 + Math.round(cycleLen * 0.13));
+              let refMidstIdx = msFixedIdx;
+              if(cameraView === 'side') {
+                const msSt2 = Math.min(N-1, r0 + Math.round(cycleLen * 0.08));
+                const msEd2 = Math.min(N,   r0 + Math.round(cycleLen * 0.20));
+                const msSlice = refAnkFwdS.slice(msSt2, msEd2);
+                let minAbs = Infinity, minOff = 0;
+                msSlice.forEach((v, ii) => {
+                  if(v != null && Math.abs(v) < minAbs) { minAbs = Math.abs(v); minOff = ii; }
+                });
+                if(minAbs < Infinity) {
+                  refMidstIdx = Math.min(N-1, msSt2 + minOff);
+                  console.log('[GaitFSM] MidStance: frame=' + refMidstIdx + ' |ankRelX|=' + minAbs.toFixed(3));
+                }
+              }
 
-              // ── Toe Off: min hip angle (hip near extension) r0+30% to r0+48% ─────────
-              const toSt = Math.min(N-1, r0 + Math.round(cycleLen * 0.30));
-              const toEd = Math.min(N-1, r0 + Math.round(cycleLen * 0.48));
+              // ── Toe Off: min hip angle in tight window r0+34% to r0+44% ─────────────
+              const toSt = Math.min(N-1, r0 + Math.round(cycleLen * 0.34));
+              const toEd = Math.min(N-1, r0 + Math.round(cycleLen * 0.44));
               const refToeoffIdx = (toSt < toEd)
                 ? argMinR(refHipS, toSt, toEd)
                 : Math.min(N-1, r0 + Math.round(cycleLen * 0.39));
 
-              // ── Propulsion: midpoint between mid-stance and toe-off ────────────────────
-              const refPropIdx = Math.round((refMidstIdx + refToeoffIdx) / 2);
+              // ── Propulsion: pure fixed offset r0+27% ─────────────────────────────────
+              // Midpoint of MS+TO was inheriting the mid-stance detection error.
+              const refPropIdx = Math.min(N-1, r0 + Math.round(cycleLen * 0.27));
 
               // ── Mid Swing: min ankle Y (foot highest off ground) r0+56% to r0+74% ────
               const mswSt = Math.min(N-1, r0 + Math.round(cycleLen * 0.56));
@@ -8379,9 +8443,17 @@ function _rvBuildThumbs() {
 // ── Switch active frame ───────────────────────────────────────────────────────
 function _rvShowFrame(idx) {
   _rvActiveFrame = idx;
+  // Reset zoom when switching frames so each frame starts at full view
+  if(idx !== _rvActiveFrame || _rvZoom !== 1) {
+    _rvZoom = 1; _rvPanX = 0; _rvPanY = 0;
+    const btn = document.getElementById('rvResetZoomBtn');
+    if(btn) btn.style.display = 'none';
+    _rvUpdateZoomHint();
+  }
   document.querySelectorAll('.review-thumb').forEach((el,i) => {
     el.classList.toggle('rt-active', i===idx);
   });
+  _rvUpdateNavButtons();
   const is2 = idx >= _rvN1;
   const li  = is2 ? idx - _rvN1 : idx;
   const rawFrames = is2 ? _rvRawFrames2 : _rvRawFrames;
@@ -8396,6 +8468,33 @@ function _rvShowFrame(idx) {
 
 // ── Render canvas for current frame ─────────────────────────────────────────
 let _rvResolvedLms = null; // cache of ghost-resolved landmarks for current frame
+
+// ── Zoom / pan state ──────────────────────────────────────────────────────────
+let _rvZoom    = 1.0;   // current zoom level (1 = fit, max 5)
+let _rvPanX    = 0;     // pan offset in normalised coords (0-1)
+let _rvPanY    = 0;
+let _rvPanning = false; // true while two-finger/right-mouse panning
+let _rvLastPanPos = null; // {x,y} in client coords
+let _rvLastPinchDist = null;
+const _RV_ZOOM_MIN = 1.0;
+const _RV_ZOOM_MAX = 5.0;
+
+function _rvResetZoom() {
+  _rvZoom = 1; _rvPanX = 0; _rvPanY = 0;
+  _rvClampPan();
+  _rvRenderCanvas();
+  _rvUpdateZoomHint();
+}
+function _rvClampPan() {
+  // Clamp pan so we never pan outside the image bounds
+  const maxPan = (_rvZoom - 1) / (2 * _rvZoom);
+  _rvPanX = Math.max(-maxPan, Math.min(maxPan, _rvPanX));
+  _rvPanY = Math.max(-maxPan, Math.min(maxPan, _rvPanY));
+}
+function _rvUpdateZoomHint() {
+  const el = document.getElementById('rvZoomLevel');
+  if(el) el.textContent = _rvZoom > 1.05 ? Math.round(_rvZoom*10)/10 + '×' : '';
+}
 
 function _rvRenderCanvas() {
   const cv = document.getElementById('reviewCanvas');
@@ -8415,10 +8514,16 @@ function _rvRenderCanvas() {
     cv.width  = img.naturalWidth  * dpr;
     cv.height = img.naturalHeight * dpr;
     cv.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight;
-    ctx.scale(dpr, dpr);
     const W = img.naturalWidth, H = img.naturalHeight;
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    // Apply zoom/pan: translate to centre, scale, translate by pan offset
+    ctx.translate(W/2, H/2);
+    ctx.scale(_rvZoom, _rvZoom);
+    ctx.translate(-W/2 + _rvPanX*W, -H/2 + _rvPanY*H);
     ctx.drawImage(img, 0, 0, W, H);
     _rvDrawSkeleton(ctx, W, H, lms);
+    ctx.restore();
   };
   img.src = 'data:image/jpeg;base64,' + b64;
 }
@@ -8586,10 +8691,15 @@ function _rvNearestLM(normX, normY) {
 function _rvCanvasNorm(clientX, clientY) {
   const cv   = document.getElementById('reviewCanvas');
   const rect = cv.getBoundingClientRect();
-  return {
-    x: (clientX - rect.left)  / rect.width,
-    y: (clientY - rect.top)   / rect.height,
-  };
+  // Raw normalised position on the canvas element (0-1)
+  const rawX = (clientX - rect.left)  / rect.width;
+  const rawY = (clientY - rect.top)   / rect.height;
+  // Invert the zoom/pan transform to get image-space normalised coordinates
+  // Transform: screen = centre + zoom*(image - centre + pan)
+  // Inverse:   image  = (screen - centre)/zoom + centre - pan
+  const x = (rawX - 0.5) / _rvZoom + 0.5 - _rvPanX;
+  const y = (rawY - 0.5) / _rvZoom + 0.5 - _rvPanY;
+  return { x, y };
 }
 function _rvHandleStart(clientX, clientY) {
   const {x, y} = _rvCanvasNorm(clientX, clientY);
@@ -8626,33 +8736,203 @@ function _rvHandleEnd() {
 }
 
 // ── Attach canvas event listeners (called once on DOM ready) ─────────────────
+// ── Frame navigation (prev/next buttons + keyboard) ──────────────────────────
+function reviewNavFrame(dir) {
+  const totalFrames = _rvN1 + (_rvRawFrames2?.length ?? 0);
+  if(totalFrames < 2) return;
+  const next = ((_rvActiveFrame + dir) + totalFrames) % totalFrames;
+  _rvShowFrame(next);
+  // Scroll thumbnail into view
+  const thumb = document.getElementById('_rvThumb_' + next);
+  if(thumb) thumb.scrollIntoView({behavior:'smooth', block:'nearest', inline:'center'});
+  _rvUpdateNavButtons();
+}
+
+function _rvUpdateNavButtons() {
+  const total = _rvN1 + (_rvRawFrames2?.length ?? 0);
+  const prev = document.getElementById('reviewPrevBtn');
+  const next = document.getElementById('reviewNextBtn');
+  if(!prev || !next) return;
+  // Highlight active direction affordance
+  prev.style.borderColor = _rvActiveFrame > 0 ? 'var(--teal)' : 'var(--border)';
+  next.style.borderColor = _rvActiveFrame < total-1 ? 'var(--teal)' : 'var(--border)';
+  prev.style.opacity = _rvActiveFrame > 0 ? '1' : '0.4';
+  next.style.opacity = _rvActiveFrame < total-1 ? '1' : '0.4';
+}
+
 function _rvAttachCanvasEvents() {
   const cv = document.getElementById('reviewCanvas');
   if(!cv) return;
-  cv.addEventListener('mousedown',  e => { e.preventDefault(); _rvHandleStart(e.clientX, e.clientY); });
-  cv.addEventListener('mousemove',  e => {
+
+  // ── Mouse drag (landmark correction) ─────────────────────────────────────
+  cv.addEventListener('mousedown', e => {
+    e.preventDefault();
+    if(e.button === 0) { // left-click: landmark drag
+      _rvHandleStart(e.clientX, e.clientY);
+      if(_rvDragging == null) {
+        // No landmark hit — start panning if zoomed in
+        if(_rvZoom > 1.02) { _rvPanning = true; _rvLastPanPos = {x:e.clientX, y:e.clientY}; cv.style.cursor = 'move'; }
+      }
+    }
+  });
+  cv.addEventListener('mousemove', e => {
+    if(_rvPanning) {
+      const cv2 = document.getElementById('reviewCanvas');
+      const rect = cv2.getBoundingClientRect();
+      const dx = (e.clientX - _rvLastPanPos.x) / rect.width  / _rvZoom;
+      const dy = (e.clientY - _rvLastPanPos.y) / rect.height / _rvZoom;
+      _rvPanX += dx; _rvPanY += dy;
+      _rvClampPan();
+      _rvLastPanPos = {x:e.clientX, y:e.clientY};
+      _rvRenderCanvas();
+      return;
+    }
     _rvHandleMove(e.clientX, e.clientY);
-    // Update hover highlight: find nearest landmark and redraw if changed
     if(_rvDragging == null) {
       const {x, y} = _rvCanvasNorm(e.clientX, e.clientY);
       const near = _rvNearestLM(x, y);
       if(near !== _rvHoverLM) {
         _rvHoverLM = near ?? null;
-        cv.style.cursor = near != null ? 'grab' : 'crosshair';
+        cv.style.cursor = _rvZoom > 1.02 ? (near != null ? 'grab' : 'move') : (near != null ? 'grab' : 'crosshair');
         _rvRenderCanvas();
       }
     }
   });
-  cv.addEventListener('mouseup',    () => _rvHandleEnd());
+  cv.addEventListener('mouseup', e => {
+    _rvPanning = false; _rvLastPanPos = null;
+    _rvHandleEnd();
+    cv.style.cursor = _rvZoom > 1.02 ? 'move' : 'crosshair';
+  });
   cv.addEventListener('mouseleave', () => {
+    _rvPanning = false; _rvLastPanPos = null;
     _rvHandleEnd();
     if(_rvHoverLM !== null) { _rvHoverLM = null; _rvRenderCanvas(); }
   });
-  cv.addEventListener('touchstart', e => { e.preventDefault(); _rvHandleStart(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
-  cv.addEventListener('touchmove',  e => { e.preventDefault(); _rvHandleMove(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
-  cv.addEventListener('touchend',   e => { e.preventDefault(); _rvHandleEnd(); }, {passive:false});
+
+  // ── Scroll wheel zoom ─────────────────────────────────────────────────────
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const rect = cv.getBoundingClientRect();
+    // Cursor position in normalised coords (before zoom)
+    const cursorNormX = (e.clientX - rect.left) / rect.width;
+    const cursorNormY = (e.clientY - rect.top)  / rect.height;
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    const newZoom = Math.max(_RV_ZOOM_MIN, Math.min(_RV_ZOOM_MAX, _rvZoom * factor));
+    if(Math.abs(newZoom - _rvZoom) < 0.001) return;
+    // Zoom toward cursor: adjust pan so point under cursor stays fixed
+    _rvPanX = cursorNormX - 0.5 - (_rvZoom/newZoom) * (cursorNormX - 0.5 - _rvPanX);
+    _rvPanY = cursorNormY - 0.5 - (_rvZoom/newZoom) * (cursorNormY - 0.5 - _rvPanY);
+    _rvZoom = newZoom;
+    _rvClampPan();
+    _rvRenderCanvas();
+    _rvUpdateZoomHint();
+    const btn = document.getElementById('rvResetZoomBtn');
+    if(btn) btn.style.display = _rvZoom > 1.05 ? 'block' : 'none';
+  }, {passive:false});
+
+  // ── Double-click to reset zoom ────────────────────────────────────────────
+  cv.addEventListener('dblclick', e => {
+    e.preventDefault();
+    if(_rvZoom > 1.05) { _rvResetZoom(); document.getElementById('rvResetZoomBtn').style.display='none'; }
+    else {
+      // Double-click to zoom in 2× toward cursor
+      const rect = cv.getBoundingClientRect();
+      const cx = (e.clientX - rect.left) / rect.width;
+      const cy = (e.clientY - rect.top)  / rect.height;
+      const newZoom = Math.min(_RV_ZOOM_MAX, _rvZoom * 2);
+      _rvPanX = cx - 0.5 - (_rvZoom/newZoom)*(cx-0.5-_rvPanX);
+      _rvPanY = cy - 0.5 - (_rvZoom/newZoom)*(cy-0.5-_rvPanY);
+      _rvZoom = newZoom;
+      _rvClampPan();
+      _rvRenderCanvas();
+      _rvUpdateZoomHint();
+      document.getElementById('rvResetZoomBtn').style.display='block';
+    }
+  });
+
+  // ── Touch: single-finger drag (landmark) + two-finger pinch/pan ───────────
+  let _lastTouches = [];
+  cv.addEventListener('touchstart', e => {
+    e.preventDefault();
+    _lastTouches = [...e.touches];
+    if(e.touches.length === 1) {
+      _rvHandleStart(e.touches[0].clientX, e.touches[0].clientY);
+    } else if(e.touches.length === 2) {
+      _rvHandleEnd(); // cancel any drag
+      _rvLastPinchDist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+    }
+  }, {passive:false});
+
+  cv.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if(e.touches.length === 1 && _rvLastPinchDist == null) {
+      _rvHandleMove(e.touches[0].clientX, e.touches[0].clientY);
+    } else if(e.touches.length === 2) {
+      // Pinch-to-zoom
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      if(_rvLastPinchDist != null) {
+        const factor = dist / _rvLastPinchDist;
+        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const rect = cv.getBoundingClientRect();
+        const cx = (midX - rect.left) / rect.width;
+        const cy = (midY - rect.top)  / rect.height;
+        const newZoom = Math.max(_RV_ZOOM_MIN, Math.min(_RV_ZOOM_MAX, _rvZoom * factor));
+        _rvPanX = cx - 0.5 - (_rvZoom/newZoom)*(cx-0.5-_rvPanX);
+        _rvPanY = cy - 0.5 - (_rvZoom/newZoom)*(cy-0.5-_rvPanY);
+        _rvZoom = newZoom;
+        _rvClampPan();
+        _rvRenderCanvas();
+        _rvUpdateZoomHint();
+        const btn = document.getElementById('rvResetZoomBtn');
+        if(btn) btn.style.display = _rvZoom > 1.05 ? 'block' : 'none';
+      }
+      _rvLastPinchDist = dist;
+      // Two-finger pan
+      if(_lastTouches.length === 2) {
+        const rect = cv.getBoundingClientRect();
+        const prevMidX = (_lastTouches[0].clientX + _lastTouches[1].clientX) / 2;
+        const prevMidY = (_lastTouches[0].clientY + _lastTouches[1].clientY) / 2;
+        const curMidX  = (e.touches[0].clientX  + e.touches[1].clientX)  / 2;
+        const curMidY  = (e.touches[0].clientY  + e.touches[1].clientY)  / 2;
+        _rvPanX += (curMidX - prevMidX) / rect.width  / _rvZoom;
+        _rvPanY += (curMidY - prevMidY) / rect.height / _rvZoom;
+        _rvClampPan();
+        _rvRenderCanvas();
+      }
+      _lastTouches = [...e.touches];
+    }
+  }, {passive:false});
+
+  cv.addEventListener('touchend', e => {
+    e.preventDefault();
+    if(e.touches.length < 2) _rvLastPinchDist = null;
+    if(e.touches.length === 0) { _rvHandleEnd(); _lastTouches = []; }
+    else _lastTouches = [...e.touches];
+  }, {passive:false});
 }
 document.addEventListener('DOMContentLoaded', _rvAttachCanvasEvents);
+
+// Keyboard shortcuts for review panel
+document.addEventListener('keydown', (e) => {
+  const panel = document.getElementById('reviewPanel');
+  if(!panel || panel.style.display === 'none') return;
+  // Don't intercept if focus is on an input
+  if(e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+  if(e.key === 'ArrowLeft'  || e.key === 'a' || e.key === 'A') { e.preventDefault(); reviewNavFrame(-1); }
+  if(e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') { e.preventDefault(); reviewNavFrame(1); }
+  if(e.key === '=' || e.key === '+') { e.preventDefault(); const z=Math.min(_RV_ZOOM_MAX,_rvZoom*1.25); _rvZoom=z; _rvClampPan(); _rvRenderCanvas(); _rvUpdateZoomHint(); document.getElementById('rvResetZoomBtn').style.display=z>1.05?'block':'none'; }
+  if(e.key === '-') { e.preventDefault(); _rvZoom=Math.max(_RV_ZOOM_MIN,_rvZoom*0.8); _rvClampPan(); _rvRenderCanvas(); _rvUpdateZoomHint(); if(_rvZoom<=1.05){_rvResetZoom();document.getElementById('rvResetZoomBtn').style.display='none';} }
+  if(e.key === '0') { e.preventDefault(); _rvResetZoom(); document.getElementById('rvResetZoomBtn').style.display='none'; }
+  if(e.key === 'r' || e.key === 'R') { e.preventDefault(); resetReviewFrame(); }
+  if(e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); proceedFromReview(); }
+});
 
 // ── Reset buttons ─────────────────────────────────────────────────────────────
 function resetReviewFrame() {
