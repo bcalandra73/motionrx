@@ -1984,74 +1984,84 @@ function startFrameExtraction(file, vid) {
 
               const r0=cycleStart, r1=cycleEnd;
 
-              // ── PHASE DETECTION — CORRECTED ────────────────────────────────────────────
-              // ROOT CAUSE OF PREVIOUS MISLABELLING:
-              // The composite contact signal (ankle Y high + knee extended) peaks at the
-              // LOADING RESPONSE to early MID-STANCE transition (~10% into the IC-to-IC cycle),
-              // NOT at true Initial Contact. This caused every gallery phase to be labelled
-              // 1–2 phases too late (IC showed mid-stance visually, loading showed propulsion).
+              // ── PHASE DETECTION v3 ─────────────────────────────────────────────────────
               //
-              // FIX: Treat the composite peak (r0) as the MID-STANCE ANCHOR, then search
-              // BACKWARD from r0 for true IC (knee at maximum pre-stance extension).
+              // VERIFIED via clinical review (Brian, April 2026):
+              // The composite contact signal peaks at LOADING RESPONSE (~8% into IC cycle).
+              // The cycle window [r0, r1] runs LR-to-LR, NOT IC-to-IC.
               //
-              // Phase timing relative to composite peak (r0 = mid-stance anchor, 0%):
-              //   True IC:            r0 − 10–20% of cycle  (knee maximally extended before loading)
-              //   Loading Response:   IC + 3–18% (peak knee flexion during weight acceptance)
-              //   Mid Stance:         r0 (composite peak itself — body centred over foot)
-              //   Propulsion:         r0 + 15–35% (hip extending, ankle plantarflexing)
-              //   Toe Off:            r0 + 30–50% (hip at minimum during stance→swing)
-              //   Early Swing:        derived from OPP leg contact (~r0+40–55%)
-              //   Mid Swing:          r0 + 50–80% (ankle at highest point in swing)
-              //   Late Swing:         derived from OPP leg toeoff (~r0+65–85%)
+              // All events are computed as offsets from r0 (Loading Response anchor).
+              // IC is obtained by backward search; all other phases use fixed offsets
+              // with narrow signal-based refinement, derived from observed frame content:
+              //
+              //   IC:           r0 − 8%   (search r0−16% to r0−2%)
+              //   Loading Resp: r0         (the composite peak itself)
+              //   Mid Stance:   r0 + 13%  (refine: max hip height in r0+8% to r0+20%)
+              //   Propulsion:   r0 + 27%  (midpoint: midstance → toeoff)
+              //   Toe Off:      r0 + 39%  (refine: min hip angle r0+30% to r0+48%)
+              //   Early Swing:  r0 + 51%  (fixed, from OPP contact search)
+              //   Mid Swing:    r0 + 64%  (refine: min ankle Y r0+56% to r0+74%)
+              //   Late Swing:   r0 + 78%  (fixed, from OPP toeoff search)
 
-              // ── 1. True Initial Contact: backward search for knee extension peak ────────
-              // At IC the knee is at its maximum extension immediately before the rapid
-              // flexion of loading response. Search backward from r0 up to 22% of cycle.
-              const icLookback = Math.round(cycleLen * 0.22);
-              const icSearchSt = Math.max(0, r0 - icLookback);
-              const icSearchEd = Math.max(icSearchSt + 1, r0 - Math.round(cycleLen * 0.01));
-              let refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.13)); // default fallback
-              if(icSearchEd > icSearchSt) {
-                const candidateIC = argMaxR(refKneeS, icSearchSt, icSearchEd);
-                // Accept if the candidate has MORE knee extension than r0
-                // (guards against finding a bad frame where the knee signal is noisy)
-                if(refKneeS[candidateIC] != null &&
-                   (refKneeS[r0] == null || refKneeS[candidateIC] > refKneeS[r0])) {
-                  refContactIdx = candidateIC;
-                }
+              // ── Loading Response = r0 (verified) ──────────────────────────────────────
+              const refLoadingIdx = r0;
+
+              // ── Initial Contact: backward search for maximum knee extension ─────────
+              // Knee is most extended just before the rapid flexion of loading response.
+              // Search r0−16% to r0−2%. No extension guard — just take the max.
+              const icSt = Math.max(0,   r0 - Math.round(cycleLen * 0.16));
+              const icEd = Math.max(icSt+1, r0 - Math.round(cycleLen * 0.02));
+              let refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.08)); // fixed fallback
+              if(icEd > icSt) {
+                refContactIdx = argMaxR(refKneeS, icSt, icEd);
+                // Sanity: IC must be before or at r0
+                if(refContactIdx >= r0) refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.08));
               }
 
-              // ── 2. Loading Response: peak knee flexion after IC ────────────────────────
-              // Search within IC+3% to IC+20% of the cycle.
-              const refLoadingIdx = argMinR(refKneeS,
-                Math.min(N-1, refContactIdx + Math.round(cycleLen * 0.03)),
-                Math.min(N-1, refContactIdx + Math.round(cycleLen * 0.20)));
+              // ── Mid Stance: ~r0+13%, refine using ankle composite minimum (ankle settled) ─
+              const msSt = Math.min(N-1, r0 + Math.round(cycleLen * 0.08));
+              const msEd = Math.min(N-1, r0 + Math.round(cycleLen * 0.20));
+              const refMidstIdx = (msSt < msEd)
+                ? argMinR(refKneeS, msSt, msEd)   // most bent knee = deepest loading = true mid-stance
+                : Math.min(N-1, r0 + Math.round(cycleLen * 0.13));
 
-              // ── 3. Mid Stance: the composite peak itself ─────────────────────────────
-              const refMidstIdx = r0;
+              // ── Toe Off: min hip angle (hip near extension) r0+30% to r0+48% ─────────
+              const toSt = Math.min(N-1, r0 + Math.round(cycleLen * 0.30));
+              const toEd = Math.min(N-1, r0 + Math.round(cycleLen * 0.48));
+              const refToeoffIdx = (toSt < toEd)
+                ? argMinR(refHipS, toSt, toEd)
+                : Math.min(N-1, r0 + Math.round(cycleLen * 0.39));
 
-              // ── 4. Toe Off + Propulsion: relative to mid-stance anchor ───────────────
-              // Toe-off: hip reaches minimum (near extension) as weight transfers to swing.
-              // Search r0+18% to r0+52%.
-              const refToeoffIdx = argMinR(refHipS,
-                Math.min(N-1, r0 + Math.round(cycleLen * 0.18)),
-                Math.min(N-1, r0 + Math.round(cycleLen * 0.52)));
-              const refPropIdx   = Math.round((refMidstIdx + refToeoffIdx) / 2);
+              // ── Propulsion: midpoint between mid-stance and toe-off ────────────────────
+              const refPropIdx = Math.round((refMidstIdx + refToeoffIdx) / 2);
 
-              // ── 5. Mid Swing: ankle at minimum Y (highest during swing) ──────────────
-              // Search r0+45% to r1 (not r0+50% which was missing the early swing peak).
-              const refMidswingIdx = argMinR(refAnkS,
-                Math.min(N-1, r0 + Math.round(cycleLen * 0.45)),
-                r1);
+              // ── Mid Swing: min ankle Y (foot highest off ground) r0+56% to r0+74% ────
+              const mswSt = Math.min(N-1, r0 + Math.round(cycleLen * 0.56));
+              const mswEd = Math.min(N-1, r0 + Math.round(cycleLen * 0.74));
+              const refMidswingIdx = (mswSt < mswEd)
+                ? argMinR(refAnkS, mswSt, mswEd)
+                : Math.min(N-1, r0 + Math.round(cycleLen * 0.64));
 
               // OPP leg events: offset ~50% into cycle
-              const oppMidRaw=r0+Math.round(cycleLen*.5);
+              // OPP leg events — windows corrected for r0=LR anchor
+              // OPP contact ≈ REF early swing at r0+51%  → search r0+44% to r0+59%
+              // OPP toeoff  ≈ REF late swing at r0+78%   → search r0+68% to r0+86%
+              const oppEswSt = Math.min(N-1, r0+Math.round(cycleLen*.44));
+              const oppEswEd = Math.min(N-1, r0+Math.round(cycleLen*.59));
               const oppContactIdx = oppC.length>0
-                ? oppC.reduce((b,c)=>Math.abs(c-oppMidRaw)<Math.abs(b-oppMidRaw)?c:b, oppC[0])
-                : argMaxR(oppAnkS, r0+Math.round(cycleLen*.40), r0+Math.round(cycleLen*.65));
-              const oppMidstIdx   =argMinR(oppKneeS, oppContactIdx, Math.min(r1,oppContactIdx+Math.round(cycleLen*.25)));
-              const oppToeoffIdx  =argMinR(oppHipS,  oppContactIdx, Math.min(r1,oppContactIdx+Math.round(cycleLen*.35)));
-              const oppMidswingIdx=argMaxR(refAnkS,  r0+Math.round(cycleLen*.65), r1); // OPP swing = REF ankle rises
+                ? oppC.reduce((b,c)=>{ // pick detected OPP contact closest to r0+51%
+                    const tgt=r0+Math.round(cycleLen*.51);
+                    return Math.abs(c-tgt)<Math.abs(b-tgt)?c:b;
+                  }, oppC[0])
+                : (oppEswSt<oppEswEd ? argMaxR(oppAnkS, oppEswSt, oppEswEd)
+                   : Math.min(N-1, r0+Math.round(cycleLen*.51)));
+              const oppLswSt = Math.min(N-1, r0+Math.round(cycleLen*.68));
+              const oppLswEd = Math.min(N-1, r0+Math.round(cycleLen*.86));
+              const oppToeoffIdx = oppLswSt<oppLswEd
+                ? argMinR(oppHipS, oppLswSt, oppLswEd)
+                : Math.min(N-1, r0+Math.round(cycleLen*.78));
+              const oppMidstIdx   = argMinR(oppKneeS, oppContactIdx, Math.min(r1,oppContactIdx+Math.round(cycleLen*.20)));
+              const oppMidswingIdx= Math.min(N-1, r0+Math.round(cycleLen*.86)); // unused but kept for compat
 
               // g) Build timeline — deduplicate by (side+phaseId) first, then by frameIndex
               // All 8 events are labeled as REF side — the gallery shows ONE complete
@@ -9650,7 +9660,10 @@ async function runAnalysis() {
           const sec_isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movement);
           const sec_wStart = sec_isLanding ? 0.18 : 0.05;
           const sec_wEnd   = sec_isLanding ? 0.78 : 0.95;
-          const sec_fc     = 16; // lighter than primary
+          // Match primary dense frame count per movement type
+          // Landing: 24 frames (brief event, same as primary)
+          // Running/Gait: 32 frames (full stride cycle, same as primary)
+          const sec_fc = sec_isLanding ? 24 : 32;
           const sec_props  = Array.from({length: sec_fc}, (_, i) =>
             sec_wStart + (i / (sec_fc - 1)) * (sec_wEnd - sec_wStart)
           );
@@ -9660,7 +9673,7 @@ async function runAnalysis() {
             const b64 = await seekCapture(secVid, Math.max(0.05, Math.min(t, secDur - 0.05)));
             if(b64) secDenseFrames.push({imageData: b64, t: prop});
           }
-          if(secDenseFrames.length >= 6) {
+          if(secDenseFrames.length >= (sec_isLanding ? 8 : 10)) {
             const secMpRes = await runMediaPipeOnFrames(secDenseFrames);
             // Apply tape (no crop refinement — geometry different from primary)
             const secTapeCfg = readTapeConfig();
@@ -9763,7 +9776,19 @@ async function runAnalysis() {
   // Step 4: Send up to 8 annotated frames to Claude (up to 4 per view if dual)
   const maxPerView = hasDualView ? 4 : 8;
   const framesToSend  = annotatedFrames.slice(0, maxPerView);
-  const framesToSend2 = hasDualView ? annotatedFrames2.slice(0, maxPerView) : [];
+  // Secondary frames for Claude: for running+posterior send only 4 key phases;
+  // for landing and all other movements send all phases (up to 4 due to maxPerView).
+  const _isRunPost = hasDualView && /running|gait|walk/i.test(movement)
+    && (cameraView2 === 'posterior' || cameraView2 === 'front');
+  const _keyPostPhases = new Set(['contact','midstance','toeoff','midswing']);
+  const framesToSend2 = hasDualView
+    ? (_isRunPost
+        ? annotatedFrames2.filter((f, i) => {
+            const pid = extractedFrames2[i]?.phase?.id || extractedFrames2[i]?.phase?._baseId || '';
+            return _keyPostPhases.has(pid);
+          }).slice(0, 4)
+        : annotatedFrames2.slice(0, maxPerView))
+    : [];
   const frameCount = framesToSend.length + framesToSend2.length;
 
   const view1Label = cameraView === 'side' ? 'Side view (sagittal plane)' : cameraView === 'front' ? 'Front view (frontal plane)' : 'Posterior view';
@@ -10125,7 +10150,21 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         // ── Paired dual-view layout ──
         gallery.classList.add('dual-view');
         const v1Frames = annotatedFrames;
-        const v2Frames = annotatedFrames2;
+        // Secondary gallery filter — only applied for running with a posterior secondary view.
+        // For landing movements (brief event, every phase critical) and all other movements,
+        // show all phases from both views with no filtering.
+        // For running/posterior: only show 4 key phases where posterior camera adds most value:
+        //   IC (pronation at landing), MidStance (pelvic drop + valgus under load),
+        //   ToeOff (push-off symmetry), MidSwing (hip adduction clearance).
+        const _isRunningPosterior = /running|gait|walk/i.test(movement)
+          && (cameraView2 === 'posterior' || cameraView2 === 'front');
+        const _posteriorPhases = new Set(['contact','midstance','toeoff','midswing']);
+        const v2Frames = _isRunningPosterior
+          ? annotatedFrames2.map((f, i) => {
+              const phaseId = extractedFrames2[i]?.phase?.id || extractedFrames2[i]?.phase?._baseId || '';
+              return _posteriorPhases.has(phaseId) ? f : null;
+            })
+          : annotatedFrames2; // all other movements: show every phase
         const maxFrames = Math.max(v1Frames.length, v2Frames.length);
 
         for(let i = 0; i < maxFrames; i++) {
