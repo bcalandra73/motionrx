@@ -3407,18 +3407,46 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
   const isSide    = (view === 'side');
 
   const segments = [
+    // ── Lower limb ────────────────────────────────────────────────────────────
     { name:'L-femur',  prox:23, dist:25 },
     { name:'R-femur',  prox:24, dist:26 },
     { name:'L-tibia',  prox:25, dist:27 },
     { name:'R-tibia',  prox:26, dist:28 },
+
+    // ── Upper limb ────────────────────────────────────────────────────────────
     { name:'L-humerus',prox:11, dist:13 },
     { name:'R-humerus',prox:12, dist:14 },
-    // Foot segments — tighter tolerances than body segments since foot bones are rigid.
-    // ±25% of median is physiologically generous but prevents the 3-4× outliers we were seeing.
+    // Forearm — prevents wrist from appearing on far arm (see applyWristPlausibility)
+    { name:'L-forearm', prox:13, dist:15, tolLo:0.55, tolHi:1.35 },
+    { name:'R-forearm', prox:14, dist:16, tolLo:0.55, tolHi:1.35 },
+
+    // ── Trunk (shoulder → hip) ────────────────────────────────────────────────
+    // Foundation of trunk lean and hip flexion measurements. A drifting shoulder OR
+    // hip endpoint silently corrupts both metrics simultaneously. Wider tolerance
+    // than limb segments because trunk lean changes the projected side-view length.
+    // Only clamp the HIP (dist) — shoulder is the more reliable anchor landmark.
+    { name:'L-trunk', prox:11, dist:23, tolLo:0.65, tolHi:1.40 },
+    { name:'R-trunk', prox:12, dist:24, tolLo:0.65, tolHi:1.40 },
+
+    // ── Bilateral width segments (posterior/frontal only) ─────────────────────
+    // In side view these project near-zero and would produce meaningless constraints.
+    // skipOnSide:true gates them out when view === 'side'.
+    // Hip width: constrains bilateral hip separation — affects pelvic drop, hip adduction.
+    { name:'hip-width',      prox:23, dist:24, tolLo:0.70, tolHi:1.30, skipOnSide:true },
+    // Shoulder width: high-confidence landmarks; tighter tolerance.
+    { name:'shoulder-width', prox:11, dist:12, tolLo:0.75, tolHi:1.25, skipOnSide:true },
+
+    // ── Foot segments ─────────────────────────────────────────────────────────
+    // Ankle→heel and ankle→toe constrained separately, plus heel→toe to close the
+    // triangle. Prevents heel and toe from drifting together in the same wrong direction.
     { name:'L-foot-heel', prox:27, dist:29, tolLo:0.75, tolHi:1.25, rigid:true },
     { name:'R-foot-heel', prox:28, dist:30, tolLo:0.75, tolHi:1.25, rigid:true },
     { name:'L-foot-toe',  prox:27, dist:31, tolLo:0.72, tolHi:1.30, rigid:true },
     { name:'R-foot-toe',  prox:28, dist:32, tolLo:0.72, tolHi:1.30, rigid:true },
+    // Heel-to-toe: closes the foot triangle — prevents both heel AND toe drifting
+    // together away from the ankle while individually passing the ankle-based checks.
+    { name:'L-heel-toe',  prox:29, dist:31, tolLo:0.65, tolHi:1.45, rigid:true },
+    { name:'R-heel-toe',  prox:30, dist:32, tolLo:0.65, tolHi:1.45, rigid:true },
   ];
 
   const nFrames = allFrameLandmarks.length;
@@ -3466,6 +3494,8 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
 
   // Apply constraints
   for(const seg of segments) {
+    // Don't collect side-view lengths for bilateral-width segments
+    if(seg.skipOnSide && isSide) continue;
     const lengths = [];
     allFrameLandmarks.forEach(lms => {
       if(!lms) return;
@@ -3480,6 +3510,8 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
 
     allFrameLandmarks.forEach((lms, fi) => {
       if(!lms) return;
+      // Skip bilateral-width segments on side view — projected length is near-zero
+      if(seg.skipOnSide && isSide) return;
       const p = lms[seg.prox], d = lms[seg.dist];
       if(!p || !d || (p.visibility||0) < 0.3) return;
       const actualLen = Math.hypot(p.x-d.x, p.y-d.y);
@@ -3520,7 +3552,82 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
   return allFrameLandmarks;
 }
 
-function applyTibiaAnkleReprojection(allFrameLandmarks, view='side', movement='') {
+// ── Wrist cross-body plausibility check ───────────────────────────────────────
+// MediaPipe sometimes places a wrist on the far (occluded) arm when the near wrist
+// crosses in front of the body. The elbow CANNOT hyperextend so the wrist must
+// stay within ~1.5× upper-arm segment from the elbow AND cannot be on the opposite
+// side of the body from its own elbow relative to the shoulder midline.
+// When this constraint is violated, the wrist is nulled (shows as dashed unknown)
+// rather than reprojected to a wrong position.
+function applyWristPlausibility(allFrameLandmarks, view='side') {
+  const isSide = (view === 'side');
+  if(!isSide) return allFrameLandmarks; // frontal-plane wrist rules differ
+
+  const pairs = [
+    { sh:11, el:13, wr:15, name:'L-wrist' }, // left
+    { sh:12, el:14, wr:16, name:'R-wrist' }, // right
+  ];
+
+  // Compute median humerus length across frames (used as forearm reference)
+  const humerusMedians = {};
+  for(const {sh, el, name} of pairs) {
+    const lens = allFrameLandmarks.map(lms => {
+      if(!lms) return null;
+      const s = lms[sh], e = lms[el];
+      return (s && e && (s.visibility||0)>0.3 && (e.visibility||0)>0.3)
+        ? Math.hypot(s.x-e.x, s.y-e.y) : null;
+    }).filter(Boolean);
+    if(lens.length < 2) continue;
+    lens.sort((a,b)=>a-b);
+    humerusMedians[name] = lens[Math.floor(lens.length/2)];
+  }
+
+  let nulled = 0;
+  allFrameLandmarks.forEach((lms, fi) => {
+    if(!lms) return;
+    for(const {sh, el, wr, name} of pairs) {
+      const s = lms[sh], e = lms[el], w = lms[wr];
+      if(!e || !w || (e.visibility||0) < 0.25) continue;
+      const humLen = humerusMedians[name];
+      if(!humLen) continue;
+
+      // Rule 1 — distance: wrist must be within 1.6× humerus length of elbow
+      // (forearm ≈ 0.73× humerus; 1.6× gives a generous physiological ceiling)
+      const elwDist = Math.hypot(e.x - w.x, e.y - w.y);
+      if(elwDist > humLen * 1.6) {
+        lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(dist=${elwDist.toFixed(3)},hum=${humLen.toFixed(3)})`};
+        nulled++;
+        console.log(`[WristCheck] ${name} f${fi+1}: elbow-wrist dist ${(elwDist/humLen).toFixed(2)}× humerus → nulled`);
+        continue;
+      }
+
+      // Rule 2 — side-view direction: wrist cannot be more than 1× humerus
+      // length BEHIND the elbow (opposite to expected swing direction).
+      // On a side-facing runner: elbow is between shoulder and wrist in X.
+      // If wrist X is far behind the body (> 1× humLen past the shoulder), null it.
+      if(s) {
+        const shElDx = e.x - s.x; // shoulder→elbow direction
+        const elWrDx = w.x - e.x; // elbow→wrist direction
+        // Cross-product Z sign: same sign = wrist continues elbow direction, opposite = flipped
+        // For side view, mainly check that wrist doesn't appear on the far side of the torso
+        const torsoMidX = (lms[11]?.x ?? s.x + (lms[12]?.x ?? s.x)) / 2;
+        // If both shoulders available, torso width is known; wrist on far side = wrong
+        if(lms[11] && lms[12]) {
+          const torsoW = Math.abs(lms[11].x - lms[12].x);
+          const wristDistFromMid = Math.abs(w.x - torsoMidX);
+          // Wrist should not be more than 1× torso width past the torso midline in the far direction
+          if(wristDistFromMid > torsoW * 1.8 && elwDist > humLen * 1.1) {
+            lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(crossbody,torsoW=${torsoW.toFixed(3)})`};
+            nulled++;
+            console.log(`[WristCheck] ${name} f${fi+1}: cross-body position (${wristDistFromMid.toFixed(3)} from mid, torsoW=${torsoW.toFixed(3)}) → nulled`);
+          }
+        }
+      }
+    }
+  });
+  if(nulled > 0) console.log(`[WristCheck] Nulled ${nulled} implausible wrist positions`);
+  return allFrameLandmarks;
+}
   if(allFrameLandmarks.length < 4) return allFrameLandmarks;
   const isSide = (view === 'side');
 
@@ -3963,6 +4070,9 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
 
     statusEl.textContent = 'Applying segment constraints...';
     allLandmarks = applySegmentConstraints(allLandmarks, view);
+    // Wrist plausibility: null wrists that are physically impossible given elbow position.
+    // Catches the "far-arm wrist" error where MediaPipe places the wrist on the occluded arm.
+    allLandmarks = applyWristPlausibility(allLandmarks, view);
 
     // Running/gait: tibia-direction ankle reprojection + ground-plane constraint
     // This corrects the most common treadmill failure: far-side ankle placed on belt
