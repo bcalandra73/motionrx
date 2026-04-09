@@ -2504,7 +2504,7 @@ function startFrameExtraction(file, vid) {
                 // Validate with knee angle: at IC the ref knee should be near-extended (>140°).
                 const _strideWin = _nextIcIdx - _icIdx; // frames in one stride
                 const _refineIC = (seedIdx) => {
-                  const _r = Math.max(3, Math.round(_strideWin * 0.25)); // ±25%
+                  const _r = Math.max(5, Math.round(_strideWin * 0.50)); // ±50% (was 25%, too small)
                   const _s = Math.max(0, seedIdx - _r);
                   const _e = Math.min(N-1, seedIdx + _r);
                   // Pass 1: displacement minimum (Zeni signal)
@@ -2541,6 +2541,7 @@ function startFrameExtraction(file, vid) {
 
                 const _zIcIdx     = _refineIC(_icIdx);
                 const _zNextIcIdx = _refineIC(_nextIcIdx);
+                console.log(`[Zeni2008] IC: seed=${_icIdx}(knee=${perFrame[_icIdx]?.[_refKneeKey]?.toFixed(0)}°) → refined=${_zIcIdx}(knee=${perFrame[_zIcIdx]?.[_refKneeKey]?.toFixed(0)}°) | radius=${Math.max(5,Math.round(_strideWin*0.50))}`);
                 const _icFrac     = perFrame[_zIcIdx]?.t;
                 const _nextIcFrac = perFrame[Math.min(_zNextIcIdx, N-1)]?.t;
 
@@ -6804,7 +6805,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     const _allDispSE = perFrameData.map((_, i) => _dispAtIdx(i)).filter(v=>v!=null);
     const _meanDispSE = _allDispSE.length > 0 ? _allDispSE.reduce((s,v)=>s+v,0)/_allDispSE.length : -1;
     const _icIsMinSE  = _meanDispSE <= 0; // IC = displacement minimum for left-facing runner
-    const _searchR_se = Math.max(2, Math.round((endIdx - startIdx) * 0.20)); // ±20% of stride
+    const _searchR_se = Math.max(5, Math.round((endIdx - startIdx) * 0.50)); // ±50% of stride window (was 20%)
     const _refineIC_se = (seed) => {
       const sS = Math.max(0, seed - _searchR_se);
       const sE = Math.min(N-1, seed + _searchR_se);
@@ -6830,6 +6831,9 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       return dBestIdx;
     };
     const trueIcIdx = _refineIC_se(startIdx);
+    if(trueIcIdx !== startIdx) {
+      console.log(`[ICRefine] Stride ${startIdx}→${endIdx}: startIdx=${startIdx}(knee=${refKSm[startIdx]?.toFixed(0)}°) → trueIcIdx=${trueIcIdx}(knee=${refKSm[trueIcIdx]?.toFixed(0)}°)`);
+    }
 
     // Hip extension at toe-off
     const hipAtToeoff = refHSm[Math.min(toeoffIdx, N-1)];
@@ -6929,7 +6933,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const kneeContactFlexAll = strideDetails
     .map(s => s.kneeContactIncluded != null ? Math.round(180 - s.kneeContactIncluded) : null);
   const kneeContactFlexVals = kneeContactFlexAll
-    .filter(v => v != null && v >= 0 && v <= 80); // physiological clamp — 80° generous upper bound
+    .filter(v => v != null && v >= 0 && v <= 35); // physiological clamp: at true IC, knee flex ≤ 35° even for forefoot strikers
   // Reliability gate: require ≥ 50% of strides to yield valid readings.
   // If IC detection is inconsistent, kneeContactIncluded values will cluster at impossible
   // angles (>80° flexion at contact) and get filtered. A low pass rate signals bad IC detection.
@@ -10017,6 +10021,12 @@ async function runAnalysis() {
     const densePhases = window._denseAnglesFrames.map(f => f.phase || null);
     aggregated = aggregateAngles(denseAngles, densePhases);
     console.log(`[Analysis] Stage 3: Using ${denseAngles.length} dense frames for angle aggregation (was ${allAngles.length})`);
+    // ── Dense frame diagnostic: knee flex and trunk lean ──────────────────────
+    const _dLK = aggregated['Left Knee Flexion'],  _dRK = aggregated['Right Knee Flexion'];
+    const _dTL = aggregated['Trunk Lean'];
+    console.log(`[DenseDiag] Left Knee Flex: min=${_dLK?.min?.toFixed(1)} max=${_dLK?.max?.toFixed(1)} count=${_dLK?.count} → display=${_dLK?.min!=null?180-_dLK.min:null}°`);
+    console.log(`[DenseDiag] Right Knee Flex: min=${_dRK?.min?.toFixed(1)} max=${_dRK?.max?.toFixed(1)} count=${_dRK?.count} → display=${_dRK?.min!=null?180-_dRK.min:null}°`);
+    console.log(`[DenseDiag] Trunk Lean: avg=${_dTL?.avg} min=${_dTL?.min?.toFixed(1)} max=${_dTL?.max?.toFixed(1)} count=${_dTL?.count}`);
 
     // ── Hip flexion worldLandmarks override ────────────────────────────────
     // Dense frames are from MoveNet coarse scan — no worldLandmarks (_wx/_wz).
