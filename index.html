@@ -3630,6 +3630,8 @@ function applyWristPlausibility(allFrameLandmarks, view='side') {
   if(nulled > 0) console.log(`[WristCheck] Nulled ${nulled} implausible wrist positions`);
   return allFrameLandmarks;
 }
+
+function applyTibiaAnkleReprojection(allFrameLandmarks, view='side', movement='') {
   if(allFrameLandmarks.length < 4) return allFrameLandmarks;
   const isSide = (view === 'side');
 
