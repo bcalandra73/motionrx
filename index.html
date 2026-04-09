@@ -1552,6 +1552,8 @@ function startFrameExtraction(file, vid) {
   window_strideMetrics = null; // reset for each new analysis
   window_primaryPhaseSelection = null;
   window._denseAnglesFrames = null;
+  window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
+  window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
 
   async function doExtract() {
     if(started) return; started = true;
@@ -1573,19 +1575,25 @@ function startFrameExtraction(file, vid) {
       const fb = document.getElementById('videoDurationFeedback');
       if(fb) {
         fb.style.display = 'block';
-        if(dur < 5) {
+        // Thresholds per handoff spec: warn <6s, optimal 10–15s, caution >20s
+        if(dur < 6) {
           Object.assign(fb.style, {background:'#fde8e8',color:'#c0392b',border:'1px solid #f5c6c6'});
-          fb.textContent = `⚠️ Video too short (${dur.toFixed(1)}s) — minimum 5s for reliable stride detection.`;
-        } else if(dur < 8) {
+          fb.textContent = `⚠️ Too short (${dur.toFixed(1)}s) — need at least 6s for reliable stride detection. Aim for 10–15s.`;
+        } else if(dur < 10) {
+          const est = Math.round(dur * 1.47);
           Object.assign(fb.style, {background:'#fef9e7',color:'#7d5a00',border:'1px solid #f9e08a'});
-          fb.textContent = `⚡ Marginal length (${dur.toFixed(1)}s) — 8–12s preferred for multi-stride averaging.`;
+          fb.textContent = `⚡ Marginal (${dur.toFixed(1)}s, ~${est} strides) — 10–15s preferred for reliable multi-stride averaging.`;
         } else if(dur <= 15) {
           const est = Math.round(dur * 1.47);
           Object.assign(fb.style, {background:'#e8f5e9',color:'#1b5e20',border:'1px solid #a5d6a7'});
-          fb.textContent = `✓ Good length (${dur.toFixed(1)}s, ~${est} strides) — multi-stride averaging enabled.`;
-        } else {
+          fb.textContent = `✓ Optimal length (${dur.toFixed(1)}s, ~${est} strides) — multi-stride averaging enabled.`;
+        } else if(dur <= 20) {
+          const est = Math.round(dur * 1.47);
           Object.assign(fb.style, {background:'#fef9e7',color:'#7d5a00',border:'1px solid #f9e08a'});
-          fb.textContent = `⚡ Long clip (${dur.toFixed(1)}s) — will use most representative strides. Processing may be slow.`;
+          fb.textContent = `⚡ Long clip (${dur.toFixed(1)}s, ~${est} strides) — analysis uses most representative strides. Consider trimming to 10–15s.`;
+        } else {
+          Object.assign(fb.style, {background:'#fde8e8',color:'#c0392b',border:'1px solid #f5c6c6'});
+          fb.textContent = `⚠️ Very long clip (${dur.toFixed(1)}s) — phase detection may be less reliable and processing will be slow. Trim to 10–15s for best results.`;
         }
       }
     }
@@ -2350,8 +2358,15 @@ function startFrameExtraction(file, vid) {
                 dedupedFrames.push({...frames[best.fd.fi], phase: lbl, _fi: best.li});
               }
 
-              // Sort by frame index (fi stored during selection)
-              dedupedFrames.sort((a, b) => (a._fi ?? 0) - (b._fi ?? 0));
+              // Sort by canonical phase order (NOT by frame index).
+              // Sorting by _fi caused Early Swing / Toe Off to swap whenever the toeoff
+              // event was misdetected at a late frame index — making it appear after Early
+              // Swing in the gallery even though Toe Off precedes it in the gait cycle.
+              // phaseOrder is the authoritative canonical sequence.
+              dedupedFrames.sort((a, b) =>
+                phaseOrder.indexOf(a.phase?._baseId ?? '') -
+                phaseOrder.indexOf(b.phase?._baseId ?? '')
+              );
               frames.length = 0;
               dedupedFrames.slice(0, 8).forEach(f => {
                 const {_fi, ...rest} = f; // strip temp _fi before storing
@@ -2412,48 +2427,126 @@ function startFrameExtraction(file, vid) {
               // Use the ACTUAL detected video fraction for each gallery frame (_videoFraction
               // stored above from perFrame[best.li].t). This correctly positions the secondary
               // camera seek to the same moment in the clip, even if the detected stride is
-              // mid-clip. Falls back to canonical phase time if not available.
-              // ── Compute phase fractions from stride engine timing — NOT sparse frame indices ──
-              // The GaitFSM perFrame array has only ~6 frames per stride (9fps equivalent
-              // across a 14.1s clip). At this density, adjacent phases share the same frame,
-              // making frame-index arithmetic useless for distinguishing e.g. Propulsion from
-              // ToeOff (both land at r0+2 frames at 670ms stride / 9fps).
+              // ── Phase anchor: Zeni (2008) displacement method ──────────────────────
+              // Gold standard for video-based gait event detection without force plates.
+              // Ref: Zeni JA Jr et al., Gait & Posture 27(4):710-714, 2008.
               //
-              // Instead: use the KNOWN stride duration from the stride engine (±8ms accuracy)
-              // plus the LR anchor time from the sparse array (±110ms accuracy) to compute
-              // each phase's expected video time. The video is 120fps → 8.3ms per frame,
-              // so the re-extracted frames will be phase-accurate to within one video frame.
+              // IC   = local minimum of (refAnkX − hipMidX)  [foot furthest ahead of CoM]
+              // TO   = local maximum of (refAnkX − hipMidX)  [foot furthest behind CoM]
+              // On a treadmill the belt carries the planted foot rightward → clear
+              // horizontal displacement signal even when vertical signals are flat.
               //
-              // Calibrated offsets from LR (r0 = composite peak = Loading Response):
+              // All 8 phase times are then expressed as proportions of the MEASURED
+              // stance or swing duration — no single-point extrapolation.
+              // Proportions: Novacheck (1998); Perry & Burnfield (2010); O'Connor (2007).
+
+              // Keep LR-offset variables for the diagnostic log and fallback
               const _phaseOffsets = {
                 contact:-0.08, loading:0, midstance:0.13, propulsion:0.27,
                 toeoff:0.39, earlyswing:0.51, midswing:0.64, lateswing:0.78
               };
-              // LR anchor: video fraction of the loading response frame
               const _lrFrac = frames.find(f=>f.phase?._baseId==='loading')?.phase?._videoFraction
                            ?? (perFrame[r0]?.t ?? 0.5);
               const _strideDurNorm = (window_strideMetrics?.strideDurationS && window_strideMetrics?.videoDurationS)
                 ? window_strideMetrics.strideDurationS / window_strideMetrics.videoDurationS
                 : null;
 
-              window_primaryPhaseSelection = {
+              // ── Zeni anchor computation ────────────────────────────────────────────
+              const _bestSt    = window_strideMetrics?.bestStrideDetails;
+              const _icIdx     = _bestSt?.startIdx;
+              const _nextIcIdx = _bestSt?.endIdx;
+              const _refAnkKey = REF === 'L' ? 'lAnkX' : 'rAnkX';
+              let _zeniSel = null;
+
+              if(_icIdx != null && _nextIcIdx != null
+                 && _icIdx < N && _nextIcIdx < N && _nextIcIdx > _icIdx) {
+                const _icFrac     = perFrame[_icIdx]?.t;
+                const _nextIcFrac = perFrame[Math.min(_nextIcIdx, N-1)]?.t;
+
+                if(_icFrac != null && _nextIcFrac != null && _nextIcFrac > _icFrac) {
+                  // Toe-off detection: max of (refAnkX − hipMidX) in 20–65% of stride window.
+                  // Runner faces left → at toe-off, foot is to the RIGHT of the hip (positive).
+                  const _srchS = Math.round(_icIdx + (_nextIcIdx - _icIdx) * 0.20);
+                  const _srchE = Math.round(_icIdx + (_nextIcIdx - _icIdx) * 0.65);
+                  let _toIdx = null, _toMax = -Infinity;
+                  for(let _si = _srchS; _si <= _srchE && _si < N; _si++) {
+                    const _ax = perFrame[_si]?.[_refAnkKey];
+                    const _hx = perFrame[_si]?.hipMidX;
+                    if(_ax == null || _hx == null) continue;
+                    const _d = _ax - _hx;
+                    if(_d > _toMax) { _toMax = _d; _toIdx = _si; }
+                  }
+                  // Fallback: 40% of stride (typical treadmill running GCT)
+                  if(_toIdx == null) _toIdx = Math.round(_icIdx + (_nextIcIdx - _icIdx) * 0.40);
+                  const _toFrac = perFrame[Math.min(_toIdx, N-1)]?.t;
+
+                  if(_toFrac != null && _toFrac > _icFrac && _toFrac < _nextIcFrac) {
+                    const _sDur = _toFrac - _icFrac;      // stance, as video fraction
+                    const _wDur = _nextIcFrac - _toFrac;  // swing, as video fraction
+                    const _c = (f) => Math.max(0.01, Math.min(0.99, f));
+                    const _zF = {
+                      contact:    _icFrac,
+                      loading:    _icFrac + 0.12 * _sDur,  // 12% stance — early weight acceptance
+                      midstance:  _icFrac + 0.38 * _sDur,  // 38% stance — ankle under hip
+                      propulsion: _icFrac + 0.72 * _sDur,  // 72% stance — max plantarflexor force
+                      toeoff:     _toFrac,
+                      earlyswing: _toFrac + 0.15 * _wDur,  // 15% swing — limb clearance
+                      midswing:   _toFrac + 0.50 * _wDur,  // 50% swing — peak knee flexion
+                      lateswing:  _toFrac + 0.83 * _wDur,  // 83% swing — terminal deceleration
+                    };
+                    _zeniSel = {
+                      fractions: frames.map(f => _c(_zF[f.phase?._baseId ?? ''] ?? _icFrac)),
+                      labels:    frames.map(f => f.phase),
+                    };
+                    const _stPct = Math.round(_sDur / (_nextIcFrac - _icFrac) * 100);
+                    console.log(`[Zeni2008] ✓ IC=${_icFrac.toFixed(3)} TO=${_toFrac.toFixed(3)} nextIC=${_nextIcFrac.toFixed(3)} stance=${_stPct}% (norm 38-45%)`);
+                    console.log('[Zeni2008] Fractions: ' + Object.entries(_zF).map(([k,v])=>k.slice(0,4)+'='+v.toFixed(3)).join(' '));
+                  }
+                }
+              }
+              if(!_zeniSel) {
+                console.warn('[Zeni2008] ⚠ Could not compute Zeni anchor (bestStrideDetails missing or invalid) — using _lrFrac fallback');
+              }
+
+              // LR-offset fallback (pre-Zeni approach — kept as safety net)
+              const _lrFallback = {
                 fractions: frames.map(f => {
                   const baseId = f.phase?._baseId;
-                  // Time-based fraction if stride engine data is available
                   if(_strideDurNorm && _phaseOffsets[baseId] != null) {
                     const tf = _lrFrac + _phaseOffsets[baseId] * _strideDurNorm;
                     return Math.max(0.01, Math.min(0.99, tf));
                   }
-                  // Fallback: actual sparse frame time
                   if(f.phase?._videoFraction != null) return f.phase._videoFraction;
                   const ph = runningPhases.find(p => p.id === baseId);
                   return ph ? ph.time : 0.5;
                 }),
                 labels: frames.map(f => f.phase),
               };
+
+              window_primaryPhaseSelection = _zeniSel ?? _lrFallback;
+              const _anchorMethod = _zeniSel ? 'Zeni2008 (IC+TO displacement)' : 'LR-offset fallback';
+
               const _strideDurMs = window_strideMetrics?.strideDurationS ? (window_strideMetrics.strideDurationS*1000).toFixed(0) : '?';
-              console.log('[GaitFSM v4] Phase fractions (time-based, strideDur=' + _strideDurMs + 'ms): ' + window_primaryPhaseSelection.fractions.map(x=>x.toFixed(3)).join(', '));
+              console.log('[GaitFSM v4] Anchor: ' + _anchorMethod + ' | strideDur=' + _strideDurMs + 'ms');
+              console.log('[GaitFSM v4] Phase fractions: ' + window_primaryPhaseSelection.fractions.map(x=>x.toFixed(3)).join(', '));
               console.log('[GaitFSM v4] Phases: ' + frames.map(f=>f.phase?.label||'?').join(' | '));
+
+              // ── Phase label diagnostic block ───────────────────────────────────────
+              console.group('[GaitFSM v4] Phase selection diagnostic');
+              console.log('  Anchor method:', _anchorMethod);
+              console.log('  _lrFrac:', _lrFrac?.toFixed(4), '(fallback anchor — expect ~0.35 for mid-clip LR)');
+              console.log('  _strideDurNorm:', _strideDurNorm?.toFixed(4), '(expect ~0.047 = 670ms/14100ms)');
+              console.log('  bestStrideDetails:', JSON.stringify({icIdx:_icIdx, toIdx:_bestSt?.toeoffIdx, nextIcIdx:_nextIcIdx}));
+              if(window_primaryPhaseSelection) {
+                const _phLabels = window_primaryPhaseSelection.labels.map(p=>p?.label||p?._baseId||'?');
+                const _phFracs  = window_primaryPhaseSelection.fractions;
+                _phLabels.forEach((lbl,i) => {
+                  const frac = _phFracs[i];
+                  const tSec = frac * (window_strideMetrics?.videoDurationS || 0);
+                  console.log(`  Frame ${i+1} [${lbl}]: frac=${frac?.toFixed(3)} t=${tSec?.toFixed(2)}s`);
+                });
+              }
+              console.groupEnd();
 
               // ── Store dense landmarks for angle computation ────────────────────────
               // extractAngles only runs on the 8 gallery frames, missing the true peak
@@ -6652,9 +6745,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       }
     }
 
+    // kneeAtContact is the included hip-knee-ankle angle at initial contact frame
+    // (180° = full extension, lower = more flexed). Stored as included angle here;
+    // converted to clinical flexion angle (180 - included) during aggregation.
+    const kneeContactIncluded = refKSm[startIdx] ?? null;
     return {
       durationS, gcPct, floatPct, peakKneeFlex, hipAtToeoff, footStrike,
-      stepAsymProxy, startIdx, endIdx, toeoffIdx
+      stepAsymProxy, startIdx, endIdx, toeoffIdx,
+      kneeContactIncluded,
     };
   }).filter(Boolean);
 
@@ -6696,6 +6794,20 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 
   // Peak knee flexion average
   const avgPeakKnee = kneePeaks.length > 0 ? Math.round(mean(kneePeaks)) : null;
+
+  // ── Knee flexion at initial contact ───────────────────────────────────────
+  // Convert included angles → clinical flexion degrees (180 − included).
+  // Norm: 5–20° for recreational runners. Heel strikers tend toward the low end
+  // (near-extended knee at contact); forefoot strikers toward the high end.
+  // Stiffness flag (>30°): compensation, post-surgical guarding, or forefoot-bias.
+  // Low-flexion flag (<5°): impact risk, locked-knee gait.
+  const kneeContactFlexVals = strideDetails
+    .map(s => s.kneeContactIncluded != null ? Math.round(180 - s.kneeContactIncluded) : null)
+    .filter(v => v != null && v >= 0 && v <= 60); // physiological clamp
+  const kneeFlexAtContact = kneeContactFlexVals.length > 0
+    ? Math.round(mean(kneeContactFlexVals))
+    : null;
+
   // Hip extension at toe-off: use median for robustness, clamp to physiological range
   // Normal: 10–25°. Values >30° suggest toeoffIdx landed on wrong frame.
   const hipExtRaw = hipExtensions.length > 0
@@ -6835,6 +6947,22 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   if(fsConsensus === 'heel')     flags.footStrike = {level:'warn', msg:'Heel strike pattern detected — higher impact loading, consider forefoot strike cues'};
   else if(fsConsensus==='midfoot') flags.footStrike = {level:'ok', msg:'Midfoot strike pattern — optimal for most runners'};
   else if(fsConsensus==='forefoot') flags.footStrike = {level:'ok', msg:'Forefoot strike pattern detected'};
+
+  // Knee flexion at initial contact flag
+  // Norm: 5–20° (Novacheck 1998; Dempsey et al.)
+  // <5°: near-straight leg — higher impact, often correlates with heel strike
+  // 20–30°: elevated but within forefoot-strike range
+  // >30°: excessive — possible guarding, fatigue, or post-surgical compensation
+  if(kneeFlexAtContact != null) {
+    if(kneeFlexAtContact < 5)
+      flags.kneeFlexContact = {level:'warn', msg:`Knee almost fully extended at contact (${kneeFlexAtContact}°) — near-straight leg increases impact loading; typical norm 5–20°`};
+    else if(kneeFlexAtContact <= 20)
+      flags.kneeFlexContact = {level:'ok',   msg:`Knee flexion at contact ${kneeFlexAtContact}° — within normal range (5–20°)`};
+    else if(kneeFlexAtContact <= 30)
+      flags.kneeFlexContact = {level:'ok',   msg:`Knee flexion at contact ${kneeFlexAtContact}° — slightly elevated, consistent with forefoot/midfoot strike`};
+    else
+      flags.kneeFlexContact = {level:'warn', msg:`High knee flexion at contact (${kneeFlexAtContact}°) — may indicate guarding, fatigue, or post-surgical compensation`};
+  }
 
   // Stride length flags (only when speed + height both provided)
   if(overstrideFlag === 'overstride') {
@@ -6987,6 +7115,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     gcpReliable, floatReliable,
     // Kinematics
     peakKneeFlex:     avgPeakKnee,
+    kneeFlexAtContact,             // degrees of flexion at initial contact (5–20° norm)
     hipExtAtToeoff:   avgHipExt,
     fsConsensus,
     stepLengthAsymPct: stepLengthAsym,
@@ -7267,6 +7396,16 @@ function renderStrideMetrics(metrics, aggregated={}) {
       unit:'swing phase',
       sub:'Optimal: 90–130° for running',
       flag: metrics.peakKneeFlex<80||metrics.peakKneeFlex>140 ? 'warn' : 'ok',
+    }] : []),
+    ...(metrics.kneeFlexAtContact != null ? [{
+      label:'Knee Flex at Contact',
+      value: metrics.kneeFlexAtContact+'°',
+      unit:'initial contact',
+      sub: metrics.kneeFlexAtContact < 5  ? '⚠️ Near-straight — higher impact' :
+           metrics.kneeFlexAtContact <= 20 ? '✓ Normal range (5–20°)' :
+           metrics.kneeFlexAtContact <= 30 ? 'Elevated — forefoot/midfoot pattern' :
+                                             '⚠️ High — guarding or compensation',
+      flag: metrics.kneeFlexAtContact < 5 || metrics.kneeFlexAtContact > 30 ? 'warn' : 'ok',
     }] : []),
     ...(metrics.hipExtAtToeoff != null ? [{
       label:'Hip Ext at Toe-off',
@@ -9700,11 +9839,12 @@ async function runAnalysis() {
         if(_ri < allAngles.length) allAngles[_ri] = extractAngles(correctedLms[_ri], cameraView, movement);
       }
       // Re-process edited secondary frames
-      // Flag primary corrections so Stage 3a knows to preserve manual edits
-      window._primaryCorrectionsMade = false;
+      // _primaryCorrectionsMade stays true (set above) — Stage 3a will check and skip re-extraction
+      window._secondaryCorrectionsMade = false;
       if(_hasDual && correctedLms2) {
         for(let _ri = 0; _ri < extractedFrames2.length; _ri++) {
           if(!_rvEdited2[_ri] || !correctedLms2[_ri]) continue;
+          window._secondaryCorrectionsMade = true; // mark so Stage 3b skips re-extraction
           const corrMpResult2 = {poseLandmarks: correctedLms2[_ri]};
           const redrawn2 = await drawSkeleton(
             extractedFrames2[_ri].imageData, corrMpResult2, null, cameraView2, extractedFrames2[_ri].phase
@@ -9715,7 +9855,9 @@ async function runAnalysis() {
       }
       const n1ed = _rvEdited.filter(Boolean).length;
       const n2ed = _rvEdited2.filter(Boolean).length;
-      console.log('[Review] Applied corrections: ' + n1ed + ' primary, ' + n2ed + ' secondary frame(s)');
+      console.log('[Review] Applied corrections: ' + n1ed + ' primary, ' + n2ed + ' secondary frame(s)' +
+        (window._primaryCorrectionsMade ? ' — Stage 3a SKIP' : '') +
+        (window._secondaryCorrectionsMade ? ' — Stage 3b SKIP' : ''));
     }
   } else {
     // No MediaPipe — raw frames, still attempt color-based bar detection
@@ -9877,11 +10019,15 @@ async function runAnalysis() {
       if(_p3aDur) {
         const _phSel = window_primaryPhaseSelection;
         const _newFrames = [];
+        console.group('[Stage 3a] Seeking primary gallery at phase-aligned times (vidDur=' + _p3aDur.toFixed(2) + 's)');
         for(let _i = 0; _i < _phSel.fractions.length; _i++) {
           const _t = Math.max(0.05, Math.min(_phSel.fractions[_i] * _p3aDur, _p3aDur - 0.05));
+          const _lbl = _phSel.labels[_i]?.label || _phSel.labels[_i]?._baseId || '?';
+          console.log(`  Frame ${_i+1} [${_lbl}]: frac=${_phSel.fractions[_i].toFixed(3)} → t=${_t.toFixed(3)}s`);
           const _b64 = await seekCapture(_p3aVid, _t);
           if(_b64) _newFrames.push({imageData: _b64, phase: _phSel.labels[_i]});
         }
+        console.groupEnd();
         if(_newFrames.length >= 4) {
           // Run MP + skeleton on re-extracted frames
           const _newMp = await runMediaPipeOnFrames(_newFrames);
@@ -9924,11 +10070,10 @@ async function runAnalysis() {
 
   if(hasDualView) {
     // ── Re-extract secondary video at phase-aligned positions ───────────────
-    // The secondary video was initially extracted at evenly-spaced time positions
-    // when the user uploaded it (before GaitFSM ran on the primary video).
-    // Now that GaitFSM has identified the correct phase fractions, re-seek
-    // the secondary video to those positions for true temporal alignment.
-    if(window_primaryPhaseSelection && uploadedFile2) {
+    // Skip if PT made manual landmark corrections in the review panel —
+    // re-extracting would discard the corrected annotatedFrames2.
+    const _skipStage3b = window._secondaryCorrectionsMade === true;
+    if(!_skipStage3b && window_primaryPhaseSelection && uploadedFile2) {
       try {
         const tmpVid = document.createElement('video');
         tmpVid.muted = true;
@@ -9963,6 +10108,8 @@ async function runAnalysis() {
       } catch(e) {
         console.warn('[Analysis] Stage 3b: Phase-aligned re-extraction failed:', e.message);
       }
+    } else if(_skipStage3b) {
+      console.log('[Analysis] Stage 3b: Phase-aligned re-extraction SKIPPED — PT made secondary landmark corrections');
     }
     const s2b = document.getElementById('s2b');
     if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
@@ -10007,19 +10154,29 @@ async function runAnalysis() {
         poseLandmarks: lms,
         _raw: mpResults2[i]
       }));
-      // Clear + cap to 8 — prevents initial-extraction count leaking in
-      annotatedFrames2 = [];
-      const _s3bCount = Math.min(extractedFrames2.length, 8);
-      const _s3bStep  = extractedFrames2.length <= 8 ? 1 : extractedFrames2.length / _s3bCount;
-      const _s3bIdxs  = Array.from({length:_s3bCount}, (_,ii) =>
-        Math.min(extractedFrames2.length-1, Math.round(ii * _s3bStep)));
-      for(const i of _s3bIdxs) {
-        const frame = extractedFrames2[i];
-        const mpResult = fusedResults2[i];
-        const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2, frame.phase);
-        annotatedFrames2.push({base64, canvas, phase: frame.phase});
-        if(mpResult && mpResult.poseLandmarks) {
-          allAngles2.push(extractAngles(mpResult.poseLandmarks, cameraView2, movement));
+      if(_skipStage3b) {
+        // PT made secondary corrections — keep annotatedFrames2 as-is (already redrawn in review).
+        // Still compute allAngles2 from the freshly-refined landmarks for correct angle reporting.
+        for(let i = 0; i < Math.min(extractedFrames2.length, 8); i++) {
+          const lms = fusedResults2[i]?.poseLandmarks;
+          if(lms) allAngles2.push(extractAngles(lms, cameraView2, movement));
+        }
+        console.log('[Analysis] Stage 3b: annotatedFrames2 PRESERVED (secondary corrections) — angles re-extracted from refined landmarks');
+      } else {
+        // Clear + cap to 8 — prevents initial-extraction count leaking in
+        annotatedFrames2 = [];
+        const _s3bCount = Math.min(extractedFrames2.length, 8);
+        const _s3bStep  = extractedFrames2.length <= 8 ? 1 : extractedFrames2.length / _s3bCount;
+        const _s3bIdxs  = Array.from({length:_s3bCount}, (_,ii) =>
+          Math.min(extractedFrames2.length-1, Math.round(ii * _s3bStep)));
+        for(const i of _s3bIdxs) {
+          const frame = extractedFrames2[i];
+          const mpResult = fusedResults2[i];
+          const {canvas, base64} = await drawSkeleton(frame.imageData, mpResult, null, cameraView2, frame.phase);
+          annotatedFrames2.push({base64, canvas, phase: frame.phase});
+          if(mpResult && mpResult.poseLandmarks) {
+            allAngles2.push(extractAngles(mpResult.poseLandmarks, cameraView2, movement));
+          }
         }
       }
     } else {
@@ -10295,6 +10452,7 @@ RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete st
 - Ground contact: ${window_strideMetrics.gcPct!=null ? window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
 - Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics.hasFloat ? window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' : '0% detected (may indicate shuffle-run or 30fps limitation)') : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
 - Foot strike pattern: ${window_strideMetrics.fsConsensus} (${window_strideMetrics.fsConsensus==='heel'?'higher impact, consider midfoot cues':window_strideMetrics.fsConsensus==='midfoot'?'optimal pattern':'forefoot strike'})
+${window_strideMetrics.kneeFlexAtContact!=null ? `- Knee flexion at initial contact: ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})` : ''}
 ${window_strideMetrics.stepLengthAsymPct!=null ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)` : ''}
 ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
@@ -11290,8 +11448,9 @@ function buildSessionSnapshot() {
       'Ankle DF R':          getVal('Right Ankle Dorsiflexion'),
       'Hip Ext Toe-off':     sm?.hipExtAtToeoff ?? null,
       'Cadence (spm)':       sm?.cadenceSpm ?? null,
-      'Step Asym (%)':       sm?.stepAsymPct ?? null,
+      'Step Asym (%)':       sm?.stepLengthAsymPct ?? null,
       'Peak Knee Flex':      sm?.peakKneeFlex ?? null,
+      'Knee Flex at Contact': sm?.kneeFlexAtContact ?? null,
       'Trunk Lean':          getVal('Trunk Lean'),
       'Pelvic Drop':         getVal('Pelvic Drop'),
       'Knee Valgus L':       getVal('Left Knee Valgus'),
@@ -11393,6 +11552,7 @@ function renderComparisonTable() {
     'Ankle DF R':        12,
     'Hip Ext Toe-off':   8,
     'Peak Knee Flex':    6,
+    'Knee Flex at Contact': 7, // Contact-phase angle; slightly less reliable than swing peak (ICC ~0.88)
     'Cadence (spm)':     4,   // Spatiotemporal: high repeatability
     'Step Asym (%)':     3,
     'Trunk Lean':        5,
@@ -11984,6 +12144,15 @@ async function exportPDF() {
         {label:'Foot Strike',      value: sm.fsConsensus.charAt(0).toUpperCase()+sm.fsConsensus.slice(1), sub:'consensus pattern'},
       ];
       if(sm.peakKneeFlex!=null)    kpiDefs.push({label:'Peak Knee Flex', value:`${sm.peakKneeFlex}°`, sub:'swing phase'});
+      if(sm.kneeFlexAtContact!=null) kpiDefs.push({
+        label:'Knee Flex at Contact',
+        value:`${sm.kneeFlexAtContact}°`,
+        sub: sm.kneeFlexAtContact < 5  ? '⚠ Near-straight — impact risk' :
+             sm.kneeFlexAtContact <= 20 ? 'Normal (5–20°)' :
+             sm.kneeFlexAtContact <= 30 ? 'Elevated — forefoot pattern' :
+                                          '⚠ High — guarding/compensation',
+        flag: sm.kneeFlexAtContact < 5 || sm.kneeFlexAtContact > 30 ? 'warn' : 'ok',
+      });
       if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step timing'});
       if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
       if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'! overstriding':sm.overstrideFlag==='understride'?'! understriding':'optimal range'});
