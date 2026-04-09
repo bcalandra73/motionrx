@@ -1996,13 +1996,38 @@ function startFrameExtraction(file, vid) {
 
               const OPP = REF==='L' ? 'R' : 'L';
 
-              // Ankle forward-of-hip signals — defined after REF is known
-              const lAnkFwdS = smooth5(perFrame.map(f =>
-                f.lAnkRelX != null ? -facingDir * f.lAnkRelX : null
-              ));
-              const rAnkFwdS = smooth5(perFrame.map(f =>
-                f.rAnkRelX != null ? -facingDir * f.rAnkRelX : null
-              ));
+              // ── Ankle-forward-of-hip displacement (Zeni 2008) ──────────────────────
+              // Compute (refAnkX − hipMidX) directly from perFrame coordinates.
+              // lAnkRelX/facingDir were removed in a prior refactor — reconstruct here.
+              // For a left-facing runner: at IC ankle is leftward (low X) → signal is at MINIMUM.
+              //                           at TO ankle is rightward (high X) → signal is at MAXIMUM.
+              // Auto-detect travel direction from the sign of the mean displacement across
+              // all frames: negative mean = runner faces left (ankle leads on left side).
+              const _lDispRaw = perFrame.map(f => {
+                const ax = REF==='L' ? f.lAnkX : f.rAnkX;
+                return (ax != null && f.hipMidX != null) ? ax - f.hipMidX : null;
+              });
+              const _rDispRaw = perFrame.map(f => {
+                const ax = REF==='R' ? f.lAnkX : f.rAnkX;
+                return (ax != null && f.hipMidX != null) ? ax - f.hipMidX : null;
+              });
+              // Smoothed reference-leg displacement (forward = more negative for left-facing)
+              const _refDispS = smooth5(_lDispRaw.map((v,i) => REF==='L' ? v : _rDispRaw[i]));
+              // Auto-detect: if mean displacement < 0, runner faces left → IC = minimum; TO = maximum
+              const _dispVals = _refDispS.filter(v=>v!=null);
+              const _dispMean = _dispVals.length > 0 ? _dispVals.reduce((s,v)=>s+v,0)/_dispVals.length : 0;
+              const _icIsMin  = _dispMean <= 0; // true when runner faces left (standard)
+
+              const lAnkFwdS = smooth5(perFrame.map(f => {
+                const ax = f.lAnkX, hx = f.hipMidX;
+                if(ax == null || hx == null) return null;
+                return _icIsMin ? -(ax - hx) : (ax - hx); // positive = more forward
+              }));
+              const rAnkFwdS = smooth5(perFrame.map(f => {
+                const ax = f.rAnkX, hx = f.hipMidX;
+                if(ax == null || hx == null) return null;
+                return _icIsMin ? -(ax - hx) : (ax - hx);
+              }));
               const refAnkFwdS = REF==='L' ? lAnkFwdS : rAnkFwdS;
 
               const refAnkS  = REF==='L' ? lAnkS  : rAnkS;
@@ -2465,28 +2490,75 @@ function startFrameExtraction(file, vid) {
               const _icIdx     = _bestSt?.startIdx;
               const _nextIcIdx = _bestSt?.endIdx;
               const _refAnkKey = REF === 'L' ? 'lAnkX' : 'rAnkX';
+              const _refKneeKey = REF === 'L' ? 'lKnee' : 'rKnee';
               let _zeniSel = null;
 
               if(_icIdx != null && _nextIcIdx != null
                  && _icIdx < N && _nextIcIdx < N && _nextIcIdx > _icIdx) {
-                const _icFrac     = perFrame[_icIdx]?.t;
-                const _nextIcFrac = perFrame[Math.min(_nextIcIdx, N-1)]?.t;
+
+                // ── IC Refinement: find true IC from displacement signal ──────────
+                // The stride engine's startIdx may be off by 2-3 frames (~200ms) because
+                // it uses a bilateral ankle composite which can alias to the wrong peak.
+                // True IC = minimum of (refAnkX - hipMidX) when runner faces left,
+                // i.e. most-negative displacement = foot furthest forward of hip.
+                // Validate with knee angle: at IC the ref knee should be near-extended (>140°).
+                const _strideWin = _nextIcIdx - _icIdx; // frames in one stride
+                const _refineIC = (seedIdx) => {
+                  const _r = Math.max(3, Math.round(_strideWin * 0.25)); // ±25%
+                  const _s = Math.max(0, seedIdx - _r);
+                  const _e = Math.min(N-1, seedIdx + _r);
+                  // Pass 1: displacement minimum (Zeni signal)
+                  let _dBest = null, _dBestIdx = seedIdx;
+                  for(let _si = _s; _si <= _e; _si++) {
+                    const ax = perFrame[_si]?.[_refAnkKey];
+                    const hx = perFrame[_si]?.hipMidX;
+                    if(ax == null || hx == null) continue;
+                    // For left-facing runner, IC = minimum (ax-hx); for right-facing, maximum.
+                    const d = _icIsMin ? (ax - hx) : -(ax - hx);
+                    if(_dBest === null || d < _dBest) { _dBest = d; _dBestIdx = _si; }
+                  }
+                  // Pass 2: knee-extension validation
+                  const _knee = perFrame[_dBestIdx]?.[_refKneeKey];
+                  if(_knee != null && _knee < 140) {
+                    // Displacement min is in swing — find highest knee angle nearby as IC
+                    let _kBest = _knee, _kBestIdx = _dBestIdx;
+                    for(let _si = _s; _si <= _e; _si++) {
+                      const k = perFrame[_si]?.[_refKneeKey];
+                      if(k != null && k > _kBest) { _kBest = k; _kBestIdx = _si; }
+                    }
+                    if(_kBest >= 140) {
+                      console.log(`[Zeni2008] IC refined: disp-min knee=${_knee}° → knee-max frame ${_kBestIdx} (knee=${_kBest}°)`);
+                      return _kBestIdx;
+                    }
+                    // Last resort: use seed from stride engine
+                    console.warn(`[Zeni2008] IC refinement: disp-min knee=${_knee}°, knee-max=${_kBest}° both < 140° — using stride engine seed ${seedIdx}`);
+                    return seedIdx;
+                  }
+                  if(_dBestIdx !== seedIdx)
+                    console.log(`[Zeni2008] IC refined: seed=${seedIdx}(knee=${perFrame[seedIdx]?.[_refKneeKey]?.toFixed(0)}°) → ${_dBestIdx}(knee=${_knee?.toFixed(0)}°)`);
+                  return _dBestIdx;
+                };
+
+                const _zIcIdx     = _refineIC(_icIdx);
+                const _zNextIcIdx = _refineIC(_nextIcIdx);
+                const _icFrac     = perFrame[_zIcIdx]?.t;
+                const _nextIcFrac = perFrame[Math.min(_zNextIcIdx, N-1)]?.t;
 
                 if(_icFrac != null && _nextIcFrac != null && _nextIcFrac > _icFrac) {
-                  // Toe-off detection: max of (refAnkX − hipMidX) in 20–65% of stride window.
-                  // Runner faces left → at toe-off, foot is to the RIGHT of the hip (positive).
-                  const _srchS = Math.round(_icIdx + (_nextIcIdx - _icIdx) * 0.20);
-                  const _srchE = Math.round(_icIdx + (_nextIcIdx - _icIdx) * 0.65);
+                  // Toe-off: maximum of (refAnkX − hipMidX) in 20–65% of stride.
+                  // Left-facing runner: at TO foot is rightward of hip (positive displacement).
+                  const _srchS = Math.round(_zIcIdx + (_zNextIcIdx - _zIcIdx) * 0.20);
+                  const _srchE = Math.round(_zIcIdx + (_zNextIcIdx - _zIcIdx) * 0.65);
                   let _toIdx = null, _toMax = -Infinity;
                   for(let _si = _srchS; _si <= _srchE && _si < N; _si++) {
                     const _ax = perFrame[_si]?.[_refAnkKey];
                     const _hx = perFrame[_si]?.hipMidX;
                     if(_ax == null || _hx == null) continue;
-                    const _d = _ax - _hx;
+                    const _d = _icIsMin ? (_ax - _hx) : -(_ax - _hx); // TO = max displacement
                     if(_d > _toMax) { _toMax = _d; _toIdx = _si; }
                   }
                   // Fallback: 40% of stride (typical treadmill running GCT)
-                  if(_toIdx == null) _toIdx = Math.round(_icIdx + (_nextIcIdx - _icIdx) * 0.40);
+                  if(_toIdx == null) _toIdx = Math.round(_zIcIdx + (_zNextIcIdx - _zIcIdx) * 0.40);
                   const _toFrac = perFrame[Math.min(_toIdx, N-1)]?.t;
 
                   if(_toFrac != null && _toFrac > _icFrac && _toFrac < _nextIcFrac) {
@@ -2559,6 +2631,9 @@ function startFrameExtraction(file, vid) {
               console.log('  _lrFrac:', _lrFrac?.toFixed(4), '(fallback anchor — expect ~0.35 for mid-clip LR)');
               console.log('  _strideDurNorm:', _strideDurNorm?.toFixed(4), '(expect ~0.047 = 670ms/14100ms)');
               console.log('  bestStrideDetails:', JSON.stringify({icIdx:_icIdx, toIdx:_bestSt?.toeoffIdx, nextIcIdx:_nextIcIdx}));
+              console.log('  Zeni refined IC:', _zIcIdx, 'nextIC:', _zNextIcIdx,
+                '| raw knee@IC:', perFrame[_icIdx]?.[_refKneeKey]?.toFixed(0)+'°',
+                '→ refined knee@IC:', perFrame[_zIcIdx ?? _icIdx]?.[_refKneeKey]?.toFixed(0)+'°');
               if(window_primaryPhaseSelection) {
                 const _phLabels = window_primaryPhaseSelection.labels.map(p=>p?.label||p?._baseId||'?');
                 const _phFracs  = window_primaryPhaseSelection.fractions;
@@ -6715,53 +6790,79 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       ? Math.min(...swingIdxs.map(i=>refKSm[i]).filter(v=>v!=null))
       : null;
 
+    // ── IC Refinement (Zeni displacement + knee-extension validation) ─────────
+    // The composite contact detection can place startIdx 2-3 frames early/late.
+    // At true IC the ref knee should be near-extended (included angle > 140°).
+    // Use the horizontal ankle displacement signal to find the true IC frame.
+    const _refAnkKey_se = REF === 'L' ? 'lAnkX' : 'rAnkX';
+    const _dispAtIdx = (idx) => {
+      const ax = perFrameData[idx]?.[_refAnkKey_se];
+      const hx = perFrameData[idx]?.hipMidX;
+      return (ax != null && hx != null) ? ax - hx : null;
+    };
+    // Auto-detect facing direction from mean displacement (negative = faces left)
+    const _allDispSE = perFrameData.map((_, i) => _dispAtIdx(i)).filter(v=>v!=null);
+    const _meanDispSE = _allDispSE.length > 0 ? _allDispSE.reduce((s,v)=>s+v,0)/_allDispSE.length : -1;
+    const _icIsMinSE  = _meanDispSE <= 0; // IC = displacement minimum for left-facing runner
+    const _searchR_se = Math.max(2, Math.round((endIdx - startIdx) * 0.20)); // ±20% of stride
+    const _refineIC_se = (seed) => {
+      const sS = Math.max(0, seed - _searchR_se);
+      const sE = Math.min(N-1, seed + _searchR_se);
+      // Pass 1: displacement-based IC (minimum if left-facing, maximum if right-facing)
+      let dBest = null, dBestIdx = seed;
+      for(let i = sS; i <= sE; i++) {
+        const d = _dispAtIdx(i);
+        if(d == null) continue;
+        const sd = _icIsMinSE ? d : -d; // looking for minimum in left-facing case
+        if(dBest === null || sd < dBest) { dBest = sd; dBestIdx = i; }
+      }
+      // Pass 2: knee-extension validation — IC must have knee near-extended (> 140°)
+      const kAtDisp = refKSm[dBestIdx];
+      if(kAtDisp != null && kAtDisp < 140) {
+        let kBest = kAtDisp, kBestIdx = dBestIdx;
+        for(let i = sS; i <= sE; i++) {
+          const k = refKSm[i];
+          if(k != null && k > kBest) { kBest = k; kBestIdx = i; }
+        }
+        if(kBest >= 140) return kBestIdx; // use knee-extension peak as IC
+        return seed; // both methods uncertain — keep stride engine's estimate
+      }
+      return dBestIdx;
+    };
+    const trueIcIdx = _refineIC_se(startIdx);
+
     // Hip extension at toe-off
     const hipAtToeoff = refHSm[Math.min(toeoffIdx, N-1)];
 
     // Contralateral knee at contact (opp leg knee angle at REF foot strike)
-    const oppKAtContact = oppKSm[startIdx] ?? null;
+    const oppKAtContact = oppKSm[trueIcIdx] ?? null;
 
     // Step length asymmetry proxy: horizontal ankle distance at contact
-    const lAnkXAtContact = perFrameData[startIdx]?.lAnkX ?? null;
-    const rAnkXAtContact = perFrameData[startIdx]?.rAnkX ?? null;
+    const lAnkXAtContact = perFrameData[trueIcIdx]?.lAnkX ?? null;
+    const rAnkXAtContact = perFrameData[trueIcIdx]?.rAnkX ?? null;
     const stepAsymProxy  = (lAnkXAtContact!=null && rAnkXAtContact!=null)
       ? Math.abs(lAnkXAtContact - rAnkXAtContact)
       : null;
 
     // Foot strike pattern: ankle angle at contact
-    // Primary method: ankle dorsiflexion angle at contact frame
-    // - calcAngle(knee, ankle, toe/heel) gives: ~90°=neutral, >90°=DF (heel), <90°=PF (forefoot)
-    // - At initial contact: heel strike shows dorsiflexion (ankle angled toward shin)
-    //                       forefoot strike shows plantarflexion (ankle pointed down)
-    const refAnkLM = perFrameData[startIdx];
+    const refAnkLM = perFrameData[trueIcIdx];
     let footStrike = 'unknown';
     if(refAnkLM) {
-      // Try direct ankle angle from per-frame data if available
-      // refAnkLM is a frame data object with processed angles
-      // We use the hip-at-contact as a proxy, but also cross-check with
-      // the knee angle at contact (high knee angle = limb more extended = heel further forward)
-      const hipAtContact = refHSm[startIdx];
-      const kneeAtContact = refKSm[startIdx]; // included angle: 180°=straight, <180°=flexed
+      const hipAtContact  = refHSm[trueIcIdx];
+      const kneeAtContact = refKSm[trueIcIdx]; // included angle: 180°=straight, <180°=flexed
 
-      // Primary signal: hip flexion angle at contact
-      // High hip flexion (>35°) = foot landing ahead of CoM = overstriding = heel strike
-      // Secondary signal: knee extension at contact
-      // Near-straight knee (>160°) at contact = overstriding = heel strike
-      // Flexed knee (<155°) at contact = midfoot or forefoot
       if(hipAtContact != null) {
         if(hipAtContact > 38) {
-          footStrike = 'heel';      // strong heel — overstriding
+          footStrike = 'heel';
         } else if(hipAtContact > 24) {
-          // Borderline — check knee angle to disambiguate
           if(kneeAtContact != null && kneeAtContact > 162) {
-            footStrike = 'heel';    // extended knee confirms heel
+            footStrike = 'heel';
           } else {
-            footStrike = 'midfoot'; // moderate flexion = midfoot
+            footStrike = 'midfoot';
           }
         } else {
-          // Low hip flexion — likely forefoot/midfoot
           if(kneeAtContact != null && kneeAtContact < 150) {
-            footStrike = 'forefoot'; // flexed knee + low hip = forefoot
+            footStrike = 'forefoot';
           } else {
             footStrike = 'midfoot';
           }
@@ -6769,10 +6870,10 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       }
     }
 
-    // kneeAtContact is the included hip-knee-ankle angle at initial contact frame
-    // (180° = full extension, lower = more flexed). Stored as included angle here;
-    // converted to clinical flexion angle (180 - included) during aggregation.
-    const kneeContactIncluded = refKSm[startIdx] ?? null;
+    // kneeContactIncluded: included hip-knee-ankle angle at TRUE initial contact frame.
+    // Using trueIcIdx (refined via displacement + knee-extension) rather than raw startIdx
+    // prevents mid-swing frames (knee ~100°) from inflating the knee-flex-at-contact metric.
+    const kneeContactIncluded = refKSm[trueIcIdx] ?? null;
     return {
       durationS, gcPct, floatPct, peakKneeFlex, hipAtToeoff, footStrike,
       stepAsymProxy, startIdx, endIdx, toeoffIdx,
