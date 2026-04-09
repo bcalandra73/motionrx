@@ -8104,6 +8104,9 @@ function aggregateAngles(allFrameAngles, framePhases) {
       if(k.startsWith('_')) return;
       // Ankle DF: stance frames only (swing push-off PF is not the clinical measurement)
       if(isSwing && k.includes('Ankle Dorsiflexion')) return;
+      // Ankle DF physiological clamp: running DF range is −5° to +30°.
+      // Values outside this indicate misplaced landmarks — exclude from aggregation.
+      if(k.includes('Ankle Dorsiflexion') && (v < -5 || v > 30)) return;
       // Pronation: contact and loading frames only — these are the two moments where the
       // foot is fully flat and the heel faces the posterior camera. Midstance and propulsion
       // have the heel rotating away; toeoff has it fully lifted.
@@ -9538,28 +9541,40 @@ function computeDenseFilteredMetrics(curves, movement) {
   const fc = 6; // 6 Hz cutoff — standard for joint kinematics (Robertson et al.)
   const {b, a} = canFilter ? designButterworth2(fc, effectiveFs) : {};
 
+  // 3-point running median — applied as spike removal regardless of whether
+  // Butterworth is available. Catches single-frame landmark jumps that Butterworth
+  // would smooth but not eliminate. Works at any sampling rate.
+  const medianSmooth3 = (arr) => arr.map((v, i) => {
+    if(v === null) return null;
+    const window3 = [arr[i-1]??v, v, arr[i+1]??v].filter(x=>x!==null);
+    window3.sort((a,b)=>a-b);
+    return window3[Math.floor(window3.length/2)];
+  });
+
   // Filter one angle series, handling nulls via linear interpolation
   const filterSeries = (key, transform) => {
     const raw = curves.map(c => {
       const v = transform(c.angles[key]);
       return (v != null && isFinite(v)) ? v : null;
     });
-    if(!canFilter || !b) return raw;
-    if(raw.filter(v=>v!==null).length < 6) return raw;
+    // Always apply 3-point median first to remove single-frame landmark spikes
+    const deSpiked = medianSmooth3(raw);
+    if(!canFilter || !b) return deSpiked;
+    if(deSpiked.filter(v=>v!==null).length < 6) return deSpiked;
     // Interpolate nulls so filtfilt sees a continuous signal
-    const interp = raw.map((v, i) => {
+    const interp = deSpiked.map((v, i) => {
       if(v !== null) return v;
       let lo = null, hi = null;
-      for(let j=i-1;j>=0;j--)          if(raw[j]!==null){lo=j;break;}
-      for(let j=i+1;j<raw.length;j++) if(raw[j]!==null){hi=j;break;}
+      for(let j=i-1;j>=0;j--)          if(deSpiked[j]!==null){lo=j;break;}
+      for(let j=i+1;j<deSpiked.length;j++) if(deSpiked[j]!==null){hi=j;break;}
       if(lo===null && hi===null) return 0;
-      if(lo===null) return raw[hi];
-      if(hi===null) return raw[lo];
+      if(lo===null) return deSpiked[hi];
+      if(hi===null) return deSpiked[lo];
       const t = (i-lo)/(hi-lo);
-      return raw[lo] + t*(raw[hi]-raw[lo]);
+      return deSpiked[lo] + t*(deSpiked[hi]-deSpiked[lo]);
     });
     const filt = filtfilt(b, a, interp);
-    return raw.map((v,i) => v===null ? null : filt[i]);
+    return deSpiked.map((v,i) => v===null ? null : filt[i]);
   };
 
   const peak  = (arr, higher=true) => arr.reduce((m,v) => v!=null&&(higher?v>m:v<m)?v:m, higher?-Infinity:Infinity);
@@ -9675,17 +9690,37 @@ async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, status
   } else {
     // Running: use best stride range from stride engine, fallback to full clip
     const sm = window_strideMetrics;
-    if(sm?.bestStrideFrameRange && window._denseAnglesFrames?.length > 0) {
-      // Convert frame indices to proportions using dense frame array
+    // ── Compute window from stride timing (robust against _denseAnglesFrames being empty) ──
+    // Primary: use Zeni-detected IC fraction + stride duration to anchor the window
+    // to exactly 1.5 stride cycles centred on the best stride.
+    // Fallback: bestStrideFrameRange frame indices → proportions.
+    // Last resort: full clip (produces jagged slow-sampled curves — avoid when possible).
+    const _sdNorm = (sm?.strideDurationS && sm?.videoDurationS && sm.videoDurationS > 0)
+      ? sm.strideDurationS / sm.videoDurationS : null;
+    const _icFrac = window_primaryPhaseSelection?.fractions?.[0] ?? null; // Zeni IC fraction
+
+    if(_sdNorm && _icFrac) {
+      // Best stride window: from 0.25 strides before IC to 1.25 strides after IC
+      // (= 1.5 strides total = captures one full cycle plus context)
+      windowStart = Math.max(0.02, _icFrac - 0.25 * _sdNorm);
+      windowEnd   = Math.min(0.98, _icFrac + 1.25 * _sdNorm);
+      console.log(`[DensePass] Window from Zeni IC: ${windowStart.toFixed(3)}→${windowEnd.toFixed(3)} (${((windowEnd-windowStart)*sm.videoDurationS*1000).toFixed(0)}ms, ~${(_sdNorm*sm.videoDurationS*1000).toFixed(0)}ms/stride)`);
+    } else if(sm?.bestStrideFrameRange && window._denseAnglesFrames?.length > 0) {
       const N = window._denseAnglesFrames.length;
-      windowStart = Math.max(0,   (sm.bestStrideFrameRange[0] - 2) / N);
-      windowEnd   = Math.min(1.0, (sm.bestStrideFrameRange[1] + 2) / N);
+      windowStart = Math.max(0.02, (sm.bestStrideFrameRange[0] - 4) / N);
+      windowEnd   = Math.min(0.98, (sm.bestStrideFrameRange[1] + 4) / N);
+      console.log(`[DensePass] Window from bestStrideFrameRange [${sm.bestStrideFrameRange}]: ${windowStart.toFixed(3)}→${windowEnd.toFixed(3)}`);
     } else {
-      windowStart = 0.05;
-      windowEnd   = 0.95;
+      // True last resort — log clearly so it's easy to diagnose
+      windowStart = 0.05; windowEnd = 0.95;
+      console.warn('[DensePass] ⚠ Window fallback to full clip — stride timing unavailable. Curves will be sparse and unfiltered.');
     }
-    frameCount  = 32;
-    if(statusEl) statusEl.textContent = 'Dense gait pass: extracting 32 frames across stride cycle...';
+    // Scale frame count to the window duration so effective fps stays ~30fps
+    // (minimum for useful Butterworth filtering at 6Hz cutoff).
+    // Cap at 48 frames (memory/time budget), floor at 24.
+    const _winDurS = (windowEnd - windowStart) * dur;
+    frameCount = Math.min(48, Math.max(24, Math.round(_winDurS * 32)));
+    if(statusEl) statusEl.textContent = `Dense gait pass: extracting ${frameCount} frames (${Math.round(_winDurS*1000)}ms window)...`;
   }
 
   // Extract frames
@@ -9977,10 +10012,19 @@ function renderDenseCurves(curves, movement) {
     + (frontalKeys.length ? buildChart(frontalTitle, frontalKeys) : '')
     + `<div style="font-size:.66rem;color:var(--muted);margin-top:6px;">
         ${curves.length} frames · MediaPipe Heavy + foot refinement · 
-        ${isLanding ? 'Contact window (18%–78% of clip)' : 'Stride window'} · 
+        ${isLanding
+          ? 'Contact window (18%–78% of clip)'
+          : (() => {
+              const t0 = curves[0]?.tMs, t1 = curves[curves.length-1]?.tMs;
+              const winMs = (t0!=null && t1!=null) ? Math.round(t1-t0) : null;
+              return winMs ? `Stride window (${winMs}ms)` : 'Stride window';
+            })()
+        } · 
         ${window._denseFilteredMetrics?.canFilter
           ? '<span style="color:var(--teal);">Butterworth 6Hz filtered (fs≈' + window._denseFilteredMetrics.effectiveFs + 'Hz)</span>'
-          : '<span style="color:var(--amber);">Raw curves (60fps+ video needed for filtering)</span>'}
+          : window._denseFilteredMetrics
+            ? '<span style="color:var(--amber);">3-point median smoothed · Butterworth needs fs≥12Hz (current: ' + window._denseFilteredMetrics.effectiveFs + 'Hz)</span>'
+            : '<span style="color:var(--amber);">3-point median smoothed (raw)</span>'}
       </div>`;
 
   section.style.display = 'block';
@@ -10269,6 +10313,27 @@ async function runAnalysis() {
             console.log(`[KneeOverride] ${k}: dense=${denseDisp}° OK (gallery=${mpDisp}°, dense more flexed)`);
           }
         });
+
+        // ── Trunk lean gallery override ──────────────────────────────────────
+        // Problem: the 128-frame MoveNet dense aggregation averages trunk lean across
+        // the full gait cycle — including swing phases where the trunk approaches
+        // vertical — pulling the cycle-mean well below the clinically relevant
+        // stance-phase value (e.g. 2° mean vs 8° true stance lean).
+        // MoveNet also has lower shoulder precision than MP-Heavy.
+        //
+        // Fix: use the MP-Heavy gallery avg for trunk lean, since those 8 frames
+        // include stance phases with accurate 3D-corrected shoulder positions.
+        // Only override if gallery value is higher (more lean), to avoid overriding
+        // genuinely low lean with a noisy swing-phase gallery frame.
+        const _mpTrunkAgg = aggregateAngles(allAngles, extractedFrames.map(f => f.phase || null));
+        const _mpTL    = _mpTrunkAgg['Trunk Lean'];
+        const _denseTL = aggregated['Trunk Lean'];
+        if(_mpTL && _denseTL && _mpTL.avg > _denseTL.avg + 2) {
+          aggregated['Trunk Lean'] = _mpTL;
+          console.log(`[TrunkOverride] dense avg=${_denseTL.avg}° → gallery avg=${_mpTL.avg}° (stance-phase correction applied)`);
+        } else {
+          console.log(`[TrunkOverride] dense=${_denseTL?.avg}° gallery=${_mpTL?.avg}° — dense OK or gallery not higher`);
+        }
       }
     }
   } else {
@@ -10886,9 +10951,9 @@ ${(() => {
   } else if(isRunning) {
     const lADF_raw = getPeak('Left Ankle Dorsiflexion',  false);
     const rADF_raw = getPeak('Right Ankle Dorsiflexion', false);
-    // Sanity clamp: ankle DF in running should be −5° to +35°.
+    // Sanity clamp: ankle DF in running should be −5° to +30°.
     // Values outside this range indicate a misplaced ankle landmark — suppress rather than mislead.
-    const _adfClamp = (v) => (v != null && v >= -5 && v <= 35) ? v : null;
+    const _adfClamp = (v) => (v != null && v >= -5 && v <= 30) ? v : null;
     const lADF  = _adfClamp(lADF_raw);
     const rADF  = _adfClamp(rADF_raw);
     if(lADF_raw != null && lADF == null) console.warn(`[DensePrompt] Left ankle DF ${lADF_raw}° outside −5 to 35° range — suppressed from prompt`);
