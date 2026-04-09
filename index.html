@@ -2524,17 +2524,26 @@ function startFrameExtraction(file, vid) {
                   const hx = perFrame[idx]?.hipMidX;
                   return (ax != null && hx != null) ? (_icIsMin ? ax - hx : -(ax - hx)) : null;
                 };
-                // Returns true if the displacement signal starts INCREASING within 2 frames after idx.
-                // At true IC: foot planted → ankle moves rightward → displacement increases.
-                // At late swing: ankle still swinging forward → displacement keeps decreasing.
+                // Returns true if the displacement signal starts INCREASING within 3 frames after idx.
+                // Threshold reduced to 0 (any non-decrease counts) because MoveNet ankle X
+                // can be noisy enough that frame-to-frame changes are small even at true IC.
+                // We check a 3-frame lookahead to catch delayed stabilization.
                 const _dispIncreases = (idx) => {
                   const d0 = _getDisp(idx);
-                  const d1 = _getDisp(Math.min(N-1, idx+1));
-                  const d2 = _getDisp(Math.min(N-1, idx+2));
-                  if(d0==null) return false;
-                  if(d1!=null && d1 > d0 + 0.002) return true;  // clear increase next frame
-                  if(d2!=null && d2 > d0 + 0.002) return true;  // increase within 2 frames
+                  if(d0 == null) return false;
+                  // True IC: at least one of the next 3 frames shows higher displacement
+                  for(let ahead = 1; ahead <= 3; ahead++) {
+                    const d = _getDisp(Math.min(N-1, idx+ahead));
+                    if(d != null && d > d0) return true;
+                  }
                   return false;
+                };
+                // Also check if displacement is DECREASING before idx (still swinging forward)
+                // True IC should NOT have decreasing displacement immediately before it
+                const _dispWasDecreasing = (idx) => {
+                  const d0 = _getDisp(idx);
+                  const dm1 = _getDisp(Math.max(0, idx-1));
+                  return (d0 != null && dm1 != null && dm1 < d0 - 0.003);
                 };
 
                 const _refineIC = (seedIdx) => {
@@ -2545,14 +2554,19 @@ function startFrameExtraction(file, vid) {
                   // Collect all candidate IC frames: displacement local minima with near-extended knee
                   // AND followed by increasing displacement (O'Connor criterion).
                   const _candidates = [];
+                  // Log displacement values for key frames to diagnose IC detection
+                  const _diagFrames = [];
                   for(let _si = _s; _si <= _e; _si++) {
                     const d  = _getDisp(_si);
                     const k  = perFrame[_si]?.[_refKneeKey];
                     if(d == null || k == null) continue;
+                    const inc = _dispIncreases(_si);
+                    _diagFrames.push(`${_si}(k=${k.toFixed(0)},d=${d.toFixed(3)},↑=${inc?'Y':'N'})`);
                     if(k < 140) continue;              // must have near-extended knee
-                    if(!_dispIncreases(_si)) continue; // must be followed by increasing displacement
+                    if(!inc) continue;                 // must be followed by increasing displacement
                     _candidates.push({idx: _si, d, k});
                   }
+                  console.log(`[Zeni2008] Search ${_s}-${_e}: ${_diagFrames.join(' ')}`);
 
                   if(_candidates.length > 0) {
                     // Among valid IC candidates, pick the one with smallest displacement (most forward ankle)
@@ -2563,18 +2577,23 @@ function startFrameExtraction(file, vid) {
                     return best.idx;
                   }
 
-                  // Fallback 1: knee-extension maximum (catches mid-swing misses)
+                  // Fallback: among knee-extended frames, prefer the one with the SMALLEST
+                  // displacement (most forward ankle = most likely to be IC not late swing).
+                  // Late swing has ankle still moving forward (displacement still decreasing);
+                  // IC has the most-forward ankle position.
                   const _kneeAtSeed = perFrame[seedIdx]?.[_refKneeKey];
-                  if(_kneeAtSeed != null && _kneeAtSeed < 140) {
-                    let _kBest = _kneeAtSeed, _kBestIdx = seedIdx;
-                    for(let _si = _s; _si <= _e; _si++) {
-                      const k = perFrame[_si]?.[_refKneeKey];
-                      if(k != null && k > _kBest) { _kBest = k; _kBestIdx = _si; }
-                    }
-                    if(_kBest >= 140) {
-                      console.log(`[Zeni2008] IC fallback (knee-max): → frame ${_kBestIdx}(knee=${_kBest.toFixed(0)}°)`);
-                      return _kBestIdx;
-                    }
+                  const _extFrames = [];
+                  for(let _si = _s; _si <= _e; _si++) {
+                    const k = perFrame[_si]?.[_refKneeKey];
+                    const d = _getDisp(_si);
+                    if(k != null && k >= 140 && d != null) _extFrames.push({idx:_si, k, d});
+                  }
+                  if(_extFrames.length > 0) {
+                    // Pick the extended-knee frame with minimum displacement
+                    _extFrames.sort((a,b) => a.d - b.d);
+                    const pick = _extFrames[0];
+                    console.log(`[Zeni2008] IC fallback (min-disp among extended-knee): → frame ${pick.idx}(knee=${pick.k.toFixed(0)}°, disp=${pick.d.toFixed(3)})`);
+                    return pick.idx;
                   }
 
                   console.warn(`[Zeni2008] IC: no valid IC found in range ${_s}-${_e} — using stride engine seed ${seedIdx}`);
@@ -3565,68 +3584,74 @@ function applySegmentConstraints(allFrameLandmarks, view='side') {
 // rather than reprojected to a wrong position.
 function applyWristPlausibility(allFrameLandmarks, view='side') {
   const isSide = (view === 'side');
-  if(!isSide) return allFrameLandmarks; // frontal-plane wrist rules differ
+  if(!isSide) return allFrameLandmarks;
 
   const pairs = [
-    { sh:11, el:13, wr:15, name:'L-wrist' }, // left
-    { sh:12, el:14, wr:16, name:'R-wrist' }, // right
+    { sh:11, el:13, wr:15, name:'L-wrist' },
+    { sh:12, el:14, wr:16, name:'R-wrist' },
   ];
-
-  // Compute median humerus length across frames (used as forearm reference)
-  const humerusMedians = {};
-  for(const {sh, el, name} of pairs) {
-    const lens = allFrameLandmarks.map(lms => {
-      if(!lms) return null;
-      const s = lms[sh], e = lms[el];
-      return (s && e && (s.visibility||0)>0.3 && (e.visibility||0)>0.3)
-        ? Math.hypot(s.x-e.x, s.y-e.y) : null;
-    }).filter(Boolean);
-    if(lens.length < 2) continue;
-    lens.sort((a,b)=>a-b);
-    humerusMedians[name] = lens[Math.floor(lens.length/2)];
-  }
 
   let nulled = 0;
   allFrameLandmarks.forEach((lms, fi) => {
     if(!lms) return;
     for(const {sh, el, wr, name} of pairs) {
       const s = lms[sh], e = lms[el], w = lms[wr];
-      if(!e || !w || (e.visibility||0) < 0.25) continue;
-      const humLen = humerusMedians[name];
-      if(!humLen) continue;
+      if(!e || !w || (e.visibility||0) < 0.20) continue;
 
-      // Rule 1 — distance: wrist must be within 1.6× humerus length of elbow
-      // (forearm ≈ 0.73× humerus; 1.6× gives a generous physiological ceiling)
-      const elwDist = Math.hypot(e.x - w.x, e.y - w.y);
-      if(elwDist > humLen * 1.6) {
-        lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(dist=${elwDist.toFixed(3)},hum=${humLen.toFixed(3)})`};
+      // Per-frame humerus length — immune to median inflation from consistent errors
+      const framHumLen = s ? Math.hypot(s.x - e.x, s.y - e.y) : null;
+      const elwDist    = Math.hypot(e.x - w.x, e.y - w.y);
+
+      // ── Rule 1: forearm/humerus ratio ──────────────────────────────────────
+      // Anatomically: forearm ≈ 0.73× humerus. In 2D side view the humerus can
+      // appear elongated due to Y drop, but the RATIO between the two segments
+      // is preserved. Forearm > 1.3× same-frame humerus = impossible.
+      // This catches the screenshot case where elbow is far below shoulder
+      // (humerus looks long) but wrist is still further away than elbow.
+      if(framHumLen && framHumLen > 0.02 && elwDist > framHumLen * 1.3) {
+        lms[wr] = {...w, visibility:0, presence:0,
+          source:`wrist-nulled(ratio=${(elwDist/framHumLen).toFixed(2)})`};
         nulled++;
-        console.log(`[WristCheck] ${name} f${fi+1}: elbow-wrist dist ${(elwDist/humLen).toFixed(2)}× humerus → nulled`);
+        console.log(`[WristCheck] ${name} f${fi+1}: forearm/humerus ratio ${(elwDist/framHumLen).toFixed(2)} > 1.3 → nulled`);
         continue;
       }
 
-      // Rule 2 — side-view direction: the wrist must be on the SAME side as the elbow
-      // relative to the shoulder. In side view, the near-arm elbow is between the shoulder
-      // and the wrist in X. A wrist that is further from the torso than 1.5× humerus past
-      // the shoulder in the OPPOSITE direction = on the far arm = wrong.
-      if(s) {
-        const shToElbow = e.x - s.x;         // + if elbow is right of shoulder
-        const shToWrist = w.x - s.x;         // + if wrist is right of shoulder
-        // If elbow and wrist are on opposite sides of the shoulder, wrist is on wrong arm
-        // Allow 0.5× humerus tolerance for arm-crossing during swing
-        if(shToElbow * shToWrist < 0 && Math.abs(shToWrist) > humLen * 0.5) {
-          lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(wrong-side,sEl=${shToElbow.toFixed(3)},sWr=${shToWrist.toFixed(3)})`};
+      if(!s) continue;
+
+      // ── Rule 2: wrist must extend from the elbow in the elbow's direction ──
+      // The shoulder→elbow vector defines the arm direction. The wrist must
+      // continue roughly in that direction (±90°) from the elbow.
+      // A wrist on the far arm is always in the OPPOSITE direction.
+      const shElDx = e.x - s.x, shElDy = e.y - s.y;   // shoulder→elbow
+      const elWrDx = w.x - e.x, elWrDy = w.y - e.y;   // elbow→wrist
+      const shElLen = Math.hypot(shElDx, shElDy);
+      const elWrLen = Math.hypot(elWrDx, elWrDy);
+      if(shElLen > 0.01 && elWrLen > 0.01) {
+        // Dot product of unit vectors: +1 = same direction, -1 = opposite
+        const dot = (shElDx/shElLen)*(elWrDx/elWrLen) +
+                    (shElDy/shElLen)*(elWrDy/elWrLen);
+        // Wrist pointing more than 120° from elbow direction = backwards = wrong
+        if(dot < -0.5) {
+          lms[wr] = {...w, visibility:0, presence:0,
+            source:`wrist-nulled(direction,dot=${dot.toFixed(2)})`};
           nulled++;
-          console.log(`[WristCheck] ${name} f${fi+1}: wrist on wrong side of shoulder (elbow=${shToElbow.toFixed(3)}, wrist=${shToWrist.toFixed(3)}) → nulled`);
+          console.log(`[WristCheck] ${name} f${fi+1}: wrist direction opposite to elbow (dot=${dot.toFixed(2)}) → nulled`);
           continue;
         }
-        // Also check: wrist more than 2× humerus past the elbow in the same direction
-        // (over-reaching — anatomically impossible without extreme shoulder rotation)
-        const elToWrist = w.x - e.x;
-        if(Math.sign(elToWrist) === Math.sign(shToElbow) && Math.abs(elToWrist) > humLen * 1.5) {
-          lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(over-reach,elWr=${elToWrist.toFixed(3)})`};
+      }
+
+      // ── Rule 3: wrist on wrong side of shoulder (cross-body) ───────────────
+      // In side view the near arm's elbow and wrist should be on the same
+      // X side of the shoulder. If wrist crosses to the opposite side by more
+      // than 0.4× humerus, it's placed on the far arm.
+      if(framHumLen) {
+        const shToElbow = e.x - s.x;
+        const shToWrist = w.x - s.x;
+        if(shToElbow * shToWrist < 0 && Math.abs(shToWrist) > framHumLen * 0.4) {
+          lms[wr] = {...w, visibility:0, presence:0,
+            source:`wrist-nulled(crossbody,dot=${(shToElbow*shToWrist).toFixed(3)})`};
           nulled++;
-          console.log(`[WristCheck] ${name} f${fi+1}: wrist over-reach ${(Math.abs(elToWrist)/humLen).toFixed(2)}× humerus → nulled`);
+          console.log(`[WristCheck] ${name} f${fi+1}: wrist cross-body (elbow=${shToElbow.toFixed(2)}, wrist=${shToWrist.toFixed(2)}) → nulled`);
         }
       }
     }
@@ -6966,15 +6991,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     const _icIsMinSE  = _meanDispSE <= 0; // IC = displacement minimum for left-facing runner
     const _searchR_se = Math.max(5, Math.round((endIdx - startIdx) * 0.50));
     // O'Connor (2007) IC: displacement minimum that is FOLLOWED BY INCREASING displacement.
-    // This distinguishes true IC (foot planted, ankle starts moving backward)
-    // from Late Swing (ankle still moving forward, displacement still decreasing).
     const _dispIncreases_se = (idx) => {
       const d0 = _dispAtIdx(idx);
-      const d1 = _dispAtIdx(Math.min(N-1, idx+1));
-      const d2 = _dispAtIdx(Math.min(N-1, idx+2));
       if(d0==null) return false;
-      if(d1!=null && d1 > d0 + 0.002) return true;
-      if(d2!=null && d2 > d0 + 0.002) return true;
+      // Check up to 3 frames ahead — threshold 0 (any increase counts given MoveNet noise)
+      for(let ahead = 1; ahead <= 3; ahead++) {
+        const d = _dispAtIdx(Math.min(N-1, idx+ahead));
+        if(d != null && d > d0) return true;
+      }
       return false;
     };
     const _refineIC_se = (seed) => {
@@ -6986,22 +7010,26 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
         const d = _dispAtIdx(i);
         const k = refKSm[i];
         if(d == null || k == null) continue;
-        if(k < 140) continue;                // must be near-extended
-        if(!_dispIncreases_se(i)) continue;  // must be followed by increasing displacement
+        if(k < 140) continue;
+        if(!_dispIncreases_se(i)) continue;
         cands.push({idx:i, d, k});
       }
       if(cands.length > 0) {
-        cands.sort((a,b) => a.d - b.d); // smallest displacement = most forward = IC
+        cands.sort((a,b) => a.d - b.d);
         return cands[0].idx;
       }
-      // Fallback: knee-extension maximum
-      let kBest = refKSm[seed] ?? -1, kBestIdx = seed;
+      // Fallback: among extended-knee frames, pick minimum displacement (most forward = IC)
+      const extFrames = [];
       for(let i = sS; i <= sE; i++) {
         const k = refKSm[i];
-        if(k != null && k > kBest) { kBest = k; kBestIdx = i; }
+        const d = _dispAtIdx(i);
+        if(k != null && k >= 140 && d != null) extFrames.push({idx:i, d, k});
       }
-      if(kBest >= 140) return kBestIdx;
-      return seed; // keep stride engine estimate
+      if(extFrames.length > 0) {
+        extFrames.sort((a,b) => a.d - b.d);
+        return extFrames[0].idx;
+      }
+      return seed;
     };
     const trueIcIdx = _refineIC_se(startIdx);
     if(trueIcIdx !== startIdx) {
