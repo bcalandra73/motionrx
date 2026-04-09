@@ -1075,7 +1075,14 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <button class="review-btn-secondary" onclick="reviewNavFrame(-1)" title="Shortcut: ← or A">◀ Prev</button>
       <button class="review-btn-secondary" onclick="reviewNavFrame(1)" title="Shortcut: → or D">Next ▶</button>
       <button class="review-btn-secondary" onclick="resetAllReviewFrames()">↺ Reset all</button>
+      <button class="review-btn-secondary" id="clearCorrectionsBtn" onclick="clearVideoCorrections()" style="display:none;" title="Remove saved corrections for this video">🗑 Clear saved</button>
       <button class="review-btn-proceed" onclick="proceedFromReview()" title="Shortcut: Ctrl+Enter">🔬 Generate Report →</button>
+    </div>
+    <!-- Saved corrections auto-proceed banner -->
+    <div id="corrSavedBanner" style="display:none;margin-top:12px;padding:12px 16px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;display:none;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span id="corrBannerText" style="font-size:.84rem;color:#1b5e20;flex:1;font-weight:500;"></span>
+      <button onclick="_corrCancelAutoProceed()" style="padding:6px 14px;border:1px solid #a5d6a7;background:#fff;color:#1b5e20;border-radius:6px;font-size:.8rem;font-weight:600;cursor:pointer;">✎ Edit</button>
+      <button onclick="proceedFromReview()" style="padding:6px 14px;background:#1b5e20;color:#fff;border:none;border-radius:6px;font-size:.8rem;font-weight:600;cursor:pointer;">→ Proceed Now</button>
     </div>
   </div>
 </div>
@@ -2503,40 +2510,73 @@ function startFrameExtraction(file, vid) {
                 // i.e. most-negative displacement = foot furthest forward of hip.
                 // Validate with knee angle: at IC the ref knee should be near-extended (>140°).
                 const _strideWin = _nextIcIdx - _icIdx; // frames in one stride
+                // ── O'Connor (2007) IC detection ────────────────────────────────────
+                // Problem: both IC and Late Swing have (a) displacement minimum and (b) near-extended
+                // knee. This caused the algorithm to pick Late Swing as IC, shifting all phases
+                // forward by ~half a stride.
+                // Solution: true IC is the displacement minimum that is FOLLOWED BY INCREASING
+                // displacement (foot planted → belt carries ankle backward). Late Swing is STILL
+                // DECREASING (ankle still swinging forward). O'Connor et al. 2007, J Biomechanics.
+                const _getDisp = (idx) => {
+                  const ax = perFrame[idx]?.[_refAnkKey];
+                  const hx = perFrame[idx]?.hipMidX;
+                  return (ax != null && hx != null) ? (_icIsMin ? ax - hx : -(ax - hx)) : null;
+                };
+                // Returns true if the displacement signal starts INCREASING within 2 frames after idx.
+                // At true IC: foot planted → ankle moves rightward → displacement increases.
+                // At late swing: ankle still swinging forward → displacement keeps decreasing.
+                const _dispIncreases = (idx) => {
+                  const d0 = _getDisp(idx);
+                  const d1 = _getDisp(Math.min(N-1, idx+1));
+                  const d2 = _getDisp(Math.min(N-1, idx+2));
+                  if(d0==null) return false;
+                  if(d1!=null && d1 > d0 + 0.002) return true;  // clear increase next frame
+                  if(d2!=null && d2 > d0 + 0.002) return true;  // increase within 2 frames
+                  return false;
+                };
+
                 const _refineIC = (seedIdx) => {
-                  const _r = Math.max(5, Math.round(_strideWin * 0.50)); // ±50% (was 25%, too small)
+                  const _r = Math.max(5, Math.round(_strideWin * 0.50));
                   const _s = Math.max(0, seedIdx - _r);
                   const _e = Math.min(N-1, seedIdx + _r);
-                  // Pass 1: displacement minimum (Zeni signal)
-                  let _dBest = null, _dBestIdx = seedIdx;
+
+                  // Collect all candidate IC frames: displacement local minima with near-extended knee
+                  // AND followed by increasing displacement (O'Connor criterion).
+                  const _candidates = [];
                   for(let _si = _s; _si <= _e; _si++) {
-                    const ax = perFrame[_si]?.[_refAnkKey];
-                    const hx = perFrame[_si]?.hipMidX;
-                    if(ax == null || hx == null) continue;
-                    // For left-facing runner, IC = minimum (ax-hx); for right-facing, maximum.
-                    const d = _icIsMin ? (ax - hx) : -(ax - hx);
-                    if(_dBest === null || d < _dBest) { _dBest = d; _dBestIdx = _si; }
+                    const d  = _getDisp(_si);
+                    const k  = perFrame[_si]?.[_refKneeKey];
+                    if(d == null || k == null) continue;
+                    if(k < 140) continue;              // must have near-extended knee
+                    if(!_dispIncreases(_si)) continue; // must be followed by increasing displacement
+                    _candidates.push({idx: _si, d, k});
                   }
-                  // Pass 2: knee-extension validation
-                  const _knee = perFrame[_dBestIdx]?.[_refKneeKey];
-                  if(_knee != null && _knee < 140) {
-                    // Displacement min is in swing — find highest knee angle nearby as IC
-                    let _kBest = _knee, _kBestIdx = _dBestIdx;
+
+                  if(_candidates.length > 0) {
+                    // Among valid IC candidates, pick the one with smallest displacement (most forward ankle)
+                    _candidates.sort((a,b) => a.d - b.d);
+                    const best = _candidates[0];
+                    if(best.idx !== seedIdx)
+                      console.log(`[Zeni2008] IC refined (O'Connor): seed=${seedIdx}(knee=${perFrame[seedIdx]?.[_refKneeKey]?.toFixed(0)}°) → ${best.idx}(knee=${best.k.toFixed(0)}°, disp=${best.d.toFixed(3)})`);
+                    return best.idx;
+                  }
+
+                  // Fallback 1: knee-extension maximum (catches mid-swing misses)
+                  const _kneeAtSeed = perFrame[seedIdx]?.[_refKneeKey];
+                  if(_kneeAtSeed != null && _kneeAtSeed < 140) {
+                    let _kBest = _kneeAtSeed, _kBestIdx = seedIdx;
                     for(let _si = _s; _si <= _e; _si++) {
                       const k = perFrame[_si]?.[_refKneeKey];
                       if(k != null && k > _kBest) { _kBest = k; _kBestIdx = _si; }
                     }
                     if(_kBest >= 140) {
-                      console.log(`[Zeni2008] IC refined: disp-min knee=${_knee}° → knee-max frame ${_kBestIdx} (knee=${_kBest}°)`);
+                      console.log(`[Zeni2008] IC fallback (knee-max): → frame ${_kBestIdx}(knee=${_kBest.toFixed(0)}°)`);
                       return _kBestIdx;
                     }
-                    // Last resort: use seed from stride engine
-                    console.warn(`[Zeni2008] IC refinement: disp-min knee=${_knee}°, knee-max=${_kBest}° both < 140° — using stride engine seed ${seedIdx}`);
-                    return seedIdx;
                   }
-                  if(_dBestIdx !== seedIdx)
-                    console.log(`[Zeni2008] IC refined: seed=${seedIdx}(knee=${perFrame[seedIdx]?.[_refKneeKey]?.toFixed(0)}°) → ${_dBestIdx}(knee=${_knee?.toFixed(0)}°)`);
-                  return _dBestIdx;
+
+                  console.warn(`[Zeni2008] IC: no valid IC found in range ${_s}-${_e} — using stride engine seed ${seedIdx}`);
+                  return seedIdx;
                 };
 
                 const _zIcIdx     = _refineIC(_icIdx);
@@ -3226,6 +3266,7 @@ function resetAll() {
   document.getElementById('inputSection').style.display='block';
   resetUpload();
   resetUpload2();
+  window._currentCorrKey = null;
   // Clear auto-save — user explicitly chose to start fresh
   try { localStorage.removeItem(AUTOSAVE_KEY); } catch(e) {}
   window.scrollTo({top:0,behavior:'smooth'});
@@ -6805,30 +6846,44 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     const _allDispSE = perFrameData.map((_, i) => _dispAtIdx(i)).filter(v=>v!=null);
     const _meanDispSE = _allDispSE.length > 0 ? _allDispSE.reduce((s,v)=>s+v,0)/_allDispSE.length : -1;
     const _icIsMinSE  = _meanDispSE <= 0; // IC = displacement minimum for left-facing runner
-    const _searchR_se = Math.max(5, Math.round((endIdx - startIdx) * 0.50)); // ±50% of stride window (was 20%)
+    const _searchR_se = Math.max(5, Math.round((endIdx - startIdx) * 0.50));
+    // O'Connor (2007) IC: displacement minimum that is FOLLOWED BY INCREASING displacement.
+    // This distinguishes true IC (foot planted, ankle starts moving backward)
+    // from Late Swing (ankle still moving forward, displacement still decreasing).
+    const _dispIncreases_se = (idx) => {
+      const d0 = _dispAtIdx(idx);
+      const d1 = _dispAtIdx(Math.min(N-1, idx+1));
+      const d2 = _dispAtIdx(Math.min(N-1, idx+2));
+      if(d0==null) return false;
+      if(d1!=null && d1 > d0 + 0.002) return true;
+      if(d2!=null && d2 > d0 + 0.002) return true;
+      return false;
+    };
     const _refineIC_se = (seed) => {
       const sS = Math.max(0, seed - _searchR_se);
       const sE = Math.min(N-1, seed + _searchR_se);
-      // Pass 1: displacement-based IC (minimum if left-facing, maximum if right-facing)
-      let dBest = null, dBestIdx = seed;
+      // Collect candidates: near-extended knee + displacement increases after (O'Connor)
+      const cands = [];
       for(let i = sS; i <= sE; i++) {
         const d = _dispAtIdx(i);
-        if(d == null) continue;
-        const sd = _icIsMinSE ? d : -d; // looking for minimum in left-facing case
-        if(dBest === null || sd < dBest) { dBest = sd; dBestIdx = i; }
+        const k = refKSm[i];
+        if(d == null || k == null) continue;
+        if(k < 140) continue;                // must be near-extended
+        if(!_dispIncreases_se(i)) continue;  // must be followed by increasing displacement
+        cands.push({idx:i, d, k});
       }
-      // Pass 2: knee-extension validation — IC must have knee near-extended (> 140°)
-      const kAtDisp = refKSm[dBestIdx];
-      if(kAtDisp != null && kAtDisp < 140) {
-        let kBest = kAtDisp, kBestIdx = dBestIdx;
-        for(let i = sS; i <= sE; i++) {
-          const k = refKSm[i];
-          if(k != null && k > kBest) { kBest = k; kBestIdx = i; }
-        }
-        if(kBest >= 140) return kBestIdx; // use knee-extension peak as IC
-        return seed; // both methods uncertain — keep stride engine's estimate
+      if(cands.length > 0) {
+        cands.sort((a,b) => a.d - b.d); // smallest displacement = most forward = IC
+        return cands[0].idx;
       }
-      return dBestIdx;
+      // Fallback: knee-extension maximum
+      let kBest = refKSm[seed] ?? -1, kBestIdx = seed;
+      for(let i = sS; i <= sE; i++) {
+        const k = refKSm[i];
+        if(k != null && k > kBest) { kBest = k; kBestIdx = i; }
+      }
+      if(kBest >= 140) return kBestIdx;
+      return seed; // keep stride engine estimate
     };
     const trueIcIdx = _refineIC_se(startIdx);
     if(trueIcIdx !== startIdx) {
@@ -8693,6 +8748,24 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     document.getElementById('reviewPanel').style.display  = 'block';
     window.scrollTo({top:0, behavior:'smooth'});
 
+    // ── Load saved corrections for this video ────────────────────────────────
+    _corrCancelAutoProceed(); // clear any pending timer from previous run
+    const _corrData = _corrLoad(window._currentCorrKey);
+    const _clearBtn = document.getElementById('clearCorrectionsBtn');
+    if(_corrData) {
+      const applied = _corrApply(_corrData);
+      if(applied > 0) {
+        // Show "Clear saved" button so PT can wipe corrections if needed
+        if(_clearBtn) _clearBtn.style.display = 'inline-flex';
+        console.log(`[Corrections] Applied ${applied} saved frame edits`);
+        _rvBuildThumbs();   // build with edited badges already shown
+        _rvShowFrame(0);
+        _corrStartAutoProceed(applied, _corrData.ts); // start 3s countdown
+        return; // don't call _rvShowFrame again below
+      }
+    }
+    if(_clearBtn) _clearBtn.style.display = 'none';
+
     _rvBuildThumbs();
     _rvShowFrame(0);
   });
@@ -9264,8 +9337,10 @@ function resetAllReviewFrames() {
 
 // ── Proceed to report ─────────────────────────────────────────────────────────
 function proceedFromReview() {
+  _corrCancelAutoProceed(); // stop any countdown
   document.getElementById('reviewPanel').style.display = 'none';
   document.getElementById('loadingState').style.display = 'block';
+  _corrSave(); // persist any edits for next run of this video
   if(_rvResolve) { _rvResolve({primary: _rvLandmarks, secondary: _rvLandmarks2}); _rvResolve = null; }
 }
 
@@ -9955,6 +10030,9 @@ async function runAnalysis() {
         }
       }
 
+      // Compute video identity key for landmark corrections persistence
+      window._currentCorrKey = _corrVideoKey(uploadedFile, typeof dur !== 'undefined' ? dur : null);
+
       const corrResult = await showLandmarkReviewPanel(
         extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
         _hasDual ? extractedFrames2 : null,
@@ -10056,6 +10134,31 @@ async function runAnalysis() {
           aggregated['Right Hip Flexion'] = mpR;
           console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° vs dense L=${denseLVal}° R=${denseRVal}°`);
         }
+      }
+
+      // ── Knee flexion override for running ─────────────────────────────────
+      // MoveNet ankle confidence drops during fast swing phases (motion blur at 120fps),
+      // causing peak-flexion frames to return null Left Knee Flexion. The minimum then
+      // comes from a less-flexed stance frame, giving e.g. 81° when true peak is 115°.
+      // The 8 MP-Heavy gallery frames (with foot refinement, at Zeni-timed positions)
+      // reliably capture MidSwing peak flexion. Override if gallery shows MORE flexion.
+      if(allAngles.length >= 4 && /running|gait|walk/i.test(movement)) {
+        const _kFramePhases = extractedFrames.map(f => f.phase || null);
+        const _mpKneeAgg    = aggregateAngles(allAngles, _kFramePhases);
+        ['Left Knee Flexion', 'Right Knee Flexion'].forEach(k => {
+          const mpK    = _mpKneeAgg[k];
+          const denseK = aggregated[k];
+          if(!mpK || !denseK) return;
+          const mpDisp    = 180 - mpK.min;
+          const denseDisp = 180 - denseK.min;
+          if(mpK.min < denseK.min) {
+            // Gallery more flexed → MoveNet missed peak (ankle vis dropout) → use gallery
+            aggregated[k] = { ...denseK, min: mpK.min };
+            console.log(`[KneeOverride] ${k}: dense=${denseDisp}°→gallery=${mpDisp}° (ankle-visibility fix applied)`);
+          } else {
+            console.log(`[KneeOverride] ${k}: dense=${denseDisp}° OK (gallery=${mpDisp}°, dense more flexed)`);
+          }
+        });
       }
     }
   } else {
@@ -10671,8 +10774,15 @@ ${(() => {
     if(firstVgR!=null && rVG!=null) lines.push(`Right valgus contact→peak: ${Math.round(firstVgR)}°→${rVG}° (${rVG-Math.round(firstVgR)>3?'progressive collapse':rVG-Math.round(firstVgR)<-2?'improves on load':'stable'})`);
     lines.push('IMPORTANT: use dense-pass peak values above instead of 8-frame estimates for valgus and knee flexion when they differ.');
   } else if(isRunning) {
-    const lADF = getPeak('Left Ankle Dorsiflexion',  false);
-    const rADF = getPeak('Right Ankle Dorsiflexion', false);
+    const lADF_raw = getPeak('Left Ankle Dorsiflexion',  false);
+    const rADF_raw = getPeak('Right Ankle Dorsiflexion', false);
+    // Sanity clamp: ankle DF in running should be −5° to +35°.
+    // Values outside this range indicate a misplaced ankle landmark — suppress rather than mislead.
+    const _adfClamp = (v) => (v != null && v >= -5 && v <= 35) ? v : null;
+    const lADF  = _adfClamp(lADF_raw);
+    const rADF  = _adfClamp(rADF_raw);
+    if(lADF_raw != null && lADF == null) console.warn(`[DensePrompt] Left ankle DF ${lADF_raw}° outside −5 to 35° range — suppressed from prompt`);
+    if(rADF_raw != null && rADF == null) console.warn(`[DensePrompt] Right ankle DF ${rADF_raw}° outside −5 to 35° range — suppressed from prompt`);
     const lPron = getPeak('Left Pronation',  true);
     const rPron = getPeak('Right Pronation', true);
     if(lADF!=null) lines.push(`Left ankle DF (dense refined): ${lADF}° (foot-refinement applied)`);
@@ -11644,6 +11754,162 @@ function getBranding() {
     address:   document.getElementById('brandAddress').value.trim()   || '',
     contact:   document.getElementById('brandContact').value.trim()   || '',
   };
+}
+
+// ── Landmark Corrections Persistence ──────────────────────────────────────────
+// Saves corrected landmark positions keyed by video identity (name + size + duration).
+// On the next run of the same video, corrections auto-apply and the review panel
+// shows the corrected skeleton immediately, then auto-proceeds after 3 seconds.
+// PT can still cancel the countdown and edit further.
+const CORRECTIONS_PREFIX  = 'motionrx_corrections_';
+const MAX_CORRECTION_SETS = 8;   // max videos whose corrections we keep
+const CORRECTION_EXPIRY_MS = 60 * 24 * 3600 * 1000; // 60 days
+
+let _corrAutoTimer = null; // countdown timer reference
+
+function _corrVideoKey(file, duration) {
+  if(!file || duration == null || !isFinite(duration)) return null;
+  const dur = Math.round(duration * 10) / 10; // 1 decimal place
+  // Remove chars that cause localStorage key issues
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `${safeName}__${file.size}__${dur}`;
+}
+
+// Pack landmarks for storage — only the fields needed for re-rendering
+function _corrPack(lmsArr, editedArr) {
+  if(!lmsArr) return null;
+  return lmsArr.map((frame, i) => {
+    if(!editedArr?.[i] || !frame) return null; // null = not edited
+    return frame.map(lm => lm
+      ? {x:+(lm.x??0).toFixed(5), y:+(lm.y??0).toFixed(5),
+         z:+(lm.z??0).toFixed(5), v:+(lm.visibility??0).toFixed(4),
+         s: lm.source || ''}
+      : null);
+  });
+}
+
+function _corrUnpack(packed) {
+  if(!packed) return null;
+  return packed.map(frame => frame
+    ? frame.map(lm => lm
+        ? {x:lm.x, y:lm.y, z:lm.z, visibility:lm.v, presence:lm.v,
+           source: lm.s || 'saved-correction'}
+        : null)
+    : null);
+}
+
+function _corrSave() {
+  const key = window._currentCorrKey;
+  if(!key) return;
+  const anyEdits = _rvEdited.some(Boolean) || (_rvEdited2 && _rvEdited2.some(Boolean));
+  if(!anyEdits) return;
+  try {
+    const data = {
+      ts:      Date.now(),
+      primary: _corrPack(_rvLandmarks, _rvEdited),
+      pEd:     [..._rvEdited],
+      sec:     _corrPack(_rvLandmarks2, _rvEdited2),
+      sEd:     _rvEdited2 ? [..._rvEdited2] : [],
+    };
+    localStorage.setItem(CORRECTIONS_PREFIX + key, JSON.stringify(data));
+    // Prune oldest sets over limit
+    const allKeys = Object.keys(localStorage).filter(k => k.startsWith(CORRECTIONS_PREFIX));
+    if(allKeys.length > MAX_CORRECTION_SETS) {
+      const sorted = allKeys.map(k => {
+        try { return {k, ts: JSON.parse(localStorage.getItem(k)).ts || 0}; }
+        catch { return {k, ts: 0}; }
+      }).sort((a,b) => a.ts - b.ts);
+      localStorage.removeItem(sorted[0].k);
+    }
+    const count = _rvEdited.filter(Boolean).length + (_rvEdited2?.filter(Boolean).length ?? 0);
+    console.log(`[Corrections] Saved ${count} frame edits for "${key}"`);
+  } catch(e) {
+    console.warn('[Corrections] Save failed:', e.message);
+  }
+}
+
+function _corrLoad(key) {
+  if(!key) return null;
+  try {
+    const raw = localStorage.getItem(CORRECTIONS_PREFIX + key);
+    if(!raw) return null;
+    const data = JSON.parse(raw);
+    if(Date.now() - data.ts > CORRECTION_EXPIRY_MS) {
+      localStorage.removeItem(CORRECTIONS_PREFIX + key);
+      return null;
+    }
+    return data;
+  } catch { return null; }
+}
+
+// Apply saved corrections to _rvLandmarks/_rvLandmarks2. Returns number of frames applied.
+function _corrApply(savedData) {
+  if(!savedData) return 0;
+  let applied = 0;
+  const primUnpacked = _corrUnpack(savedData.primary);
+  if(primUnpacked && _rvLandmarks) {
+    savedData.pEd.forEach((edited, i) => {
+      if(edited && primUnpacked[i] && i < _rvLandmarks.length) {
+        _rvLandmarks[i] = primUnpacked[i];
+        _rvEdited[i]    = true;
+        applied++;
+      }
+    });
+  }
+  const secUnpacked = _corrUnpack(savedData.sec);
+  if(secUnpacked && _rvLandmarks2) {
+    (savedData.sEd || []).forEach((edited, i) => {
+      if(edited && secUnpacked[i] && i < _rvLandmarks2.length) {
+        _rvLandmarks2[i] = secUnpacked[i];
+        _rvEdited2[i]    = true;
+        applied++;
+      }
+    });
+  }
+  return applied;
+}
+
+function _corrStartAutoProceed(frameCount, savedTs) {
+  const banner = document.getElementById('corrSavedBanner');
+  if(!banner) return;
+  const ageMin = Math.round((Date.now() - savedTs) / 60000);
+  const agoStr = ageMin < 60 ? `${ageMin}m ago`
+               : ageMin < 1440 ? `${Math.floor(ageMin/60)}h ago`
+               : `${Math.floor(ageMin/1440)}d ago`;
+  let countdown = 3;
+  banner.style.display = 'flex';
+  const update = () => {
+    document.getElementById('corrBannerText').textContent =
+      `✓ ${frameCount} saved correction${frameCount!==1?'s':''} loaded (${agoStr}) — proceeding in ${countdown}s`;
+  };
+  update();
+  _corrAutoTimer = setInterval(() => {
+    countdown--;
+    if(countdown <= 0) {
+      clearInterval(_corrAutoTimer);
+      _corrAutoTimer = null;
+      proceedFromReview();
+    } else { update(); }
+  }, 1000);
+}
+
+function _corrCancelAutoProceed() {
+  if(_corrAutoTimer) { clearInterval(_corrAutoTimer); _corrAutoTimer = null; }
+  const banner = document.getElementById('corrSavedBanner');
+  if(banner) banner.style.display = 'none';
+  // Re-render to show corrected skeleton for editing
+  _rvRenderCanvas();
+}
+
+function clearVideoCorrections() {
+  const key = window._currentCorrKey;
+  if(!key) { alert('No video loaded.'); return; }
+  if(!confirm('Clear all saved landmark corrections for this video?')) return;
+  localStorage.removeItem(CORRECTIONS_PREFIX + key);
+  _corrCancelAutoProceed();
+  const btn = document.getElementById('clearCorrectionsBtn');
+  if(btn) btn.style.display = 'none';
+  console.log('[Corrections] Cleared for:', key);
 }
 
 // ── Session Comparison ──────────────────────────────────────────────────────
