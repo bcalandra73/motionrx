@@ -1253,6 +1253,8 @@ let uploadedFile = null, fileType = null;
 let extractedFrames = []; // {imageData: base64, canvas: HTMLCanvasElement}
 let window_strideMetrics = null; // populated by stride detection pass for gait movements
 let window_primaryPhaseSelection = null; // {fractions:[], labels:[]} — set by GaitFSM after frame selection
+// Storage keys — declared here so resetAll() and other early functions can reference them
+const AUTOSAVE_KEY = 'motionrx_autosave';
 // window._denseAnglesFrames — set on window object by GaitFSM for cross-scope access
 
 // ── Second video state ──
@@ -11837,7 +11839,6 @@ document.addEventListener('DOMContentLoaded', autoSaveCheckRestore);
 // Saves form state + rendered report HTML after each successful analysis.
 // On next page load, offers a one-click restore so PTs can pick up where they left off.
 // Stored under a separate key from session comparison snapshots.
-const AUTOSAVE_KEY = 'motionrx_autosave';
 
 function autoSaveCurrent() {
   try {
