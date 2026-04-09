@@ -399,6 +399,15 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
 <div class="container">
 
+  <!-- Auto-save restore banner — shown when a previous session can be recovered -->
+  <div id="autoSaveBanner" style="display:none;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;padding:12px 18px;margin-bottom:16px;display:none;align-items:center;gap:14px;flex-wrap:wrap;">
+    <span style="font-size:.85rem;color:#1b5e20;flex:1;">
+      💾 <strong>Session recovered</strong> — your last report is available to restore.
+    </span>
+    <button onclick="autoSaveRestore()" style="padding:7px 16px;background:#1b5e20;color:#fff;border:none;border-radius:6px;font-size:.82rem;font-weight:600;cursor:pointer;">Restore Last Session</button>
+    <button onclick="autoSaveDismiss()" style="padding:7px 12px;background:none;border:1px solid #a5d6a7;border-radius:6px;font-size:.82rem;color:#1b5e20;cursor:pointer;">Dismiss</button>
+  </div>
+
   <!-- INPUT -->
   <div id="inputSection">
     <div class="page-header">
@@ -2481,8 +2490,21 @@ function startFrameExtraction(file, vid) {
                   const _toFrac = perFrame[Math.min(_toIdx, N-1)]?.t;
 
                   if(_toFrac != null && _toFrac > _icFrac && _toFrac < _nextIcFrac) {
-                    const _sDur = _toFrac - _icFrac;      // stance, as video fraction
-                    const _wDur = _nextIcFrac - _toFrac;  // swing, as video fraction
+                    let _sDur = _toFrac - _icFrac;      // stance, as video fraction
+                    const _wDur_raw = _nextIcFrac - _toFrac;  // swing, as video fraction
+                    const _strideDurFrac = _nextIcFrac - _icFrac;
+                    const _stancePct = _sDur / _strideDurFrac;
+
+                    // Validate stance %: running stance norm is 38-45% of stride.
+                    // Sparse frame density (~110ms/frame) can cause TO to land 1 frame early,
+                    // compressing stance to 33%. When detected stance < 35%, use 40% instead
+                    // (Novacheck 1998; Perry & Burnfield 2010 recreational norm).
+                    if(_stancePct < 0.35) {
+                      const _correctedTo = _icFrac + 0.40 * _strideDurFrac;
+                      console.log(`[Zeni2008] Stance ${Math.round(_stancePct*100)}% < 35% norm — correcting TO from ${_toFrac.toFixed(3)} to ${_correctedTo.toFixed(3)} (40% of stride)`);
+                      _sDur = _correctedTo - _icFrac;
+                    }
+                    const _wDur = _nextIcFrac - (_icFrac + _sDur); // recalculate swing after possible correction
                     const _c = (f) => Math.max(0.01, Math.min(0.99, f));
                     const _zF = {
                       contact:    _icFrac,
@@ -2498,8 +2520,8 @@ function startFrameExtraction(file, vid) {
                       fractions: frames.map(f => _c(_zF[f.phase?._baseId ?? ''] ?? _icFrac)),
                       labels:    frames.map(f => f.phase),
                     };
-                    const _stPct = Math.round(_sDur / (_nextIcFrac - _icFrac) * 100);
-                    console.log(`[Zeni2008] ✓ IC=${_icFrac.toFixed(3)} TO=${_toFrac.toFixed(3)} nextIC=${_nextIcFrac.toFixed(3)} stance=${_stPct}% (norm 38-45%)`);
+                    const _stPct = Math.round(_sDur / _strideDurFrac * 100);
+                    console.log(`[Zeni2008] ✓ IC=${_icFrac.toFixed(3)} TO=${(_icFrac+_sDur).toFixed(3)} nextIC=${_nextIcFrac.toFixed(3)} stance=${_stPct}% (norm 38-45%)`);
                     console.log('[Zeni2008] Fractions: ' + Object.entries(_zF).map(([k,v])=>k.slice(0,4)+'='+v.toFixed(3)).join(' '));
                   }
                 }
@@ -3128,6 +3150,8 @@ function resetAll() {
   document.getElementById('inputSection').style.display='block';
   resetUpload();
   resetUpload2();
+  // Clear auto-save — user explicitly chose to start fresh
+  try { localStorage.removeItem(AUTOSAVE_KEY); } catch(e) {}
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -6801,12 +6825,18 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // (near-extended knee at contact); forefoot strikers toward the high end.
   // Stiffness flag (>30°): compensation, post-surgical guarding, or forefoot-bias.
   // Low-flexion flag (<5°): impact risk, locked-knee gait.
-  const kneeContactFlexVals = strideDetails
-    .map(s => s.kneeContactIncluded != null ? Math.round(180 - s.kneeContactIncluded) : null)
-    .filter(v => v != null && v >= 0 && v <= 60); // physiological clamp
-  const kneeFlexAtContact = kneeContactFlexVals.length > 0
+  const kneeContactFlexAll = strideDetails
+    .map(s => s.kneeContactIncluded != null ? Math.round(180 - s.kneeContactIncluded) : null);
+  const kneeContactFlexVals = kneeContactFlexAll
+    .filter(v => v != null && v >= 0 && v <= 80); // physiological clamp — 80° generous upper bound
+  // Reliability gate: require ≥ 50% of strides to yield valid readings.
+  // If IC detection is inconsistent, kneeContactIncluded values will cluster at impossible
+  // angles (>80° flexion at contact) and get filtered. A low pass rate signals bad IC detection.
+  const _kcfReliable = kneeContactFlexVals.length >= Math.ceil(strideDetails.length * 0.5);
+  const kneeFlexAtContact = (_kcfReliable && kneeContactFlexVals.length > 0)
     ? Math.round(mean(kneeContactFlexVals))
     : null;
+  console.log(`[StrideEngine] Knee flex at contact: ${kneeFlexAtContact ?? 'suppressed'} (${kneeContactFlexVals.length}/${strideDetails.length} strides valid, reliable=${_kcfReliable})`);
 
   // Hip extension at toe-off: use median for robustness, clamp to physiological range
   // Normal: 10–25°. Values >30° suggest toeoffIdx landed on wrong frame.
@@ -9391,7 +9421,9 @@ async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, status
   for(let i = 0; i < denseFrames.length; i++) {
     const raw = mpResults[i];
     if(!raw) { refinedLandmarks.push(null); continue; }
-    let refined = await refineFootLandmarks(denseFrames[i].imageData, raw);
+    // refineFootLandmarks expects a landmarks ARRAY, not the full result object
+    const rawLms = raw.poseLandmarks ?? raw; // unwrap if needed
+    let refined = await refineFootLandmarks(denseFrames[i].imageData, rawLms);
     if(tapeConfig) refined = await applyTapeRefinement(denseFrames[i].imageData, refined, tapeConfig);
     refinedLandmarks.push(refined);
   }
@@ -11210,6 +11242,8 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       let sessions = [];
       try { sessions = JSON.parse(localStorage.getItem(SESSION_KEY) || '[]'); } catch(e) {}
       if(cmpBtn && sessions.length >= 1) cmpBtn.style.display = 'inline-flex';
+      // Auto-save for tab-close recovery (runs after render so HTML is complete)
+      setTimeout(autoSaveCurrent, 800);
     } catch(renderErr) {
       console.error('[renderReport] CRASH:', renderErr.message, renderErr.stack);
       showErr('Render error: ' + renderErr.message);
@@ -11401,6 +11435,96 @@ function loadBranding() {
   } catch(e){}
 }
 document.addEventListener('DOMContentLoaded', loadBranding);
+document.addEventListener('DOMContentLoaded', autoSaveCheckRestore);
+
+// ── Auto-save: prevent data loss on tab close ──────────────────────────────
+// Saves form state + rendered report HTML after each successful analysis.
+// On next page load, offers a one-click restore so PTs can pick up where they left off.
+// Stored under a separate key from session comparison snapshots.
+const AUTOSAVE_KEY = 'motionrx_autosave';
+
+function autoSaveCurrent() {
+  try {
+    const reportEl = document.getElementById('reportGrid');
+    const html = reportEl ? reportEl.innerHTML : '';
+    if(!html || html.length < 200) return; // nothing meaningful to save
+    const state = {
+      ts:          Date.now(),
+      patient:     document.getElementById('patientName')?.value?.trim() || '',
+      age:         document.getElementById('patientAge')?.value || '',
+      movement:    document.getElementById('movementType')?.value || '',
+      cameraView:  document.getElementById('cameraView')?.value || '',
+      reportHtml:  html,
+      subtitleHtml:document.getElementById('reportSubtitle')?.innerHTML || '',
+      scoreStrip:  document.getElementById('scoreStrip')?.innerHTML || '',
+      strideSection:document.getElementById('strideMetricsBody')?.innerHTML || '',
+      strideVisible:(document.getElementById('strideMetricsSection')?.style.display !== 'none'),
+    };
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(state));
+    console.log('[AutoSave] Saved —', state.patient || 'unnamed', state.movement, new Date(state.ts).toLocaleTimeString());
+  } catch(e) {
+    console.warn('[AutoSave] Failed to save:', e.message);
+  }
+}
+
+function autoSaveCheckRestore() {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    if(!raw) return;
+    const state = JSON.parse(raw);
+    // Only offer restore if saved within the last 48 hours
+    if(!state.ts || Date.now() - state.ts > 48 * 3600 * 1000) {
+      localStorage.removeItem(AUTOSAVE_KEY); return;
+    }
+    // Show banner
+    const banner = document.getElementById('autoSaveBanner');
+    if(!banner) return;
+    const age = Math.round((Date.now() - state.ts) / 60000);
+    const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age/60)}h ago`;
+    const name = state.patient || 'unnamed patient';
+    banner.querySelector('span').innerHTML =
+      `💾 <strong>Session recovered</strong> — ${name} · ${state.movement || 'unknown movement'} · ${ageStr}`;
+    banner.style.display = 'flex';
+  } catch(e) {}
+}
+
+function autoSaveRestore() {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    if(!raw) return;
+    const state = JSON.parse(raw);
+    // Restore form fields
+    if(state.patient)   document.getElementById('patientName').value    = state.patient;
+    if(state.age)       document.getElementById('patientAge').value     = state.age;
+    if(state.movement)  document.getElementById('movementType').value   = state.movement;
+    if(state.cameraView)document.getElementById('cameraView').value     = state.cameraView;
+    // Restore rendered report
+    const reportEl = document.getElementById('reportGrid');
+    if(reportEl && state.reportHtml) reportEl.innerHTML = state.reportHtml;
+    if(state.subtitleHtml) document.getElementById('reportSubtitle').innerHTML = state.subtitleHtml;
+    if(state.scoreStrip)   document.getElementById('scoreStrip').innerHTML    = state.scoreStrip;
+    if(state.strideSection && document.getElementById('strideMetricsBody'))
+      document.getElementById('strideMetricsBody').innerHTML = state.strideSection;
+    if(state.strideVisible && document.getElementById('strideMetricsSection'))
+      document.getElementById('strideMetricsSection').style.display = 'block';
+    // Show results, hide input
+    document.getElementById('inputSection').style.display = 'none';
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('resultsSection').style.display = 'block';
+    // Show save/compare buttons
+    document.getElementById('saveSessionBtn').style.display = 'inline-flex';
+    autoSaveDismiss();
+    console.log('[AutoSave] Restored —', state.patient, state.movement);
+  } catch(e) {
+    console.warn('[AutoSave] Restore failed:', e.message);
+    autoSaveDismiss();
+  }
+}
+
+function autoSaveDismiss() {
+  const banner = document.getElementById('autoSaveBanner');
+  if(banner) banner.style.display = 'none';
+}
 
 function getBranding() {
   return {
