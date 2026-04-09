@@ -3177,7 +3177,9 @@ async function startFrameExtraction2(file, vid) {
     if(frames.length > 0) {
       extractedFrames2 = frames;
       barFill.style.width = '100%';
-      statusText.textContent = `✓ ${frames.length} frames (${cameraView2} view) — phase-aligned`;
+      statusText.textContent = `✓ ${frames.length} frames (${
+        cameraView2 === 'posterior' ? 'posterior' : cameraView2 === 'front' ? 'front' : 'side'
+      } view) — phase-aligned`;
     } else {
       statusText.textContent = '⚠️ Frame extraction failed';
     }
@@ -3603,26 +3605,28 @@ function applyWristPlausibility(allFrameLandmarks, view='side') {
         continue;
       }
 
-      // Rule 2 — side-view direction: wrist cannot be more than 1× humerus
-      // length BEHIND the elbow (opposite to expected swing direction).
-      // On a side-facing runner: elbow is between shoulder and wrist in X.
-      // If wrist X is far behind the body (> 1× humLen past the shoulder), null it.
+      // Rule 2 — side-view direction: the wrist must be on the SAME side as the elbow
+      // relative to the shoulder. In side view, the near-arm elbow is between the shoulder
+      // and the wrist in X. A wrist that is further from the torso than 1.5× humerus past
+      // the shoulder in the OPPOSITE direction = on the far arm = wrong.
       if(s) {
-        const shElDx = e.x - s.x; // shoulder→elbow direction
-        const elWrDx = w.x - e.x; // elbow→wrist direction
-        // Cross-product Z sign: same sign = wrist continues elbow direction, opposite = flipped
-        // For side view, mainly check that wrist doesn't appear on the far side of the torso
-        const torsoMidX = (lms[11]?.x ?? s.x + (lms[12]?.x ?? s.x)) / 2;
-        // If both shoulders available, torso width is known; wrist on far side = wrong
-        if(lms[11] && lms[12]) {
-          const torsoW = Math.abs(lms[11].x - lms[12].x);
-          const wristDistFromMid = Math.abs(w.x - torsoMidX);
-          // Wrist should not be more than 1× torso width past the torso midline in the far direction
-          if(wristDistFromMid > torsoW * 1.8 && elwDist > humLen * 1.1) {
-            lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(crossbody,torsoW=${torsoW.toFixed(3)})`};
-            nulled++;
-            console.log(`[WristCheck] ${name} f${fi+1}: cross-body position (${wristDistFromMid.toFixed(3)} from mid, torsoW=${torsoW.toFixed(3)}) → nulled`);
-          }
+        const shToElbow = e.x - s.x;         // + if elbow is right of shoulder
+        const shToWrist = w.x - s.x;         // + if wrist is right of shoulder
+        // If elbow and wrist are on opposite sides of the shoulder, wrist is on wrong arm
+        // Allow 0.5× humerus tolerance for arm-crossing during swing
+        if(shToElbow * shToWrist < 0 && Math.abs(shToWrist) > humLen * 0.5) {
+          lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(wrong-side,sEl=${shToElbow.toFixed(3)},sWr=${shToWrist.toFixed(3)})`};
+          nulled++;
+          console.log(`[WristCheck] ${name} f${fi+1}: wrist on wrong side of shoulder (elbow=${shToElbow.toFixed(3)}, wrist=${shToWrist.toFixed(3)}) → nulled`);
+          continue;
+        }
+        // Also check: wrist more than 2× humerus past the elbow in the same direction
+        // (over-reaching — anatomically impossible without extreme shoulder rotation)
+        const elToWrist = w.x - e.x;
+        if(Math.sign(elToWrist) === Math.sign(shToElbow) && Math.abs(elToWrist) > humLen * 1.5) {
+          lms[wr] = {...w, visibility:0, presence:0, source:`wrist-nulled(over-reach,elWr=${elToWrist.toFixed(3)})`};
+          nulled++;
+          console.log(`[WristCheck] ${name} f${fi+1}: wrist over-reach ${(Math.abs(elToWrist)/humLen).toFixed(2)}× humerus → nulled`);
         }
       }
     }
@@ -9035,9 +9039,11 @@ function _rvResolveLms(lms) {
     29:{x:0.37,y:0.84}, 30:{x:0.63,y:0.84}, // heels
     31:{x:0.37,y:0.88}, 32:{x:0.63,y:0.88}, // toes
     11:{x:0.36,y:0.22}, 12:{x:0.64,y:0.22}, // shoulders
+    13:{x:0.34,y:0.34}, 14:{x:0.66,y:0.34}, // elbows
+    15:{x:0.30,y:0.44}, 16:{x:0.70,y:0.44}, // wrists — shown as ghost when nulled by plausibility check
   };
   // Symmetry partners (if one side is good, mirror the other)
-  const pairs = [[23,24],[25,26],[27,28],[29,30],[31,32],[11,12]];
+  const pairs = [[23,24],[25,26],[27,28],[29,30],[31,32],[11,12],[13,14],[15,16]];
   pairs.forEach(([L,R]) => {
     const lGood = out[L] && (out[L].visibility||0) > 0.10;
     const rGood = out[R] && (out[R].visibility||0) > 0.10;
@@ -10189,7 +10195,10 @@ async function runAnalysis() {
       }
 
       // Compute video identity key for landmark corrections persistence
-      window._currentCorrKey = _corrVideoKey(uploadedFile, typeof dur !== 'undefined' ? dur : null);
+      // Use _primaryVidEl.duration since 'dur' is not in scope here
+      const _corrDur = window._primaryVidEl?.duration;
+      window._currentCorrKey = _corrVideoKey(uploadedFile,
+        (_corrDur && isFinite(_corrDur) && _corrDur > 0) ? _corrDur : null);
 
       const corrResult = await showLandmarkReviewPanel(
         extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
@@ -13293,6 +13302,10 @@ function setCameraView2(view, btn) {
   };
   const h = document.getElementById('viewHint2');
   if(h) h.textContent = hints[view] || '';
+  // Update the dual-view badge label immediately
+  const viewNames = {side:'side view', front:'front view', posterior:'posterior view'};
+  const secLabel = document.getElementById('dualSecondaryLabel');
+  if(secLabel) secLabel.textContent = viewNames[view] || view;
   updateDualViewBadge();
 }
 
