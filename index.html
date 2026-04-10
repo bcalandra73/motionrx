@@ -2501,6 +2501,8 @@ function startFrameExtraction(file, vid) {
               const _refAnkKey = REF === 'L' ? 'lAnkX' : 'rAnkX';
               const _refKneeKey = REF === 'L' ? 'lKnee' : 'rKnee';
               let _zeniSel = null;
+              // Hoist so diagnostic block at bottom can reference them safely
+              let _zIcIdx = null, _zNextIcIdx = null;
 
               if(_icIdx != null && _nextIcIdx != null
                  && _icIdx < N && _nextIcIdx < N && _nextIcIdx > _icIdx) {
@@ -2600,8 +2602,13 @@ function startFrameExtraction(file, vid) {
                   return seedIdx;
                 };
 
-                const _zIcIdx     = _refineIC(_icIdx);
-                const _zNextIcIdx = _refineIC(_nextIcIdx);
+                _zIcIdx     = _refineIC(_icIdx);
+                // nextIC search must start AFTER _zIcIdx to prevent both searches
+                // converging on the same frame (causing _nextIcFrac === _icFrac → no Zeni anchor).
+                // Constrain seed to be at least strideWin/3 frames after _zIcIdx.
+                const _minNextIcSeed = _zIcIdx + Math.max(3, Math.round(_strideWin * 0.33));
+                const _nextIcSeedClamped = Math.max(_nextIcIdx, _minNextIcSeed);
+                _zNextIcIdx = _refineIC(Math.min(_nextIcSeedClamped, N-1));
                 console.log(`[Zeni2008] IC: seed=${_icIdx}(knee=${perFrame[_icIdx]?.[_refKneeKey]?.toFixed(0)}°) → refined=${_zIcIdx}(knee=${perFrame[_zIcIdx]?.[_refKneeKey]?.toFixed(0)}°) | radius=${Math.max(5,Math.round(_strideWin*0.50))}`);
                 const _icFrac     = perFrame[_zIcIdx]?.t;
                 const _nextIcFrac = perFrame[Math.min(_zNextIcIdx, N-1)]?.t;
