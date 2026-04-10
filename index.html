@@ -1035,6 +1035,12 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <h2>Review Landmark Positions</h2>
       <p>MediaPipe has placed joint markers on each frame. Click a frame thumbnail, then <strong>drag any misplaced marker</strong> to its correct anatomical position. Edited frames show a ✎ badge. When done, click Generate Report.</p>
     </div>
+    <!-- Saved corrections banner — shown at TOP so it's visible immediately -->
+    <div id="corrSavedBanner" style="display:none;margin-bottom:12px;padding:12px 16px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span id="corrBannerText" style="font-size:.84rem;color:#1b5e20;flex:1;font-weight:500;"></span>
+      <button onclick="clearVideoCorrections()" style="padding:6px 14px;border:1px solid #c62828;background:#fff;color:#c62828;border-radius:6px;font-size:.8rem;font-weight:600;cursor:pointer;">🗑 Clear saved</button>
+      <button onclick="proceedFromReview()" style="padding:6px 14px;background:#1b5e20;color:#fff;border:none;border-radius:6px;font-size:.8rem;font-weight:600;cursor:pointer;">→ Proceed Now</button>
+    </div>
     <div class="review-thumbs" id="reviewThumbs"></div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
       <button id="reviewPrevBtn" onclick="reviewNavFrame(-1)"
@@ -1077,12 +1083,6 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <button class="review-btn-secondary" onclick="resetAllReviewFrames()">↺ Reset all</button>
       <button class="review-btn-secondary" id="clearCorrectionsBtn" onclick="clearVideoCorrections()" style="display:none;" title="Remove saved corrections for this video">🗑 Clear saved</button>
       <button class="review-btn-proceed" onclick="proceedFromReview()" title="Shortcut: Ctrl+Enter">🔬 Generate Report →</button>
-    </div>
-    <!-- Saved corrections auto-proceed banner -->
-    <div id="corrSavedBanner" style="display:none;margin-top:12px;padding:12px 16px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;display:none;align-items:center;gap:12px;flex-wrap:wrap;">
-      <span id="corrBannerText" style="font-size:.84rem;color:#1b5e20;flex:1;font-weight:500;"></span>
-      <button onclick="_corrCancelAutoProceed()" style="padding:6px 14px;border:1px solid #a5d6a7;background:#fff;color:#1b5e20;border-radius:6px;font-size:.8rem;font-weight:600;cursor:pointer;">✎ Edit</button>
-      <button onclick="proceedFromReview()" style="padding:6px 14px;background:#1b5e20;color:#fff;border:none;border-radius:6px;font-size:.8rem;font-weight:600;cursor:pointer;">→ Proceed Now</button>
     </div>
   </div>
 </div>
@@ -2548,9 +2548,12 @@ function startFrameExtraction(file, vid) {
                   return (d0 != null && dm1 != null && dm1 < d0 - 0.003);
                 };
 
-                const _refineIC = (seedIdx) => {
+                // _refineIC(seedIdx, minIdx): minIdx is the floor of the search range.
+                // When searching for nextIC, pass _zIcIdx+1 as minIdx so the search
+                // cannot select the same frame as IC even if it has the best displacement.
+                const _refineIC = (seedIdx, minIdx = 0) => {
                   const _r = Math.max(5, Math.round(_strideWin * 0.50));
-                  const _s = Math.max(0, seedIdx - _r);
+                  const _s = Math.max(minIdx, seedIdx - _r); // respect floor
                   const _e = Math.min(N-1, seedIdx + _r);
 
                   // Collect all candidate IC frames: displacement local minima with near-extended knee
@@ -2608,7 +2611,9 @@ function startFrameExtraction(file, vid) {
                 // Constrain seed to be at least strideWin/3 frames after _zIcIdx.
                 const _minNextIcSeed = _zIcIdx + Math.max(3, Math.round(_strideWin * 0.33));
                 const _nextIcSeedClamped = Math.max(_nextIcIdx, _minNextIcSeed);
-                _zNextIcIdx = _refineIC(Math.min(_nextIcSeedClamped, N-1));
+                // Also pass _zIcIdx+1 as the search floor so even if radius extends back,
+                // frame _zIcIdx cannot be selected as nextIC.
+                _zNextIcIdx = _refineIC(Math.min(_nextIcSeedClamped, N-1), _zIcIdx + 1);
                 console.log(`[Zeni2008] IC: seed=${_icIdx}(knee=${perFrame[_icIdx]?.[_refKneeKey]?.toFixed(0)}°) → refined=${_zIcIdx}(knee=${perFrame[_zIcIdx]?.[_refKneeKey]?.toFixed(0)}°) | radius=${Math.max(5,Math.round(_strideWin*0.50))}`);
                 const _icFrac     = perFrame[_zIcIdx]?.t;
                 const _nextIcFrac = perFrame[Math.min(_zNextIcIdx, N-1)]?.t;
@@ -4342,7 +4347,11 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         // shown with a ⚠ annotation to flag that position is estimated during swing.
         const heelToeLandmarks = new Set([29, 30, 31, 32]);
         lm.forEach((p, i) => {
-          if(p.visibility < 0.2) return;
+          // Foot landmarks (ankles 27/28) need a lower visibility gate — during swing they're
+          // partially occluded/moving but still useful for the PT to see and correct.
+          // Non-foot landmarks keep the 0.2 gate to avoid cluttering with noise.
+          const _footVis = footLandmarks.has(i) ? 0.10 : 0.20;
+          if(p.visibility < _footVis) return;
           if(isFrontalView && i >= 1 && i <= 10) return;
           // Skip heel/toe entirely during swing phases (they're never reliable in-air)
           if(isSwingPhase && heelToeLandmarks.has(i)) return;
@@ -12098,21 +12107,11 @@ function _corrStartAutoProceed(frameCount, savedTs) {
   const agoStr = ageMin < 60 ? `${ageMin}m ago`
                : ageMin < 1440 ? `${Math.floor(ageMin/60)}h ago`
                : `${Math.floor(ageMin/1440)}d ago`;
-  let countdown = 3;
   banner.style.display = 'flex';
-  const update = () => {
-    document.getElementById('corrBannerText').textContent =
-      `✓ ${frameCount} saved correction${frameCount!==1?'s':''} loaded (${agoStr}) — proceeding in ${countdown}s`;
-  };
-  update();
-  _corrAutoTimer = setInterval(() => {
-    countdown--;
-    if(countdown <= 0) {
-      clearInterval(_corrAutoTimer);
-      _corrAutoTimer = null;
-      proceedFromReview();
-    } else { update(); }
-  }, 1000);
+  // No auto-proceed countdown — PT must explicitly click Proceed or Clear.
+  // Auto-proceeding in 3s was too fast to interact with the Clear button.
+  document.getElementById('corrBannerText').textContent =
+    `✓ ${frameCount} saved correction${frameCount!==1?'s':''} applied (${agoStr}) — review then proceed`;
 }
 
 function _corrCancelAutoProceed() {
@@ -12129,9 +12128,18 @@ function clearVideoCorrections() {
   if(!confirm('Clear all saved landmark corrections for this video?')) return;
   localStorage.removeItem(CORRECTIONS_PREFIX + key);
   _corrCancelAutoProceed();
+  const banner = document.getElementById('corrSavedBanner');
+  if(banner) banner.style.display = 'none';
   const btn = document.getElementById('clearCorrectionsBtn');
   if(btn) btn.style.display = 'none';
-  console.log('[Corrections] Cleared for:', key);
+  // Reset edits so landmarks revert to fresh MediaPipe positions
+  if(_rvEdited) _rvEdited.fill(false);
+  if(_rvEdited2) _rvEdited2.fill(false);
+  if(_rvOriginals) _rvLandmarks = _rvOriginals.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null);
+  if(_rvOriginals2) _rvLandmarks2 = _rvOriginals2.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null);
+  _rvBuildThumbs();
+  _rvShowFrame(0);
+  console.log('[Corrections] Cleared and landmarks reverted to MediaPipe for:', key);
 }
 
 // ── Session Comparison ──────────────────────────────────────────────────────
