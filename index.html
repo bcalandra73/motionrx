@@ -4341,6 +4341,11 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
       ctx.drawImage(img, 0, 0);
       const W = canvas.width, H = canvas.height;  // declared here so barPoint block always has access
 
+      // Determine movement type for left-leg emphasis — must be declared before the poseLandmarks
+      // block so the "Assess LEFT leg" label below (outside that block) can reference it.
+      const _mvt = (document.getElementById('movementType')?.value || '').toLowerCase();
+      const _isGaitSideView = /running|gait|walk/.test(_mvt) && view === 'side';
+
       if(poseResult && poseResult.poseLandmarks) {
         const lm = poseResult.poseLandmarks;
         const lw = Math.max(2, W/220);
@@ -4358,8 +4363,6 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         // RIGHT side (MediaPipe even landmarks: 12,14,16,24,26,28,30,32) = GOLD
         // In SIDE VIEW for running/gait: fade right leg heavily so the PT focuses on the left leg.
         // The labels are for LEFT foot phases — right leg causes consistent visual misreading.
-        const _mvt = (document.getElementById('movementType')?.value || '').toLowerCase();
-        const _isGaitSideView = /running|gait|walk/.test(_mvt) && view === 'side';
         connections.forEach(([a,b]) => {
           if(!lm[a]||!lm[b]) return;
           const visA = lm[a].visibility, visB = lm[b].visibility;
