@@ -1034,6 +1034,10 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="review-header">
       <h2>Review Landmark Positions</h2>
       <p>MediaPipe has placed joint markers on each frame. Click a frame thumbnail, then <strong>drag any misplaced marker</strong> to its correct anatomical position. Edited frames show a ✎ badge. When done, click Generate Report.</p>
+      <p id="reviewWristNote" style="display:none;margin-top:6px;padding:6px 10px;background:#fff8e1;border:1px solid #ffe082;border-radius:6px;font-size:.78rem;color:#795548;">
+        <strong>Running note:</strong> Wrist positions (<span style="color:#00b5a5;font-weight:600;">LW</span> / <span style="color:#00b5a5;font-weight:600;">RW</span>) are cosmetic only — they don't affect any reported measurements. You can safely skip correcting them.
+        Focus corrections on: <strong>hips, knees, ankles, and heels</strong>.
+      </p>
     </div>
     <!-- Saved corrections banner — shown at TOP so it's visible immediately -->
     <div id="corrSavedBanner" style="display:none;margin-bottom:12px;padding:12px 16px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -4144,8 +4148,17 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
     statusEl.textContent = 'Applying segment constraints...';
     allLandmarks = applySegmentConstraints(allLandmarks, view);
     // Wrist plausibility: null wrists that are physically impossible given elbow position.
-    // Catches the "far-arm wrist" error where MediaPipe places the wrist on the occluded arm.
-    allLandmarks = applyWristPlausibility(allLandmarks, view);
+    // Skip for running/gait — arm swing during running constantly triggers false positives
+    // (forearm ratios, cross-body checks), nulling 14/16 wrists every run.
+    // Wrist position affects ZERO clinical measurements in gait analysis — it's purely
+    // cosmetic in the skeleton. Not worth forcing PT to correct manually each time.
+    const _mvLower = (movement || '').toLowerCase();
+    const _skipWrist = _mvLower.includes('running') || _mvLower.includes('gait') || _mvLower.includes('walk');
+    if(_skipWrist) {
+      console.log(`[WristCheck] Skipped for "${movement}" — wrists are cosmetic in gait, no clinical impact`);
+    } else {
+      allLandmarks = applyWristPlausibility(allLandmarks, view);
+    }
 
     // Running/gait: tibia-direction ankle reprojection + ground-plane constraint
     // This corrects the most common treadmill failure: far-side ankle placed on belt
@@ -4343,7 +4356,10 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         // Draw connections — solid if both joints confident, dashed if estimated
         // LEFT side (MediaPipe odd landmarks: 11,13,15,23,25,27,29,31) = TEAL
         // RIGHT side (MediaPipe even landmarks: 12,14,16,24,26,28,30,32) = GOLD
-        // Midline (hip-hip, shoulder-shoulder) = TEAL
+        // In SIDE VIEW for running/gait: fade right leg heavily so the PT focuses on the left leg.
+        // The labels are for LEFT foot phases — right leg causes consistent visual misreading.
+        const _mvt = (document.getElementById('movementType')?.value || '').toLowerCase();
+        const _isGaitSideView = /running|gait|walk/.test(_mvt) && view === 'side';
         connections.forEach(([a,b]) => {
           if(!lm[a]||!lm[b]) return;
           const visA = lm[a].visibility, visB = lm[b].visibility;
@@ -4352,14 +4368,17 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
           // MediaPipe: left body = odd indices (11,13,23,25,27,29,31)
           //            right body = even indices (12,14,24,26,28,30,32)
           const isRightSide = a > 10 && b > 10 && a % 2 === 0 && b % 2 === 0;
+          // In gait side view: fade right leg to 20% opacity so only left (teal) is prominent
+          const rightAlpha = _isGaitSideView ? 0.20 : 0.90;
+          const rightLowAlpha = _isGaitSideView ? 0.12 : 0.70;
           ctx.save();
-          ctx.lineWidth = lw;
+          ctx.lineWidth = isRightSide ? lw * 0.7 : lw; // right leg slightly thinner always
           if(conf < 0.4) {
             ctx.setLineDash([6, 4]);
-            ctx.strokeStyle = isRightSide ? 'rgba(251,191,36,0.7)' : 'rgba(255,200,0,0.7)';
+            ctx.strokeStyle = isRightSide ? `rgba(251,191,36,${rightLowAlpha})` : 'rgba(255,200,0,0.7)';
           } else {
             ctx.setLineDash([]);
-            ctx.strokeStyle = isRightSide ? 'rgba(251,191,36,0.9)' : 'rgba(0,229,204,0.9)';
+            ctx.strokeStyle = isRightSide ? `rgba(251,191,36,${rightAlpha})` : 'rgba(0,229,204,0.9)';
           }
           ctx.beginPath();
           ctx.moveTo(lm[a].x*W, lm[a].y*H);
@@ -4434,15 +4453,19 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
                           : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
           } else {
             // Non-foot joints: color by body side and confidence
-            // RIGHT side (even indices 12,14,16,24,26,28,30,32) = GOLD
+            // RIGHT side (even indices 12,14,16,24,26,28,30,32) = GOLD (faded in gait side view)
             // LEFT side (odd indices 11,13,15,23,25,27,29,31) + face = TEAL
             const isRightJoint = i > 10 && i % 2 === 0;
+            // Fade right joints heavily in side-view running to eliminate contralateral confusion
+            const rightJointAlpha = _isGaitSideView ? 0.18 : 1.0;
             if(conf >= 0.6) {
-              ctx.fillStyle = i < 11 ? '#ffeb3b' : isRightJoint ? '#fbbf24' : '#00e5cc';
+              ctx.fillStyle = i < 11 ? '#ffeb3b'
+                : isRightJoint ? `rgba(251,191,36,${rightJointAlpha})`
+                : '#00e5cc';
             } else if(conf >= 0.35) {
-              ctx.fillStyle = isRightJoint ? '#f59e0b' : '#ffa500';
+              ctx.fillStyle = isRightJoint ? `rgba(245,158,11,${rightJointAlpha})` : '#ffa500';
             } else {
-              ctx.fillStyle = 'rgba(255,100,100,0.7)';
+              ctx.fillStyle = isRightJoint ? `rgba(255,100,100,${rightJointAlpha})` : 'rgba(255,100,100,0.7)';
             }
             // Add knee labels to help identify left vs right leg
             if(i === 25 || i === 26) {
@@ -4450,11 +4473,12 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
               ctx.font = `bold ${Math.max(8, W/95)}px sans-serif`;
               ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
               ctx.strokeText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
-              ctx.fillStyle = (i === 25) ? '#00e5cc' : '#fbbf24';
+              ctx.fillStyle = (i === 25) ? '#00e5cc' : `rgba(251,191,36,${_isGaitSideView ? 0.35 : 1.0})`;
               ctx.fillText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
               // Reset for the dot
-              ctx.fillStyle = isRightJoint ? (conf >= 0.6 ? '#fbbf24' : '#f59e0b') 
-                                           : (conf >= 0.6 ? '#00e5cc' : '#ffa500');
+              ctx.fillStyle = isRightJoint
+                ? `rgba(251,191,36,${rightJointAlpha})`
+                : (conf >= 0.6 ? '#00e5cc' : '#ffa500');
             }
           }
           ctx.fill();
@@ -4561,8 +4585,9 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         const hasLowConf         = lms.some(p => p && (p.visibility||0) > 0 && (p.visibility||0) < 0.35);
         const legendItems = [
           {color:'#ffd700',               label:'Tape-refined (physical marker)',   show:hasTapeRefined},
-          {color:'#00e5cc',               label:'LEFT leg — High confidence',       show:true},
-          {color:'#fbbf24',               label:'RIGHT leg — High confidence',      show:true},
+          {color:'#00e5cc',               label:'LEFT leg — assess this side',      show:true},
+          {color:'rgba(251,191,36,0.45)', label:'RIGHT leg — contralateral ref',    show:_isGaitSideView},
+          {color:'#fbbf24',               label:'RIGHT leg — High confidence',      show:!_isGaitSideView},
           {color:'#a8ff78',               label:'Foot landmark (verify!)',          show:hasFootLM},
           {color:'#c084fc',               label:'Ankle: tibia-projected (est.)',   show:hasProjected},
           {color:'#fb923c',               label:'Ankle: ground-corrected',          show:hasGroundCorrected},
@@ -4579,6 +4604,20 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
           ctx.fillStyle = 'rgba(255,255,255,0.9)';
           ctx.fillText(item.label, lx + 16, y + 10);
         });
+      }
+
+      // ── "Assess LEFT leg" label for running side view ─────────────────────────
+      // Shown prominently so the PT focuses on the teal skeleton, not the faded gold right leg.
+      if(_isGaitSideView) {
+        const lblH = Math.max(14, H/40);
+        const lblY = H - lblH - 2;
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, lblY - 2, W * 0.62, lblH + 6);
+        ctx.font = `bold ${Math.max(10, H/38)}px sans-serif`;
+        ctx.fillStyle = '#00e5cc';
+        ctx.fillText('← Assess LEFT leg (teal)', 6, lblY + lblH - 3);
+        ctx.restore();
       }
 
       // Draw bar point if detected
@@ -8963,6 +9002,9 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
 
     document.getElementById('loadingState').style.display = 'none';
     document.getElementById('reviewPanel').style.display  = 'block';
+    // Show wrist note for running/gait — wrists are cosmetic, don't need correction
+    const _wristNote = document.getElementById('reviewWristNote');
+    if(_wristNote) _wristNote.style.display = /running|gait|walk/i.test(movement) ? 'block' : 'none';
     window.scrollTo({top:0, behavior:'smooth'});
 
     // ── Load saved corrections for this video ────────────────────────────────
