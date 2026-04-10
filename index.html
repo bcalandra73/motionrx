@@ -2619,10 +2619,11 @@ function startFrameExtraction(file, vid) {
                 const _nextIcFrac = perFrame[Math.min(_zNextIcIdx, N-1)]?.t;
 
                 if(_icFrac != null && _nextIcFrac != null && _nextIcFrac > _icFrac) {
-                  // Toe-off: maximum of (refAnkX − hipMidX) in 20–65% of stride.
+                  // Toe-off: maximum of (refAnkX − hipMidX) in 15–60% of stride.
                   // Left-facing runner: at TO foot is rightward of hip (positive displacement).
-                  const _srchS = Math.round(_zIcIdx + (_zNextIcIdx - _zIcIdx) * 0.20);
-                  const _srchE = Math.round(_zIcIdx + (_zNextIcIdx - _zIcIdx) * 0.65);
+                  // Wider search (was 20-65%) catches earlier TO in treadmill gait.
+                  const _srchS = Math.round(_zIcIdx + (_zNextIcIdx - _zIcIdx) * 0.15);
+                  const _srchE = Math.round(_zIcIdx + (_zNextIcIdx - _zIcIdx) * 0.60);
                   let _toIdx = null, _toMax = -Infinity;
                   for(let _si = _srchS; _si <= _srchE && _si < N; _si++) {
                     const _ax = perFrame[_si]?.[_refAnkKey];
@@ -2637,30 +2638,37 @@ function startFrameExtraction(file, vid) {
 
                   if(_toFrac != null && _toFrac > _icFrac && _toFrac < _nextIcFrac) {
                     let _sDur = _toFrac - _icFrac;      // stance, as video fraction
-                    const _wDur_raw = _nextIcFrac - _toFrac;  // swing, as video fraction
                     const _strideDurFrac = _nextIcFrac - _icFrac;
                     const _stancePct = _sDur / _strideDurFrac;
+                    console.log(`[Zeni2008] Stance check: ${Math.round(_stancePct*100)}% (raw TO=${_toFrac.toFixed(3)}, IC=${_icFrac.toFixed(3)}, nextIC=${_nextIcFrac.toFixed(3)})`);
 
                     // Validate stance %: running stance norm is 38-45% of stride.
-                    // Sparse frame density (~110ms/frame) can cause TO to land 1 frame early,
-                    // compressing stance to 33%. When detected stance < 35%, use 40% instead
-                    // (Novacheck 1998; Perry & Burnfield 2010 recreational norm).
+                    // Sparse frame density (~110ms/frame) causes TO detection errors.
+                    // Correction: clamp to 40% (too short) or 41% (too long).
                     if(_stancePct < 0.35) {
                       const _correctedTo = _icFrac + 0.40 * _strideDurFrac;
-                      console.log(`[Zeni2008] Stance ${Math.round(_stancePct*100)}% < 35% norm — correcting TO from ${_toFrac.toFixed(3)} to ${_correctedTo.toFixed(3)} (40% of stride)`);
+                      console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% < 35% — correcting TO to 40% (${_correctedTo.toFixed(3)})`);
+                      _sDur = _correctedTo - _icFrac;
+                    } else if(_stancePct > 0.45) {
+                      // Stance > 45%: TO detected too late. Cap at 41%.
+                      const _correctedTo = _icFrac + 0.41 * _strideDurFrac;
+                      console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% > 45% — correcting TO to 41% (${_toFrac.toFixed(3)} → ${_correctedTo.toFixed(3)})`);
                       _sDur = _correctedTo - _icFrac;
                     }
-                    const _wDur = _nextIcFrac - (_icFrac + _sDur); // recalculate swing after possible correction
+                    // CRITICAL: use corrected TO fraction (icFrac + sDur) for ALL swing phase
+                    // calculations, not the raw _toFrac which may be pre-correction.
+                    const _correctedToFrac = _icFrac + _sDur;
+                    const _wDur = _nextIcFrac - _correctedToFrac; // swing from corrected TO
                     const _c = (f) => Math.max(0.01, Math.min(0.99, f));
                     const _zF = {
                       contact:    _icFrac,
-                      loading:    _icFrac + 0.12 * _sDur,  // 12% stance — early weight acceptance
-                      midstance:  _icFrac + 0.38 * _sDur,  // 38% stance — ankle under hip
-                      propulsion: _icFrac + 0.72 * _sDur,  // 72% stance — max plantarflexor force
-                      toeoff:     _toFrac,
-                      earlyswing: _toFrac + 0.15 * _wDur,  // 15% swing — limb clearance
-                      midswing:   _toFrac + 0.50 * _wDur,  // 50% swing — peak knee flexion
-                      lateswing:  _toFrac + 0.83 * _wDur,  // 83% swing — terminal deceleration
+                      loading:    _icFrac + 0.12 * _sDur,   // 12% stance — early weight acceptance
+                      midstance:  _icFrac + 0.38 * _sDur,   // 38% stance — ankle under hip
+                      propulsion: _icFrac + 0.72 * _sDur,   // 72% stance — max plantarflexor force
+                      toeoff:     _correctedToFrac,          // corrected TO (was: _toFrac)
+                      earlyswing: _correctedToFrac + 0.15 * _wDur,  // 15% swing — limb clearance
+                      midswing:   _correctedToFrac + 0.50 * _wDur,  // 50% swing — peak knee flexion
+                      lateswing:  _correctedToFrac + 0.83 * _wDur,  // 83% swing — terminal deceleration
                     };
                     _zeniSel = {
                       fractions: frames.map(f => _c(_zF[f.phase?._baseId ?? ''] ?? _icFrac)),
@@ -3186,11 +3194,31 @@ async function startFrameExtraction2(file, vid) {
     let times, phaseLabels;
 
     if(primarySel && primarySel.fractions.length > 0) {
-      // Use the phase-aligned fractions — each fraction maps to the same gait cycle phase
-      times = primarySel.fractions.map(frac => Math.max(0.05, frac * dur));
+      // ── Secondary video time synchronization ─────────────────────────────
+      // Problem: applying the same FRACTIONS to a different-duration video gives
+      // wrong absolute times. E.g. fraction 0.370 × 14.1s = 5.22s (primary IC)
+      // but 0.370 × 9.0s = 3.33s (a completely different gait phase).
+      //
+      // Fix: convert primary fractions → primary absolute times → secondary fractions.
+      // This works when both videos start at the same moment (simultaneous recording).
+      // The primary video duration is obtained from the primary video element.
+      const _primVidDur = window._primaryVidEl?.duration;
+      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5) {
+        // Videos have meaningfully different durations — use absolute time conversion
+        times = primarySel.fractions.map(frac => {
+          const absTime = frac * _primVidDur;        // primary absolute time
+          const secFrac = absTime / dur;             // fraction in secondary video
+          return Math.max(0.05, Math.min(dur - 0.05, secFrac * dur)); // clamp to valid range
+        });
+        console.log(`[FrameExtract2] Duration mismatch: primary=${_primVidDur.toFixed(1)}s, secondary=${dur.toFixed(1)}s — converting to absolute times`);
+        console.log(`[FrameExtract2] Adjusted secondary times: ${times.map(t=>t.toFixed(2)+'s').join(', ')}`);
+      } else {
+        // Same (or similar) duration — fractions apply directly
+        times = primarySel.fractions.map(frac => Math.max(0.05, frac * dur));
+        console.log(`[FrameExtract2] Using primary phase fractions: ${primarySel.fractions.map(x=>x.toFixed(2)).join(', ')}`);
+      }
       phaseLabels = primarySel.labels;
       statusText.textContent = `Extracting ${times.length} phase-aligned frames...`;
-      console.log(`[FrameExtract2] Using primary phase fractions: ${primarySel.fractions.map(x=>x.toFixed(2)).join(', ')}`);
     } else {
       // Fallback: use evenly spaced phase times (no GaitFSM ran on primary)
       const {times: phaseTimeProportions, labels} = getPhaseTimes(movement, dur);
@@ -4313,20 +4341,25 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         ];
 
         // Draw connections — solid if both joints confident, dashed if estimated
+        // LEFT side (MediaPipe odd landmarks: 11,13,15,23,25,27,29,31) = TEAL
+        // RIGHT side (MediaPipe even landmarks: 12,14,16,24,26,28,30,32) = GOLD
+        // Midline (hip-hip, shoulder-shoulder) = TEAL
         connections.forEach(([a,b]) => {
           if(!lm[a]||!lm[b]) return;
           const visA = lm[a].visibility, visB = lm[b].visibility;
           if(visA < 0.2 && visB < 0.2) return; // skip very low confidence
           const conf = Math.min(visA, visB);
+          // MediaPipe: left body = odd indices (11,13,23,25,27,29,31)
+          //            right body = even indices (12,14,24,26,28,30,32)
+          const isRightSide = a > 10 && b > 10 && a % 2 === 0 && b % 2 === 0;
           ctx.save();
           ctx.lineWidth = lw;
           if(conf < 0.4) {
-            // Dashed line for low-confidence / occluded joints
             ctx.setLineDash([6, 4]);
-            ctx.strokeStyle = 'rgba(255,200,0,0.7)';
+            ctx.strokeStyle = isRightSide ? 'rgba(251,191,36,0.7)' : 'rgba(255,200,0,0.7)';
           } else {
             ctx.setLineDash([]);
-            ctx.strokeStyle = 'rgba(0,229,204,0.9)';
+            ctx.strokeStyle = isRightSide ? 'rgba(251,191,36,0.9)' : 'rgba(0,229,204,0.9)';
           }
           ctx.beginPath();
           ctx.moveTo(lm[a].x*W, lm[a].y*H);
@@ -4399,12 +4432,30 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
             ctx.fillStyle = isTapeRefined ? '#ffd700' : isProjected ? '#c084fc' : isGroundCorrected ? '#fb923c'
                           : (isSwingPhase && (i===27||i===28)) ? '#facc15'
                           : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
-          } else if(conf >= 0.6) {
-            ctx.fillStyle = i < 11 ? '#ffeb3b' : '#00e5cc';
-          } else if(conf >= 0.35) {
-            ctx.fillStyle = '#ffa500';
           } else {
-            ctx.fillStyle = 'rgba(255,100,100,0.7)';
+            // Non-foot joints: color by body side and confidence
+            // RIGHT side (even indices 12,14,16,24,26,28,30,32) = GOLD
+            // LEFT side (odd indices 11,13,15,23,25,27,29,31) + face = TEAL
+            const isRightJoint = i > 10 && i % 2 === 0;
+            if(conf >= 0.6) {
+              ctx.fillStyle = i < 11 ? '#ffeb3b' : isRightJoint ? '#fbbf24' : '#00e5cc';
+            } else if(conf >= 0.35) {
+              ctx.fillStyle = isRightJoint ? '#f59e0b' : '#ffa500';
+            } else {
+              ctx.fillStyle = 'rgba(255,100,100,0.7)';
+            }
+            // Add knee labels to help identify left vs right leg
+            if(i === 25 || i === 26) {
+              const kneeLabel = (i === 25) ? 'LK' : 'RK';
+              ctx.font = `bold ${Math.max(8, W/95)}px sans-serif`;
+              ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
+              ctx.strokeText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
+              ctx.fillStyle = (i === 25) ? '#00e5cc' : '#fbbf24';
+              ctx.fillText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
+              // Reset for the dot
+              ctx.fillStyle = isRightJoint ? (conf >= 0.6 ? '#fbbf24' : '#f59e0b') 
+                                           : (conf >= 0.6 ? '#00e5cc' : '#ffa500');
+            }
           }
           ctx.fill();
           ctx.strokeStyle = 'rgba(255,255,255,0.9)';
@@ -4510,7 +4561,8 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         const hasLowConf         = lms.some(p => p && (p.visibility||0) > 0 && (p.visibility||0) < 0.35);
         const legendItems = [
           {color:'#ffd700',               label:'Tape-refined (physical marker)',   show:hasTapeRefined},
-          {color:'#00e5cc',               label:'High confidence',                 show:true},
+          {color:'#00e5cc',               label:'LEFT leg — High confidence',       show:true},
+          {color:'#fbbf24',               label:'RIGHT leg — High confidence',      show:true},
           {color:'#a8ff78',               label:'Foot landmark (verify!)',          show:hasFootLM},
           {color:'#c084fc',               label:'Ankle: tibia-projected (est.)',   show:hasProjected},
           {color:'#fb923c',               label:'Ankle: ground-corrected',          show:hasGroundCorrected},
@@ -10336,14 +10388,29 @@ async function runAnalysis() {
         const rVal = gaitDisplayVal('Right Hip Flexion', mpR, movement);
         const denseLVal = gaitDisplayVal('Left Hip Flexion',  aggregated['Left Hip Flexion']  || mpL, movement);
         const denseRVal = gaitDisplayVal('Right Hip Flexion', aggregated['Right Hip Flexion'] || mpR, movement);
-        // Use MP gallery values if: (a) they differ from each other (3D fired), OR
-        // (b) they differ from dense values (dense 2D was pulling values toward each other)
-        const mpDiffers = Math.abs(lVal - rVal) >= 3;
-        const mpVsDense = Math.abs(lVal - denseLVal) >= 3 || Math.abs(rVal - denseRVal) >= 3;
-        if(mpDiffers || mpVsDense) {
+        // ── Hip flex override logic ────────────────────────────────────────────
+        // Original problem: MoveNet dense 2D pulls both sides toward the near-leg
+        // value due to perspective (e.g. 56°/56° when true is 49°/53°).
+        // MP-Heavy gallery frames have 3D worldLandmarks that correct perspective.
+        //
+        // NEW constraint (post Zeni-anchor fix): only use gallery when gallery is
+        // HIGHER than dense. Now that phases are correctly timed, dense is often
+        // accurate. When gallery < dense, the gallery MidSwing frame is giving a
+        // low value (e.g. 28° at initial contact instead of true peak swing), and
+        // the dense 128-frame aggregate is more reliable.
+        //
+        // Use gallery if: gallery values are BILATERAL (differ ≥3°, confirming 3D
+        // fired) AND gallery avg is higher than dense avg (gallery sees true peak).
+        const mpAvg    = (lVal + rVal) / 2;
+        const denseAvg = (denseLVal + denseRVal) / 2;
+        const mpDiffers = Math.abs(lVal - rVal) >= 3;       // bilateral asymmetry confirms 3D fired
+        const mpHigher  = mpAvg > denseAvg + 2;             // gallery shows MORE hip flex than dense
+        if(mpDiffers && mpHigher) {
           aggregated['Left Hip Flexion']  = mpL;
           aggregated['Right Hip Flexion'] = mpR;
-          console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° vs dense L=${denseLVal}° R=${denseRVal}°`);
+          console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° vs dense L=${denseLVal}° R=${denseRVal}° — gallery higher ✓`);
+        } else {
+          console.log(`[Analysis] Hip flex: keeping dense L=${denseLVal}° R=${denseRVal}° (gallery L=${lVal}° R=${rVal}°${mpDiffers?', 3D fired':''}, ${mpHigher?'gallery higher':'gallery NOT higher — dense wins'})`);
         }
       }
 
