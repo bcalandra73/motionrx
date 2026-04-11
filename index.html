@@ -2734,14 +2734,17 @@ function startFrameExtraction(file, vid) {
 
                 // Phase scorers: returns score >= 0 if frame is a candidate, -1 if not
                 const _vizScorers = {
-                  'contact':    (d,k,y,h) => (d < -0.15 && k > 130) ? (-d*2 + (k-130)*0.008) : -1,
-                  'loading':    (d,k,y,h) => (d > -0.22 && d < 0.08 && k > 100 && k < 158 && y > 0.78) ? (1 - Math.abs(d + 0.05)) : -1,
-                  'midstance':  (d,k,y,h) => (Math.abs(d) < 0.15 && k > 110 && k < 165 && y > 0.78) ? (1.5 - Math.abs(d)) : -1,
-                  'propulsion': (d,k,y,h) => (d > 0.10 && k > 120 && y > 0.75) ? (d*2 + (k-120)*0.005) : -1,
-                  'toeoff':     (d,k,y,h) => (h > 8 && d > 0.05) ? (h*2 + d) : -1,
-                  'earlyswing': (d,k,y,h) => (k > 70 && k < 132 && d > -0.18 && y < 0.88) ? ((132-k)*0.4 + Math.max(0,d)*1.5) : -1,
-                  'midswing':   (d,k,y,h) => (k < 115) ? (160 - k) : -1,  // minimum k = peak flex
-                  'lateswing':  (d,k,y,h) => (d < -0.05 && k > 118 && k < 165 && y < 0.88) ? (-d*2 + (k-118)*0.008) : -1,
+                  'contact':    (d,k,y,h,t) => (d < -0.15 && k > 130) ? (-d*2 + (k-130)*0.008) : -1,
+                  'loading':    (d,k,y,h,t) => (d > -0.22 && d < 0.08 && k > 100 && k < 158 && y > 0.78) ? (1 - Math.abs(d + 0.05)) : -1,
+                  'midstance':  (d,k,y,h,t) => (Math.abs(d) < 0.15 && k > 110 && k < 165 && y > 0.78) ? (1.5 - Math.abs(d)) : -1,
+                  'propulsion': (d,k,y,h,t) => (d > 0.10 && k > 120 && y > 0.75) ? (d*2 + (k-120)*0.005) : -1,
+                  'toeoff':     (d,k,y,h,t) => (h > 8 && d > 0.05) ? (h*2 + d) : -1,
+                  // Swing phases: require ankle to be in upper half of frame (y < 0.88 = off ground)
+                  // AND require the frame to be in a reasonable portion of the clip (not the very start/end)
+                  // to prevent late swing from claiming t=0.53s near the clip beginning.
+                  'earlyswing': (d,k,y,h,t) => (k > 70 && k < 132 && d > -0.18 && y < 0.88 && t > 0.10 && t < 0.90) ? ((132-k)*0.4 + Math.max(0,d)*1.5) : -1,
+                  'midswing':   (d,k,y,h,t) => (k < 115 && t > 0.10 && t < 0.95) ? (160 - k) : -1,
+                  'lateswing':  (d,k,y,h,t) => (d < -0.05 && k > 118 && k < 165 && y < 0.88 && t > 0.25 && t < 0.98) ? (-d*2 + (k-118)*0.008) : -1,
                 };
                 const _vizPhaseOrder = ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'];
                 // Process high-confidence phases first (midswing, toeoff) to claim best frames
@@ -2754,8 +2757,9 @@ function startFrameExtraction(file, vid) {
                     const k = f[_refKneeKey];
                     const y = f.lAnkY ?? f.rAnkY ?? 0.82;
                     const h = f.lHip ?? 0;
+                    const t = f.t; // time fraction 0-1
                     if(d == null || k == null) return;
-                    const s = scorer(d, k, y, h);
+                    const s = scorer(d, k, y, h, t);
                     if(s > best) { best = s; bestT = f.t; bestI = fi; }
                   });
                   if(bestI >= 0 && best >= 0) {
@@ -13272,7 +13276,8 @@ async function exportPDF() {
         sm.heightCm ? `Height: ${Math.round(sm.heightCm)}cm` : null,
       ].filter(Boolean);
       const _isTreadmill = (sm?.surface || '').toLowerCase().includes('treadmill');
-      const _treadmillNote = _isTreadmill && /running|gait/i.test(movement)
+      const _pdfMovement = document.getElementById('movementType')?.value || '';
+      const _treadmillNote = _isTreadmill && /running|gait/i.test(_pdfMovement)
         ? ' Gallery phases use biomechanical timing (Zeni 2008 / Perry & Burnfield). Treadmill belt movement makes stance phases appear more compressed than overground — focus on the dense-pass measurements, not static gallery frame appearance.'
         : '';
       const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '') + _treadmillNote;
