@@ -9007,7 +9007,8 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     document.getElementById('reviewPanel').style.display  = 'block';
     // Show wrist note for running/gait — wrists are cosmetic, don't need correction
     const _wristNote = document.getElementById('reviewWristNote');
-    if(_wristNote) _wristNote.style.display = /running|gait|walk/i.test(movement) ? 'block' : 'none';
+    const _rvMovement = document.getElementById('movementType')?.value || '';
+    if(_wristNote) _wristNote.style.display = /running|gait|walk/i.test(_rvMovement) ? 'block' : 'none';
     window.scrollTo({top:0, behavior:'smooth'});
 
     // ── Load saved corrections for this video ────────────────────────────────
