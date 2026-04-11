@@ -3280,9 +3280,17 @@ async function startFrameExtraction2(file, vid) {
       // recorded simultaneously. Applying primary timestamps to secondary gives
       // completely wrong frames. Instead, scan the secondary video independently
       // to find its own best-matching frame for each phase.
+      //
+      // EXCEPTION: if saved landmark corrections exist for this video key, skip
+      // Option 2 and use absolute-time conversion to preserve correction validity.
+      // Corrections store landmark positions tied to specific frame timestamps —
+      // if Option 2 picks different timestamps, those positions become invalid.
       const _primVidDur = window._primaryVidEl?.duration;
       const _isGaitMvt = /running|gait|walk/i.test(movement);
-      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5 && _isGaitMvt) {
+      const _existingCorr = _corrLoad(window._currentCorrKey);
+      const _hasSavedSecCorr = _existingCorr?.sec && (_existingCorr.sEd || []).some(Boolean);
+
+      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5 && _isGaitMvt && !_hasSavedSecCorr) {
         // Independent secondary analysis — find the best frame for each phase
         // by scanning 32 uniformly-spaced frames and scoring biomechanically.
         console.log(`[FrameExtract2] Option 2: independent secondary phase detection (${dur.toFixed(1)}s clip)`);
@@ -3390,6 +3398,15 @@ async function startFrameExtraction2(file, vid) {
             return Math.max(0.05, Math.min(dur - 0.05, absTime));
           });
         }
+      } else if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5 && _isGaitMvt && _hasSavedSecCorr) {
+        // Saved secondary corrections exist — use absolute time conversion to preserve them.
+        // Option 2 (independent phase detection) would pick different timestamps and
+        // invalidate the saved landmark positions. Clear corrections first to enable Option 2.
+        times = _displayFracs.map(frac => {
+          const absTime = frac * _primVidDur;
+          return Math.max(0.05, Math.min(dur - 0.05, absTime));
+        });
+        console.log('[FrameExtract2] Saved secondary corrections found — preserving timestamps (clear corrections to enable Option 2)');
       } else if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5) {
         // Non-gait movement with duration mismatch — absolute time conversion
         times = _displayFracs.map(frac => {
