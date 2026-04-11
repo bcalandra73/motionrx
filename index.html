@@ -2706,6 +2706,78 @@ function startFrameExtraction(file, vid) {
               window_primaryPhaseSelection = _zeniSel ?? _lrFallback;
               const _anchorMethod = _zeniSel ? 'Zeni2008 (IC+TO displacement)' : 'LR-offset fallback';
 
+              // ── Visual frame selection (separate from measurement fractions) ───────
+              // The Zeni/fallback fractions are timing-accurate for MEASUREMENTS but
+              // may pick visually wrong content (e.g., foot off ground in "Mid Stance")
+              // due to MoveNet leg-swap errors in the dense scan.
+              //
+              // Here we search ALL 128 dense frames for the best VISUAL MATCH for each
+              // phase, using direct biomechanical signals. This is stored as vizFractions
+              // and used for gallery frame extraction only — measurements still use fractions.
+              //
+              // Selection criteria (runner facing LEFT, _icIsMin=true, d=lAnkX-hipMidX):
+              //   IC:          d < -0.15 (ankle fwd), k > 130° (near-extended)
+              //   Loading:     |d| < 0.20 (near hip), k 100-155°, ankle y > 0.78 (on ground)
+              //   MidStance:   |d| < 0.15 (ankle under hip), k > 110°, y > 0.78 (ON GROUND)
+              //   Propulsion:  d > 0.10 (ankle behind), k > 120°, hip extension near max
+              //   Toe Off:     maximum hip extension angle (reliably detected)
+              //   EarlySwing:  k 70-130°, d > -0.15, y < 0.88 (ankle leaving ground)
+              //   MidSwing:    MINIMUM knee angle = peak flexion (most reliable signal)
+              //   LateSwing:   d < -0.05 (ankle fwd), k 120-165°, y < 0.88 (in air)
+              try {
+                const _vizFracs = {};
+                const _usedVizIdx = new Set();
+                const _signD = (f) => _icIsMin
+                  ? (f[_refAnkKey] - f.hipMidX)
+                  : -(f[_refAnkKey] - f.hipMidX);
+
+                // Phase scorers: returns score >= 0 if frame is a candidate, -1 if not
+                const _vizScorers = {
+                  'contact':    (d,k,y,h) => (d < -0.15 && k > 130) ? (-d*2 + (k-130)*0.008) : -1,
+                  'loading':    (d,k,y,h) => (d > -0.22 && d < 0.08 && k > 100 && k < 158 && y > 0.78) ? (1 - Math.abs(d + 0.05)) : -1,
+                  'midstance':  (d,k,y,h) => (Math.abs(d) < 0.15 && k > 110 && k < 165 && y > 0.78) ? (1.5 - Math.abs(d)) : -1,
+                  'propulsion': (d,k,y,h) => (d > 0.10 && k > 120 && y > 0.75) ? (d*2 + (k-120)*0.005) : -1,
+                  'toeoff':     (d,k,y,h) => (h > 8 && d > 0.05) ? (h*2 + d) : -1,
+                  'earlyswing': (d,k,y,h) => (k > 70 && k < 132 && d > -0.18 && y < 0.88) ? ((132-k)*0.4 + Math.max(0,d)*1.5) : -1,
+                  'midswing':   (d,k,y,h) => (k < 115) ? (160 - k) : -1,  // minimum k = peak flex
+                  'lateswing':  (d,k,y,h) => (d < -0.05 && k > 118 && k < 165 && y < 0.88) ? (-d*2 + (k-118)*0.008) : -1,
+                };
+                const _vizPhaseOrder = ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'];
+                // Process high-confidence phases first (midswing, toeoff) to claim best frames
+                _vizPhaseOrder.forEach(phId => {
+                  let best = -Infinity, bestT = null, bestI = -1;
+                  const scorer = _vizScorers[phId];
+                  perFrame.forEach((f, fi) => {
+                    if(!f || _usedVizIdx.has(fi)) return;
+                    const d = _signD(f);
+                    const k = f[_refKneeKey];
+                    const y = f.lAnkY ?? f.rAnkY ?? 0.82;
+                    const h = f.lHip ?? 0;
+                    if(d == null || k == null) return;
+                    const s = scorer(d, k, y, h);
+                    if(s > best) { best = s; bestT = f.t; bestI = fi; }
+                  });
+                  if(bestI >= 0 && best >= 0) {
+                    _vizFracs[phId] = bestT;
+                    _usedVizIdx.add(bestI);
+                  }
+                });
+
+                // Build vizFractions array aligned to label order
+                const _sel = window_primaryPhaseSelection;
+                if(_sel && Object.keys(_vizFracs).length >= 4) {
+                  _sel.vizFractions = _sel.labels.map((lbl, i) => {
+                    const phId = lbl?._baseId;
+                    return (_vizFracs[phId] != null) ? _vizFracs[phId] : _sel.fractions[i];
+                  });
+                  console.log('[GaitFSM] Visual frame select: ' +
+                    ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing']
+                    .map(p => p.slice(0,4)+'='+((_vizFracs[p]??0)*100).toFixed(0)+'%').join(' '));
+                }
+              } catch(_vizErr) {
+                console.warn('[GaitFSM] Visual frame selection failed:', _vizErr.message);
+              }
+
               const _strideDurMs = window_strideMetrics?.strideDurationS ? (window_strideMetrics.strideDurationS*1000).toFixed(0) : '?';
               console.log('[GaitFSM v4] Anchor: ' + _anchorMethod + ' | strideDur=' + _strideDurMs + 'ms');
               console.log('[GaitFSM v4] Phase fractions: ' + window_primaryPhaseSelection.fractions.map(x=>x.toFixed(3)).join(', '));
@@ -2722,11 +2794,12 @@ function startFrameExtraction(file, vid) {
                 '→ refined knee@IC:', perFrame[_zIcIdx ?? _icIdx]?.[_refKneeKey]?.toFixed(0)+'°');
               if(window_primaryPhaseSelection) {
                 const _phLabels = window_primaryPhaseSelection.labels.map(p=>p?.label||p?._baseId||'?');
-                const _phFracs  = window_primaryPhaseSelection.fractions;
+                const _phFracs  = window_primaryPhaseSelection.vizFractions || window_primaryPhaseSelection.fractions;
+                const _usingViz = !!window_primaryPhaseSelection.vizFractions;
                 _phLabels.forEach((lbl,i) => {
                   const frac = _phFracs[i];
                   const tSec = frac * (window_strideMetrics?.videoDurationS || 0);
-                  console.log(`  Frame ${i+1} [${lbl}]: frac=${frac?.toFixed(3)} t=${tSec?.toFixed(2)}s`);
+                  console.log(`  Frame ${i+1} [${lbl}]: frac=${frac?.toFixed(3)} t=${tSec?.toFixed(2)}s${_usingViz?' (visual-select)':''}`);
                 });
               }
               console.groupEnd();
@@ -3198,28 +3271,135 @@ async function startFrameExtraction2(file, vid) {
     let times, phaseLabels;
 
     if(primarySel && primarySel.fractions.length > 0) {
-      // ── Secondary video time synchronization ─────────────────────────────
-      // Problem: applying the same FRACTIONS to a different-duration video gives
-      // wrong absolute times. E.g. fraction 0.370 × 14.1s = 5.22s (primary IC)
-      // but 0.370 × 9.0s = 3.33s (a completely different gait phase).
-      //
-      // Fix: convert primary fractions → primary absolute times → secondary fractions.
-      // This works when both videos start at the same moment (simultaneous recording).
-      // The primary video duration is obtained from the primary video element.
+      // Use vizFractions for DISPLAY if available (data-driven visual best match per phase)
+      // Fall back to measurement fractions if vizFractions wasn't computed
+      const _displayFracs = primarySel.vizFractions || primarySel.fractions;
+      // ── Option 2: Independent secondary phase detection ─────────────────────
+      // When primary and secondary videos have different durations they were NOT
+      // recorded simultaneously. Applying primary timestamps to secondary gives
+      // completely wrong frames. Instead, scan the secondary video independently
+      // to find its own best-matching frame for each phase.
       const _primVidDur = window._primaryVidEl?.duration;
-      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5) {
-        // Videos have meaningfully different durations — use absolute time conversion
-        times = primarySel.fractions.map(frac => {
-          const absTime = frac * _primVidDur;        // primary absolute time
-          const secFrac = absTime / dur;             // fraction in secondary video
-          return Math.max(0.05, Math.min(dur - 0.05, secFrac * dur)); // clamp to valid range
+      const _isGaitMvt = /running|gait|walk/i.test(movement);
+      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5 && _isGaitMvt) {
+        // Independent secondary analysis — find the best frame for each phase
+        // by scanning 32 uniformly-spaced frames and scoring biomechanically.
+        console.log(`[FrameExtract2] Option 2: independent secondary phase detection (${dur.toFixed(1)}s clip)`);
+        statusText.textContent = 'Scanning secondary video for phase frames...';
+        try {
+          const _N2 = 32; // frames to scan
+          const _pf2 = []; // perFrame for secondary
+          for(let _fi = 0; _fi < _N2; _fi++) {
+            const _t2 = (_fi / (_N2 - 1)) * dur;
+            const _b2 = await seekCapture2(vid, Math.max(0.05, _t2));
+            if(!_b2) continue;
+            // Extract pose from this frame using poseLandmarkerInstance (already initialized)
+            let _lm2 = null;
+            try {
+              const _img2 = new Image();
+              await new Promise((res, rej) => {
+                _img2.onload = res; _img2.onerror = rej;
+                _img2.src = 'data:image/jpeg;base64,' + _b2;
+              });
+              if(poseLandmarkerInstance?.detect) {
+                const _det2 = poseLandmarkerInstance.detect(_img2);
+                _lm2 = _det2?.landmarks?.[0] ?? _det2?.poseLandmarks ?? null;
+              }
+            } catch(_e2) { /* frame failed, skip */ }
+            if(!_lm2 || _lm2.length < 29) continue;
+            // Extract needed values from landmarks
+            // MP landmark indices: 23=L hip, 24=R hip, 25=L knee, 26=R knee, 27=L ankle, 28=R ankle
+            const _lh2 = _lm2[23], _rh2 = _lm2[24];
+            const _lk2 = _lm2[25], _rk2 = _lm2[26];
+            const _la2 = _lm2[27], _ra2 = _lm2[28];
+            if(!_lh2 || !_lk2 || !_la2) continue;
+            const _hipMidX2 = (_lh2.x + _rh2.x) / 2;
+            const _hipMidY2 = (_lh2.y + _rh2.y) / 2;
+            // Left ankle displacement (sagittal — works for side view; in posterior give lateral info)
+            const _d2 = _la2.x - _hipMidX2;
+            // Knee included angle
+            const _kA2 = calcAngle(
+              {x: _lh2.x * 1000, y: _lh2.y * 1000},
+              {x: _lk2.x * 1000, y: _lk2.y * 1000},
+              {x: _la2.x * 1000, y: _la2.y * 1000}
+            ) ?? 140;
+            // Hip extension proxy (vertical thigh angle from vertical)
+            const _hipExt2 = Math.abs(_lk2.y - _lh2.y) > 0.01
+              ? Math.atan2(Math.abs(_lk2.x - _lh2.x), Math.abs(_lk2.y - _lh2.y)) * 180 / Math.PI
+              : 0;
+            _pf2.push({
+              t: _t2 / dur,  // fraction
+              d: _d2,
+              k: _kA2,
+              y: _la2.y,     // ankle y (higher = closer to ground)
+              h: _hipExt2,
+              vis: _la2.visibility ?? 1
+            });
+          }
+          // Run visual scoring on secondary perFrame
+          if(_pf2.length >= 6) {
+            const _vizFracs2 = {};
+            const _used2 = new Set();
+            // Same scorers as primary visual selection
+            const _scorers2 = {
+              'contact':    (d,k,y,h) => (d < -0.08 && k > 125 && y > 0.70) ? (-d*2 + (k-125)*0.008) : -1,
+              'loading':    (d,k,y,h) => (d > -0.22 && d < 0.12 && k > 100 && k < 160 && y > 0.75) ? (1 - Math.abs(d+0.05)) : -1,
+              'midstance':  (d,k,y,h) => (Math.abs(d) < 0.18 && k > 108 && k < 165 && y > 0.75) ? (1.5 - Math.abs(d)) : -1,
+              'propulsion': (d,k,y,h) => (d > 0.08 && k > 118 && y > 0.70) ? (d*2 + (k-118)*0.005) : -1,
+              'toeoff':     (d,k,y,h) => (h > 6 && d > 0.04 && y > 0.65) ? (h*2 + d) : -1,
+              'earlyswing': (d,k,y,h) => (k > 68 && k < 135 && d > -0.18 && y < 0.90) ? ((135-k)*0.4) : -1,
+              'midswing':   (d,k,y,h) => (k < 118) ? (160 - k) : -1,
+              'lateswing':  (d,k,y,h) => (d < -0.04 && k > 115 && k < 168 && y < 0.90) ? (-d*2 + (k-115)*0.008) : -1,
+            };
+            // Process high-confidence phases first (midswing, toeoff, contact)
+            ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'].forEach(phId => {
+              let best = -Infinity, bestT = null, bestI = -1;
+              const sc = _scorers2[phId];
+              _pf2.forEach((f, fi) => {
+                if(_used2.has(fi)) return;
+                const s = sc(f.d, f.k, f.y, f.h);
+                if(s > best) { best = s; bestT = f.t; bestI = fi; }
+              });
+              if(bestI >= 0 && best >= 0) { _vizFracs2[phId] = bestT; _used2.add(bestI); }
+            });
+            // Build times array using secondary vizFracs (fall back to primary conversion)
+            times = primarySel.labels.map((lbl, i) => {
+              const phId = lbl?._baseId;
+              const secFrac = _vizFracs2[phId];
+              if(secFrac != null) return Math.max(0.05, Math.min(dur - 0.05, secFrac * dur));
+              // Fallback: absolute time from primary
+              const absTime = (_displayFracs[i] ?? 0) * (_primVidDur || dur);
+              return Math.max(0.05, Math.min(dur - 0.05, absTime));
+            });
+            console.log(`[FrameExtract2] Secondary visual select: ` +
+              Object.entries(_vizFracs2).map(([k,v]) => k.slice(0,4)+'='+(v*100).toFixed(0)+'%').join(' '));
+          } else {
+            // Not enough frames detected — fall back to absolute time conversion
+            times = _displayFracs.map(frac => {
+              const absTime = frac * _primVidDur;
+              return Math.max(0.05, Math.min(dur - 0.05, absTime));
+            });
+            console.log('[FrameExtract2] Secondary scan insufficient — using absolute time conversion');
+          }
+        } catch(_secErr) {
+          console.warn('[FrameExtract2] Secondary phase detection failed:', _secErr.message);
+          // Fallback to absolute time conversion
+          times = _displayFracs.map(frac => {
+            const absTime = frac * (_primVidDur || dur);
+            return Math.max(0.05, Math.min(dur - 0.05, absTime));
+          });
+        }
+      } else if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5) {
+        // Non-gait movement with duration mismatch — absolute time conversion
+        times = _displayFracs.map(frac => {
+          const absTime = frac * _primVidDur;
+          return Math.max(0.05, Math.min(dur - 0.05, absTime));
         });
         console.log(`[FrameExtract2] Duration mismatch: primary=${_primVidDur.toFixed(1)}s, secondary=${dur.toFixed(1)}s — converting to absolute times`);
-        console.log(`[FrameExtract2] Adjusted secondary times: ${times.map(t=>t.toFixed(2)+'s').join(', ')}`);
       } else {
         // Same (or similar) duration — fractions apply directly
-        times = primarySel.fractions.map(frac => Math.max(0.05, frac * dur));
-        console.log(`[FrameExtract2] Using primary phase fractions: ${primarySel.fractions.map(x=>x.toFixed(2)).join(', ')}`);
+        times = _displayFracs.map(frac => Math.max(0.05, frac * dur));
+        console.log(`[FrameExtract2] Same-duration — using ${primarySel.vizFractions ? 'visual-select' : 'phase'} fractions`);
       }
       phaseLabels = primarySel.labels;
       statusText.textContent = `Extracting ${times.length} phase-aligned frames...`;
@@ -6774,14 +6954,14 @@ const PHASE_MAPS = {
     {id:'lateswing', label:'Late Swing',    time:0.92,  desc:'Deceleration, foot descent'},
   ],
   'Running': [
-    {id:'contact',   label:'Initial Contact', time:0.04,  desc:'Foot strike — loading begins'},
-    {id:'loading',   label:'Loading Response',time:0.12,  desc:'Absorbing impact, knee flexing'},
-    {id:'midstance', label:'Mid Stance',       time:0.22,  desc:'Single limb support, peak load'},
-    {id:'propulsion',label:'Propulsion',       time:0.36,  desc:'Push-off, ankle plantarflexion'},
-    {id:'toeoff',    label:'Toe Off',          time:0.50,  desc:'Terminal stance, toe leaves ground'},
-    {id:'earlyswing',label:'Early Swing',      time:0.62,  desc:'Hip flexion accelerating'},
-    {id:'midswing',  label:'Mid Swing',        time:0.75,  desc:'Max hip flexion, knee extending'},
-    {id:'lateswing', label:'Late Swing',       time:0.90,  desc:'Foot descent, preparing contact'},
+    {id:'contact',   label:'Initial Contact', time:0.04,  desc:'0% stride — foot strike, braking phase begins'},
+    {id:'loading',   label:'Loading Response',time:0.15,  desc:'~7% stride — foot flat, impact absorbed'},
+    {id:'midstance', label:'Mid Stance',       time:0.25,  desc:'~20% stride — ankle under hip, single limb support'},
+    {id:'propulsion',label:'Propulsion',       time:0.38,  desc:'~35% stride — heel rise, ankle push-off'},
+    {id:'toeoff',    label:'Toe Off',          time:0.50,  desc:'~41% stride — terminal stance, foot leaves ground'},
+    {id:'earlyswing',label:'Early Swing',      time:0.62,  desc:'~55% stride — limb clearance, hip flexing'},
+    {id:'midswing',  label:'Mid Swing',        time:0.76,  desc:'~75% stride — peak knee flexion'},
+    {id:'lateswing', label:'Late Swing',       time:0.92,  desc:'~90% stride — knee extending, foot descending'},
   ],
   'Sit to Stand': [
     {id:'setup',    label:'Seated',    time:0.05, desc:'Starting position'},
@@ -10449,14 +10629,20 @@ async function runAnalysis() {
         // fired) AND gallery avg is higher than dense avg (gallery sees true peak).
         const mpAvg    = (lVal + rVal) / 2;
         const denseAvg = (denseLVal + denseRVal) / 2;
-        const mpDiffers = Math.abs(lVal - rVal) >= 3;       // bilateral asymmetry confirms 3D fired
-        const mpHigher  = mpAvg > denseAvg + 2;             // gallery shows MORE hip flex than dense
-        if(mpDiffers && mpHigher) {
+        const mpDiffers = Math.abs(lVal - rVal) >= 3;
+        // Gallery wins when:
+        // 1. mpDiffers: bilateral asymmetry ≥3° confirms 3D worldLandmarks fired
+        // 2. Both gallery values within clinical reference range (35-70°)
+        //    — blocks bad-frame case (28°/24° at IC) since 28<35
+        //    — allows 49°/53° to win over 56°/56° with correct Zeni timing
+        const mpInRange = lVal >= 35 && lVal <= 70 && rVal >= 35 && rVal <= 70;
+        const mpHigher  = mpAvg > denseAvg + 2; // kept for logging
+        if(mpDiffers && mpInRange) {
           aggregated['Left Hip Flexion']  = mpL;
           aggregated['Right Hip Flexion'] = mpR;
-          console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° vs dense L=${denseLVal}° R=${denseRVal}° — gallery higher ✓`);
+          console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° vs dense L=${denseLVal}° R=${denseRVal}° — bilateral 3D confirmed, in range ✓`);
         } else {
-          console.log(`[Analysis] Hip flex: keeping dense L=${denseLVal}° R=${denseRVal}° (gallery L=${lVal}° R=${rVal}°${mpDiffers?', 3D fired':''}, ${mpHigher?'gallery higher':'gallery NOT higher — dense wins'})`);
+          console.log(`[Analysis] Hip flex: keeping dense L=${denseLVal}° R=${denseRVal}° (gallery L=${lVal}° R=${rVal}°${mpDiffers?', 3D fired':''}${!mpInRange?' — out of range':' — no bilateral diff'})`);
         }
       }
 
@@ -10609,12 +10795,13 @@ async function runAnalysis() {
       const _p3aDur = isFinite(_p3aVid.duration) && _p3aVid.duration > 0 ? _p3aVid.duration : null;
       if(_p3aDur) {
         const _phSel = window_primaryPhaseSelection;
+        const _phDisplayFracs = _phSel.vizFractions || _phSel.fractions;
         const _newFrames = [];
         console.group('[Stage 3a] Seeking primary gallery at phase-aligned times (vidDur=' + _p3aDur.toFixed(2) + 's)');
-        for(let _i = 0; _i < _phSel.fractions.length; _i++) {
-          const _t = Math.max(0.05, Math.min(_phSel.fractions[_i] * _p3aDur, _p3aDur - 0.05));
+        for(let _i = 0; _i < _phDisplayFracs.length; _i++) {
+          const _t = Math.max(0.05, Math.min(_phDisplayFracs[_i] * _p3aDur, _p3aDur - 0.05));
           const _lbl = _phSel.labels[_i]?.label || _phSel.labels[_i]?._baseId || '?';
-          console.log(`  Frame ${_i+1} [${_lbl}]: frac=${_phSel.fractions[_i].toFixed(3)} → t=${_t.toFixed(3)}s`);
+          console.log(`  Frame ${_i+1} [${_lbl}]: frac=${_phDisplayFracs[_i].toFixed(3)} → t=${_t.toFixed(3)}s`);
           const _b64 = await seekCapture(_p3aVid, _t);
           if(_b64) _newFrames.push({imageData: _b64, phase: _phSel.labels[_i]});
         }
@@ -13066,7 +13253,11 @@ async function exportPDF() {
         sm.shoe ? `Shoe: ${sm.shoe}` : null,
         sm.heightCm ? `Height: ${Math.round(sm.heightCm)}cm` : null,
       ].filter(Boolean);
-      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '');
+      const _isTreadmill = (sm?.surface || '').toLowerCase().includes('treadmill');
+      const _treadmillNote = _isTreadmill && /running|gait/i.test(movement)
+        ? ' Gallery phases use biomechanical timing (Zeni 2008 / Perry & Burnfield). Treadmill belt movement makes stance phases appear more compressed than overground — focus on the dense-pass measurements, not static gallery frame appearance.'
+        : '';
+      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '') + _treadmillNote;
       doc.text(disclaimerText, ML+3, y+7, {maxWidth:CW-6});
       y += 13;
     }
