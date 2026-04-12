@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.6 · 2026.04.11</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.7 · 2026.04.11</p>
     </div>
 
     <div class="two-col">
@@ -10670,24 +10670,26 @@ async function runAnalysis() {
         // low value (e.g. 28° at initial contact instead of true peak swing), and
         // the dense 128-frame aggregate is more reliable.
         //
-        // Use gallery if: gallery values are BILATERAL (differ ≥3°, confirming 3D
-        // fired) AND gallery avg is higher than dense avg (gallery sees true peak).
+        // Use gallery if EITHER:
+        //   A) mpDiffers: bilateral asymmetry ≥2° (gallery sees real L/R difference)
+        //   B) mpLower: gallery avg ≥3° lower than dense avg (gallery is finding the
+        //      true peak swing frame; dense may over-measure by including stance frames)
+        // AND both gallery values are within clinical reference range (35-70°)
+        //   — blocks bad-frame case (28°/24° at IC) since 28<35
+        //   — allows 51°/53° to win over 56°/56° with correct Zeni timing
         const mpAvg    = (lVal + rVal) / 2;
         const denseAvg = (denseLVal + denseRVal) / 2;
-        const mpDiffers = Math.abs(lVal - rVal) >= 3;
-        // Gallery wins when:
-        // 1. mpDiffers: bilateral asymmetry ≥3° confirms 3D worldLandmarks fired
-        // 2. Both gallery values within clinical reference range (35-70°)
-        //    — blocks bad-frame case (28°/24° at IC) since 28<35
-        //    — allows 49°/53° to win over 56°/56° with correct Zeni timing
+        const mpDiffers = Math.abs(lVal - rVal) >= 2;           // was 3 — catches 2° bilateral diff
+        const mpLower   = denseAvg - mpAvg >= 3;                // gallery meaningfully lower than dense
         const mpInRange = lVal >= 35 && lVal <= 70 && rVal >= 35 && rVal <= 70;
-        const mpHigher  = mpAvg > denseAvg + 2; // kept for logging
-        if(mpDiffers && mpInRange) {
+        if((mpDiffers || mpLower) && mpInRange) {
           aggregated['Left Hip Flexion']  = mpL;
           aggregated['Right Hip Flexion'] = mpR;
-          console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° vs dense L=${denseLVal}° R=${denseRVal}° — bilateral 3D confirmed, in range ✓`);
+          const reason = mpDiffers ? `bilateral diff ${Math.abs(lVal-rVal)}°` : `gallery ${mpAvg.toFixed(0)}° < dense ${denseAvg.toFixed(0)}° by ${(denseAvg-mpAvg).toFixed(0)}°`;
+          console.log(`[Analysis] Hip flex override: MP gallery L=${lVal}° R=${rVal}° (${reason}) — in range ✓`);
         } else {
-          console.log(`[Analysis] Hip flex: keeping dense L=${denseLVal}° R=${denseRVal}° (gallery L=${lVal}° R=${rVal}°${mpDiffers?', 3D fired':''}${!mpInRange?' — out of range':' — no bilateral diff'})`);
+          const why = !mpInRange ? 'out of range' : (!mpDiffers && !mpLower) ? 'no bilateral diff + gallery not lower' : '';
+          console.log(`[Analysis] Hip flex: keeping dense L=${denseLVal}° R=${denseRVal}° (gallery L=${lVal}° R=${rVal}° — ${why})`);
         }
       }
 
