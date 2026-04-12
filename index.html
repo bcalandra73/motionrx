@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.4 · 2026.04.11</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.5 · 2026.04.11</p>
     </div>
 
     <div class="two-col">
@@ -2743,7 +2743,12 @@ function startFrameExtraction(file, vid) {
                   // AND require the frame to be in a reasonable portion of the clip (not the very start/end)
                   // to prevent late swing from claiming t=0.53s near the clip beginning.
                   'earlyswing': (d,k,y,h,t) => (k > 70 && k < 132 && d > -0.18 && y < 0.88 && t > 0.10 && t < 0.90) ? ((132-k)*0.4 + Math.max(0,d)*1.5) : -1,
-                  'midswing':   (d,k,y,h,t) => (k < 115 && t > 0.10 && t < 0.95) ? (160 - k) : -1,
+                  // MidSwing: peak knee flexion frame. Require:
+                  //   k < 120  — knee sufficiently flexed (peak is 115°L/123°R; +5° headroom for MoveNet noise)
+                  //   y < 0.87 — ankle MUST be off the ground (blocks leg-swap frames where left knee
+                  //              tracks swinging right leg but left ankle is still planted, giving false
+                  //              high-flexion k values that produce 28°/24° gallery hip flex readings)
+                  'midswing':   (d,k,y,h,t) => (k < 120 && y < 0.87 && t > 0.10 && t < 0.95) ? (160 - k) : -1,
                   'lateswing':  (d,k,y,h,t) => (d < -0.05 && k > 118 && k < 165 && y < 0.88 && t > 0.25 && t < 0.98) ? (-d*2 + (k-118)*0.008) : -1,
                 };
                 const _vizPhaseOrder = ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'];
@@ -3315,8 +3320,16 @@ async function startFrameExtraction2(file, vid) {
                 _img2.src = 'data:image/jpeg;base64,' + _b2;
               });
               if(poseLandmarkerInstance?.detect) {
-                const _det2 = poseLandmarkerInstance.detect(_img2);
-                _lm2 = _det2?.landmarks?.[0] ?? _det2?.poseLandmarks ?? null;
+                // Draw to canvas before calling detect() — HTMLImageElement is unreliable
+                // with MediaPipe Tasks Vision; canvas is the consistently supported input type.
+                const _cvs2 = document.createElement('canvas');
+                _cvs2.width  = _img2.naturalWidth  || 640;
+                _cvs2.height = _img2.naturalHeight || 480;
+                _cvs2.getContext('2d').drawImage(_img2, 0, 0);
+                const _det2 = poseLandmarkerInstance.detect(_cvs2);
+                _lm2 = _det2?.landmarks?.[0] ?? null;
+                if(_lm2) console.log(`[FrameExtract2] Option 2 detect OK at t=${(_t2/dur).toFixed(2)} — ${_lm2.length} landmarks`);
+                else      console.warn(`[FrameExtract2] Option 2 detect returned no pose at t=${(_t2/dur).toFixed(2)}`);
               }
             } catch(_e2) { /* frame failed, skip */ }
             if(!_lm2 || _lm2.length < 29) continue;
@@ -3361,7 +3374,8 @@ async function startFrameExtraction2(file, vid) {
               'propulsion': (d,k,y,h) => (d > 0.08 && k > 118 && y > 0.70) ? (d*2 + (k-118)*0.005) : -1,
               'toeoff':     (d,k,y,h) => (h > 6 && d > 0.04 && y > 0.65) ? (h*2 + d) : -1,
               'earlyswing': (d,k,y,h) => (k > 68 && k < 135 && d > -0.18 && y < 0.90) ? ((135-k)*0.4) : -1,
-              'midswing':   (d,k,y,h) => (k < 118) ? (160 - k) : -1,
+              // Same mid-swing fix as primary: require ankle off ground to block leg-swap frames
+              'midswing':   (d,k,y,h) => (k < 120 && y < 0.87) ? (160 - k) : -1,
               'lateswing':  (d,k,y,h) => (d < -0.04 && k > 115 && k < 168 && y < 0.90) ? (-d*2 + (k-115)*0.008) : -1,
             };
             // Process high-confidence phases first (midswing, toeoff, contact)
