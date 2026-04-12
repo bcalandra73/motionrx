@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.8 · 2026.04.11</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.9 · 2026.04.11</p>
     </div>
 
     <div class="two-col">
@@ -2789,15 +2789,23 @@ function startFrameExtraction(file, vid) {
 
                 // Build vizFractions array aligned to label order
                 const _sel = window_primaryPhaseSelection;
-                if(_sel && Object.keys(_vizFracs).length >= 4) {
+                // For Zeni-anchored running gait, skip visual-select override and use
+                // Zeni fractions directly for gallery display.
+                // Reason: within the tight stride window (~15 frames), all phases score
+                // similarly (37-45%), so the priority scorer assigns frames in arbitrary
+                // order rather than by timing. Zeni fractions are timing-accurate.
+                // Visual-select is kept for LR-offset fallback (non-running movements).
+                const _skipVizSelect = (_anchorMethod === 'Zeni2008 (IC+TO displacement)');
+                if(!_skipVizSelect && _sel && Object.keys(_vizFracs).length >= 4) {
                   _sel.vizFractions = _sel.labels.map((lbl, i) => {
                     const phId = lbl?._baseId;
                     return (_vizFracs[phId] != null) ? _vizFracs[phId] : _sel.fractions[i];
                   });
-                  console.log('[GaitFSM] Visual frame select: ' +
-                    ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing']
-                    .map(p => p.slice(0,4)+'='+((_vizFracs[p]??0)*100).toFixed(0)+'%').join(' '));
                 }
+                console.log('[GaitFSM] Visual frame select: ' +
+                  ['contact','loading','midstance','propulsion','toeoff','earlyswing','midswing','lateswing']
+                  .map(p => p.slice(0,4)+'='+((_vizFracs[p]??0)*100).toFixed(0)+'%').join(' ') +
+                  (_skipVizSelect ? ' — SUPPRESSED (Zeni direct)' : ''));
               } catch(_vizErr) {
                 console.warn('[GaitFSM] Visual frame selection failed:', _vizErr.message);
               }
