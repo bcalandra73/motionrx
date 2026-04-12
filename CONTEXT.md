@@ -4,7 +4,7 @@
 Single-file HTML clinical motion analysis app.
 - **File:** `index.html`
 - **Deployed:** `bcalandra73.github.io/motionrx/`
-- **Current version:** v0.9.5 (2026.04.11)
+- **Current version:** v0.9.6 (2026.04.11)
 - **GitHub repo:** `bcalandra73/motionrx`
 
 ## Stack
@@ -90,11 +90,16 @@ Gallery (MP-Heavy 3D worldLandmarks) overrides dense (MoveNet 2D) when:
 2. **Secondary Option 2** — ~~detect() returning empty~~ **FIXED v0.9.5**: HTMLImageElement → canvas before detect()
    - Added per-frame console logging: `[FrameExtract2] Option 2 detect OK at t=X.XX — 33 landmarks`
    - Falls back to absolute timestamp conversion when scan fails
-3. **Hip flex 49°/53° vs 56°/56°** — **PARTIALLY FIXED v0.9.5**: MidSwing scorer ankle-height guard added
+3. **Hip flex 49°/53° vs 56°/56°** — **PARTIALLY FIXED v0.9.6**: Tightened midswing y<0.80
    - Root cause: leg-swap frames have left knee tracking swinging right leg (high flexion) while left ankle is planted on ground (high y), producing 28°/24° gallery hip flex → fails 35° floor → dense wins
-   - Fix: `midswing` scorer now requires `y < 0.87` (ankle off ground) + relaxed `k < 115` → `k < 120`
-   - Needs test run to confirm 49°/53° override now fires correctly
+   - v0.9.5 fix (y<0.87) was too lenient — planted ankle at y=0.859 still passed
+   - v0.9.6 fix: `midswing` scorer now `k < 120 && y < 0.80` — true mid-swing ankle y≈0.60-0.75
+   - Needs test run to confirm `[Analysis] Hip flex override: MP gallery L=49° R=53°` appears in console
 4. **catmullRomSpline duplicate declaration** — benign syntax warning, doesn't affect runtime
+
+## v0.9.6 Fixes (2026.04.11 — do not reintroduce)
+- **Tighter primary midswing y-guard**: `y < 0.87` → `y < 0.80` (line ~2751). April 11 test showed planted ankle at y=0.859 was still passing the 0.87 threshold. True mid-swing ankle should be y≈0.60-0.75. This tighter threshold blocks the leg-swap false-positive where the left ankle is near the ground.
+- **Posterior-view-compatible secondary scorers** (line ~3367): Replaced all k/d-based conditions in `_scorers2` with y-based ankle height scoring. In posterior view, 2D knee angle always reads ~165-180° (frontal plane geometry), so k<120 never fires → all phases returned -1. New scorers use only `y` (ankle height) with different thresholds per phase: stance phases require y>0.73-0.80, swing phases require y<0.80-0.84.
 
 ## v0.9.5 Fixes (2026.04.11 — do not reintroduce)
 - **Option 2 canvas fix**: `new Image()` → draw to `<canvas>` before `detect()` call in FrameExtract2 secondary scan loop (line ~3325). HTMLImageElement is inconsistent with MediaPipe Tasks Vision; canvas is reliable.

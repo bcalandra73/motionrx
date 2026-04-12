@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.5 · 2026.04.11</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.6 · 2026.04.11</p>
     </div>
 
     <div class="two-col">
@@ -2745,10 +2745,12 @@ function startFrameExtraction(file, vid) {
                   'earlyswing': (d,k,y,h,t) => (k > 70 && k < 132 && d > -0.18 && y < 0.88 && t > 0.10 && t < 0.90) ? ((132-k)*0.4 + Math.max(0,d)*1.5) : -1,
                   // MidSwing: peak knee flexion frame. Require:
                   //   k < 120  — knee sufficiently flexed (peak is 115°L/123°R; +5° headroom for MoveNet noise)
-                  //   y < 0.87 — ankle MUST be off the ground (blocks leg-swap frames where left knee
-                  //              tracks swinging right leg but left ankle is still planted, giving false
-                  //              high-flexion k values that produce 28°/24° gallery hip flex readings)
-                  'midswing':   (d,k,y,h,t) => (k < 120 && y < 0.87 && t > 0.10 && t < 0.95) ? (160 - k) : -1,
+                  //   y < 0.80 — ankle CLEARLY off the ground. 0.87 was too lenient: TapeRefine confirmed
+                  //              selected frame had ankle at y=0.859 (barely off ground, not true swing).
+                  //              Leg-swap false positive: left knee tracks swinging right leg (k<120 ✓)
+                  //              while left ankle tracks planted left leg (y=0.859, passed 0.87, fails 0.80).
+                  //              True mid-swing ankle is at y≈0.60-0.75 — well inside this threshold.
+                  'midswing':   (d,k,y,h,t) => (k < 120 && y < 0.80 && t > 0.10 && t < 0.95) ? (160 - k) : -1,
                   'lateswing':  (d,k,y,h,t) => (d < -0.05 && k > 118 && k < 165 && y < 0.88 && t > 0.25 && t < 0.98) ? (-d*2 + (k-118)*0.008) : -1,
                 };
                 const _vizPhaseOrder = ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'];
@@ -3366,17 +3368,24 @@ async function startFrameExtraction2(file, vid) {
           if(_pf2.length >= 6) {
             const _vizFracs2 = {};
             const _used2 = new Set();
-            // Same scorers as primary visual selection
+            // Secondary video is POSTERIOR view. The 2D knee angle (k) represents frontal-plane
+            // geometry — in posterior view k is always ~165-180° (leg looks straight) so k-based
+            // scorers always return -1. Use ankle height (y) as the primary phase signal instead.
+            // d = lateral ankle displacement in posterior view (not useful for stride phase detection).
             const _scorers2 = {
-              'contact':    (d,k,y,h) => (d < -0.08 && k > 125 && y > 0.70) ? (-d*2 + (k-125)*0.008) : -1,
-              'loading':    (d,k,y,h) => (d > -0.22 && d < 0.12 && k > 100 && k < 160 && y > 0.75) ? (1 - Math.abs(d+0.05)) : -1,
-              'midstance':  (d,k,y,h) => (Math.abs(d) < 0.18 && k > 108 && k < 165 && y > 0.75) ? (1.5 - Math.abs(d)) : -1,
-              'propulsion': (d,k,y,h) => (d > 0.08 && k > 118 && y > 0.70) ? (d*2 + (k-118)*0.005) : -1,
-              'toeoff':     (d,k,y,h) => (h > 6 && d > 0.04 && y > 0.65) ? (h*2 + d) : -1,
-              'earlyswing': (d,k,y,h) => (k > 68 && k < 135 && d > -0.18 && y < 0.90) ? ((135-k)*0.4) : -1,
-              // Same mid-swing fix as primary: require ankle off ground to block leg-swap frames
-              'midswing':   (d,k,y,h) => (k < 120 && y < 0.87) ? (160 - k) : -1,
-              'lateswing':  (d,k,y,h) => (d < -0.04 && k > 115 && k < 168 && y < 0.90) ? (-d*2 + (k-115)*0.008) : -1,
+              // Stance phases: ankle near ground (y > threshold). Different multipliers
+              // mean each stance phase prefers a different ankle height, spreading selections.
+              'contact':    (d,k,y,h) => (y > 0.80) ? (y * 1.8) : -1,
+              'loading':    (d,k,y,h) => (y > 0.79) ? (y * 1.6) : -1,
+              'midstance':  (d,k,y,h) => (y > 0.78) ? (y * 1.4) : -1,
+              'propulsion': (d,k,y,h) => (y > 0.73) ? (y * 1.2) : -1,
+              // Toe-off: ankle transitioning from ground to air
+              'toeoff':     (d,k,y,h) => (y > 0.68 && y < 0.85) ? (y * 2.0) : -1,
+              // Swing phases: ankle clearly elevated (y < threshold). Different multipliers
+              // spread earlyswing / midswing / lateswing to different elevation bands.
+              'earlyswing': (d,k,y,h) => (y < 0.84) ? ((0.84 - y) * 80) : -1,
+              'midswing':   (d,k,y,h) => (y < 0.80) ? ((0.80 - y) * 200) : -1,
+              'lateswing':  (d,k,y,h) => (y < 0.84) ? ((0.84 - y) * 60) : -1,
             };
             // Process high-confidence phases first (midswing, toeoff, contact)
             ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'].forEach(phId => {
