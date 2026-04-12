@@ -4,7 +4,7 @@
 Single-file HTML clinical motion analysis app.
 - **File:** `index.html`
 - **Deployed:** `bcalandra73.github.io/motionrx/`
-- **Current version:** v0.9.6 (2026.04.11)
+- **Current version:** v0.9.8 (2026.04.11)
 - **GitHub repo:** `bcalandra73/motionrx`
 
 ## Stack
@@ -96,6 +96,12 @@ Gallery (MP-Heavy 3D worldLandmarks) overrides dense (MoveNet 2D) when:
    - v0.9.6 fix: `midswing` scorer now `k < 120 && y < 0.80` — true mid-swing ankle y≈0.60-0.75
    - Needs test run to confirm `[Analysis] Hip flex override: MP gallery L=49° R=53°` appears in console
 4. **catmullRomSpline duplicate declaration** — benign syntax warning, doesn't affect runtime
+
+## v0.9.8 Fixes (2026.04.11 — do not reintroduce)
+- **Gallery frame phase mismatch FIXED**: Visual frame selector was doing a global search across all 128 frames, picking biomechanically valid frames from the WRONG stride (e.g., "Mid Swing" at t=10s while the measured stride is at t=5.2-5.8s). Fix: constrain the visual search window to [IC - 0.5×span, LateSwing + 1.5×span] using the Zeni fractions already computed. This keeps all 8 gallery frames within ~2-3 strides of the identified gait cycle. Window logged as `[GaitFSM] Viz window: [X.XXX, X.XXX]`.
+
+## v0.9.7 Fixes (2026.04.11 — do not reintroduce)
+- **Hip flex override threshold lowered**: `mpDiffers` bilateral diff threshold reduced from 3° to 2°. Added second trigger `mpLower`: fires when gallery average ≥ 3° lower than dense average (gallery finding true peak swing frame; dense over-measuring). After v0.9.6 fixed the frame selection, gallery shows 51°/53° vs dense 56°/56°. New logic: `(mpDiffers || mpLower) && mpInRange`.
 
 ## v0.9.6 Fixes (2026.04.11 — do not reintroduce)
 - **Tighter primary midswing y-guard**: `y < 0.87` → `y < 0.80` (line ~2751). April 11 test showed planted ankle at y=0.859 was still passing the 0.87 threshold. True mid-swing ankle should be y≈0.60-0.75. This tighter threshold blocks the leg-swap false-positive where the left ankle is near the ground.

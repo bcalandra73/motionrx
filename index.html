@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.7 · 2026.04.11</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.8 · 2026.04.11</p>
     </div>
 
     <div class="two-col">
@@ -2754,12 +2754,24 @@ function startFrameExtraction(file, vid) {
                   'lateswing':  (d,k,y,h,t) => (d < -0.05 && k > 118 && k < 165 && y < 0.88 && t > 0.25 && t < 0.98) ? (-d*2 + (k-118)*0.008) : -1,
                 };
                 const _vizPhaseOrder = ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'];
+                // Constrain visual search to within the Zeni stride window.
+                // Without this, the global search picks biomechanically valid frames from
+                // entirely different strides — e.g. "Left Mid Swing" at t=10s when the
+                // measured stride is at t=5.2-5.8s, producing completely wrong gallery images.
+                // Strategy: use the Zeni fractions array (already computed) to define a
+                // search window of [IC - 0.5*span, LateSwing + 1.5*span], covering ~2-3 strides.
+                const _zFr0 = window_primaryPhaseSelection?.fractions;
+                const _zSpan0 = (_zFr0 && _zFr0.length >= 8) ? (_zFr0[7] - _zFr0[0]) : 0;
+                const _vizWinStart = (_zSpan0 > 0.005) ? Math.max(0, _zFr0[0] - _zSpan0 * 0.5) : 0;
+                const _vizWinEnd   = (_zSpan0 > 0.005) ? Math.min(1, _zFr0[7] + _zSpan0 * 1.5) : 1;
+                console.log(`[GaitFSM] Viz window: [${_vizWinStart.toFixed(3)}, ${_vizWinEnd.toFixed(3)}] — span=${(_zSpan0*100).toFixed(1)}% of video`);
                 // Process high-confidence phases first (midswing, toeoff) to claim best frames
                 _vizPhaseOrder.forEach(phId => {
                   let best = -Infinity, bestT = null, bestI = -1;
                   const scorer = _vizScorers[phId];
                   perFrame.forEach((f, fi) => {
                     if(!f || _usedVizIdx.has(fi)) return;
+                    if(f.t < _vizWinStart || f.t > _vizWinEnd) return; // stay within Zeni stride
                     const d = _signD(f);
                     const k = f[_refKneeKey];
                     const y = f.lAnkY ?? f.rAnkY ?? 0.82;
