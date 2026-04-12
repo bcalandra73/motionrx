@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.9.9 · 2026.04.11</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.10.0 · 2026.04.12</p>
     </div>
 
     <div class="two-col">
@@ -10107,10 +10107,20 @@ async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, status
       windowStart = Math.max(0.02, (sm.bestStrideFrameRange[0] - 4) / N);
       windowEnd   = Math.min(0.98, (sm.bestStrideFrameRange[1] + 4) / N);
       console.log(`[DensePass] Window from bestStrideFrameRange [${sm.bestStrideFrameRange}]: ${windowStart.toFixed(3)}→${windowEnd.toFixed(3)}`);
+    } else if(_icFrac != null && window_primaryPhaseSelection?.fractions?.length >= 8) {
+      // Use phase fractions directly — IC to late swing + 50% margin on each side
+      const _phFr = window_primaryPhaseSelection.fractions;
+      const _span = _phFr[7] - _phFr[0];
+      windowStart = Math.max(0.02, _phFr[0] - _span * 0.5);
+      windowEnd   = Math.min(0.98, _phFr[7] + _span * 0.5);
+      console.log(`[DensePass] Window from phase fractions: ${windowStart.toFixed(3)}→${windowEnd.toFixed(3)} (no stride dur, span=${(_span*100).toFixed(1)}%)`);
     } else {
       // True last resort — log clearly so it's easy to diagnose
       windowStart = 0.05; windowEnd = 0.95;
-      console.warn('[DensePass] ⚠ Window fallback to full clip — stride timing unavailable. Curves will be sparse and unfiltered.');
+      console.warn('[DensePass] ⚠ Window fallback to full clip — stride timing unavailable.',
+        'sm:', !!sm, 'strideDurS:', sm?.strideDurationS, 'vidDurS:', sm?.videoDurationS,
+        'icFrac:', _icFrac, 'bestStrideRange:', sm?.bestStrideFrameRange,
+        'denseAnglesN:', window._denseAnglesFrames?.length);
     }
     // Scale frame count to the window duration so effective fps stays ~30fps
     // (minimum for useful Butterworth filtering at 6Hz cutoff).
@@ -10555,6 +10565,9 @@ async function runAnalysis() {
         allAngles.push(extractAngles(mpResult.poseLandmarks, cameraView, movement));
       }
     }
+    // Diagnostic: log what phase labels annotatedFrames received from extractedFrames
+    console.log('[Analysis] annotatedFrames phases: ' +
+      annotatedFrames.map((f,i) => `${i+1}:${f.phase?._baseId || f.phase?.id || '?'}`).join(' '));
 
     // ── Optional Landmark Review & Correction ────────────────────────────────
     if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
@@ -10902,6 +10915,8 @@ async function runAnalysis() {
             annotatedFrames.length = 0;
             _newAnnotated.forEach(f => annotatedFrames.push(f));
             console.log('[Analysis] Stage 3a: Primary gallery re-extracted at accurate phase times (' + _newAnnotated.length + ' frames)');
+            console.log('[Analysis] Stage 3a phases: ' +
+              annotatedFrames.map((f,i) => `${i+1}:${f.phase?._baseId || f.phase?.id || '?'}`).join(' '));
           }
         }
       }
@@ -10909,7 +10924,14 @@ async function runAnalysis() {
     } catch(_p3aErr) {
       console.warn('[Analysis] Stage 3a: Primary re-extraction failed (will use GaitFSM frames):', _p3aErr.message);
     }
+  } else {
+    const _skipReason = _skipStage3a ? 'corrections made' : !_isGaitMovement ? 'not gait' :
+      !window_primaryPhaseSelection ? 'no phase selection' : !uploadedFile ? 'no file' : 'MP not ready';
+    console.log('[Analysis] Stage 3a SKIPPED: ' + _skipReason);
   }
+  // Diagnostic: final annotatedFrames state before Stage 3b
+  console.log('[Analysis] Pre-3b annotatedFrames: ' +
+    annotatedFrames.map((f,i) => `${i+1}:${f.phase?._baseId || f.phase?.label?.slice(0,10) || '?'}`).join(' '));
 
   // ── Stage 3b: Second video pipeline (if uploaded) ──
 
@@ -11566,11 +11588,27 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           : annotatedFrames2; // all other movements: show every phase
         const maxFrames = Math.max(v1Frames.length, v2Frames.length);
 
+        // ── Phase label recovery ─────────────────────────────────────────
+        // If annotatedFrames lost their phase labels (e.g. Stage 3a re-extraction
+        // produced frames without labels, or a code path reset them), recover
+        // from window_primaryPhaseSelection.labels which is authoritative.
+        const _phRecoveryLabels = window_primaryPhaseSelection?.labels;
+        if(_phRecoveryLabels && v1Frames.length > 0) {
+          let _recovered = 0;
+          v1Frames.forEach((f, i) => {
+            if(f && (!f.phase || !f.phase._baseId || f.phase.id === 'frame') && _phRecoveryLabels[i]) {
+              f.phase = _phRecoveryLabels[i];
+              _recovered++;
+            }
+          });
+          if(_recovered > 0) console.warn(`[renderReport] Recovered ${_recovered} phase labels from window_primaryPhaseSelection`);
+        }
+
         for(let i = 0; i < maxFrames; i++) {
           const f1 = v1Frames[i];
           const f2 = v2Frames[i];
           const phase = f1?.phase || f2?.phase;
-          const phaseId = phase?.id || 'frame';
+          const phaseId = phase?._baseId || phase?.id || 'frame';
           const phaseLabel = phase?.label || ('Frame ' + (i+1));
           const phaseDesc  = phase?.desc  || '';
           // _side is set by GaitFSM v4 ('L' or 'R') to indicate which leg is in the named phase
@@ -11662,6 +11700,17 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       } else {
         // ── Single-view grid layout ──
         gallery.classList.remove('dual-view');
+        // ── Phase label recovery (single-view) ──
+        const _phRecLabels2 = window_primaryPhaseSelection?.labels;
+        if(_phRecLabels2) {
+          let _rec2 = 0;
+          annotatedFrames.forEach((f, i) => {
+            if(f && (!f.phase || !f.phase._baseId || f.phase.id === 'frame') && _phRecLabels2[i]) {
+              f.phase = _phRecLabels2[i]; _rec2++;
+            }
+          });
+          if(_rec2 > 0) console.warn(`[renderReport] Recovered ${_rec2} phase labels (single-view)`);
+        }
         annotatedFrames.forEach((f, i) => {
           const card = document.createElement('div');
           card.className = 'frame-card';
@@ -11675,7 +11724,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const lbl = document.createElement('div');
           lbl.className = 'frame-label';
           const phase = f.phase;
-          const phaseId = phase?.id || 'frame';
+          const phaseId = phase?._baseId || phase?.id || 'frame';
           const phaseLabel = phase?.label || ('Frame ' + (i+1));
           const phaseSideS = phase?._side || null;
           const sideBadgeS = phaseSideS

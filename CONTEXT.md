@@ -4,7 +4,7 @@
 Single-file HTML clinical motion analysis app.
 - **File:** `index.html`
 - **Deployed:** `bcalandra73.github.io/motionrx/`
-- **Current version:** v0.9.8 (2026.04.11)
+- **Current version:** v0.10.0 (2026.04.12)
 - **GitHub repo:** `bcalandra73/motionrx`
 
 ## Stack
@@ -96,6 +96,15 @@ Gallery (MP-Heavy 3D worldLandmarks) overrides dense (MoveNet 2D) when:
    - v0.9.6 fix: `midswing` scorer now `k < 120 && y < 0.80` — true mid-swing ankle y≈0.60-0.75
    - Needs test run to confirm `[Analysis] Hip flex override: MP gallery L=49° R=53°` appears in console
 4. **catmullRomSpline duplicate declaration** — benign syntax warning, doesn't affect runtime
+
+## v0.10.0 Fixes (2026.04.12 — do not reintroduce)
+- **Gallery phase label recovery FIXED**: v0.9.9 regression where gallery frames showed "Frame 1" through "Frame 8" instead of gait phase labels (e.g. "Left Initial Contact"). Root cause: annotatedFrames lost their phase labels during the annotation/re-extraction pipeline, while `window_primaryPhaseSelection.labels` retained them correctly (proven by posterior filter working). Fix: renderReport now recovers phase labels from `window_primaryPhaseSelection.labels` whenever annotatedFrames have placeholder `id='frame'` phases. Applied to both dual-view and single-view gallery paths. Also fixed `phaseId` extraction to prefer `_baseId` over `id` for consistent gait phase identification.
+- **DensePass window fallback improved**: Added intermediate fallback using phase fractions when stride duration is unavailable but phase selection exists. Previously fell directly to full-clip window (0.05→0.95), producing averaged measurements (26°/28° hip flex instead of ~49°/53°). New fallback: `[IC - 0.5×span, LateSwing + 0.5×span]` from phase fractions.
+- **Diagnostic logging added**: Key console markers at annotation, Stage 3a, and pre-renderReport to trace phase label flow. DensePass fallback now logs all available stride metrics for diagnosis.
+
+## v0.9.9 Fixes (2026.04.11 — do not reintroduce)
+- **Suppress visual frame selector for Zeni-anchored gait**: When anchor method is Zeni2008, vizFractions are NOT set, and Zeni fractions are used directly for gallery display. The visual selector scored all frames within the stride window similarly (37-45%), causing arbitrary phase assignment. Zeni fractions are timing-accurate. Visual selector kept for LR-offset fallback.
+- **KNOWN REGRESSION**: Gallery frame titles showed "Frame N" placeholders and hip flex measured 26°/28° (DensePass used full clip). Fixed in v0.10.0.
 
 ## v0.9.8 Fixes (2026.04.11 — do not reintroduce)
 - **Gallery frame phase mismatch FIXED**: Visual frame selector was doing a global search across all 128 frames, picking biomechanically valid frames from the WRONG stride (e.g., "Mid Swing" at t=10s while the measured stride is at t=5.2-5.8s). Fix: constrain the visual search window to [IC - 0.5×span, LateSwing + 1.5×span] using the Zeni fractions already computed. This keeps all 8 gallery frames within ~2-3 strides of the identified gait cycle. Window logged as `[GaitFSM] Viz window: [X.XXX, X.XXX]`.
