@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.10.0 · 2026.04.12</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.11.0 · 2026.04.12</p>
     </div>
 
     <div class="two-col">
@@ -4269,54 +4269,127 @@ function applyBilateralFallback(lms, movement, view='side') {
 // ── Temporal smoothing across frames ──
 // Weighted moving average — preserves first and last frames (real positions)
 // Uses confidence as weight so uncertain frames contribute less
+// ── OneEuro Filter ──────────────────────────────────────────────────────────
+// Casiez et al., "1€ Filter: A Simple Speed-based Low-pass Filter for Noisy
+// Input in Interactive Systems", CHI 2012.  Adapts smoothing cutoff based on
+// signal velocity: aggressive smoothing for slow/stationary landmarks (reduces
+// jitter), light smoothing for fast-moving landmarks (preserves peak values
+// during running swing phase).  ~30 lines, zero dependencies.
+function _oneEuroAlpha(cutoff, dt) {
+  const tau = 1.0 / (2 * Math.PI * cutoff);
+  return 1.0 / (1.0 + tau / dt);
+}
+
+function _oneEuroFilter1D(values, dt, minCutoff, beta, dCutoff) {
+  // values: Float64Array or number[]. Returns smoothed copy.
+  // dt: time step between samples (seconds). minCutoff: base cutoff (Hz).
+  // beta: speed coefficient (higher → less smoothing at high speed).
+  // dCutoff: cutoff for derivative filter (Hz).
+  const n = values.length;
+  if(n < 2) return [...values];
+  const out = new Array(n);
+  out[0] = values[0];
+  let dxPrev = 0;
+  let xPrev  = values[0];
+  for(let i = 1; i < n; i++) {
+    const xi = values[i];
+    if(xi == null || xPrev == null) { out[i] = xi; xPrev = xi; continue; }
+    // Derivative (speed estimate), then low-pass the derivative
+    const dx = (xi - xPrev) / dt;
+    const alphaD = _oneEuroAlpha(dCutoff, dt);
+    const dxHat  = alphaD * dx + (1 - alphaD) * dxPrev;
+    dxPrev = dxHat;
+    // Adaptive cutoff: faster movement → higher cutoff → less smoothing
+    const cutoff = minCutoff + beta * Math.abs(dxHat);
+    const alpha  = _oneEuroAlpha(cutoff, dt);
+    xPrev = alpha * xi + (1 - alpha) * xPrev;
+    out[i] = xPrev;
+  }
+  return out;
+}
+
 function applyTemporalSmoothing(allFrameLandmarks) {
   const n = allFrameLandmarks.length;
   if(n < 3) return allFrameLandmarks;
 
   const LANDMARK_COUNT = 33;
+  // Estimate dt from frame count: assume ~9-14 fps effective sampling for
+  // 128 frames across a 14s clip.  Exact fps doesn't matter much since OneEuro
+  // adapts, but a reasonable estimate helps the derivative filter.
+  const dt = 1.0 / 10; // ~10fps for dense scan (128 frames / 14s ≈ 9fps)
+
+  // OneEuro parameters tuned for running gait landmarks:
+  // - minCutoff=1.5 Hz: base smoothing for stationary/slow landmarks (hip during stance)
+  // - beta=0.5: moderate speed coefficient — preserves fast ankle/knee movements
+  // - dCutoff=1.0 Hz: derivative smoothing to avoid noisy speed estimates
+  const MIN_CUTOFF = 1.5;
+  const BETA       = 0.5;
+  const D_CUTOFF   = 1.0;
+
+  // Deep-clone the input
   const smoothed = allFrameLandmarks.map(lms => {
     if(!lms) return null;
-    if(Array.isArray(lms)) return [...lms];
-    // Convert array-like to plain array
+    if(Array.isArray(lms)) return lms.map(lm => lm ? {...lm} : null);
     const arr = [];
-    for(let i = 0; i < (lms.length || 33); i++) arr.push(lms[i] || null);
+    for(let i = 0; i < (lms.length || 33); i++) arr.push(lms[i] ? {...lms[i]} : null);
     return arr;
   });
 
+  // Apply OneEuro filter per-landmark, per-coordinate (x, y)
   for(let lmIdx = 0; lmIdx < LANDMARK_COUNT; lmIdx++) {
-    for(let fi = 1; fi < n-1; fi++) { // skip first and last frames
-      const prev = allFrameLandmarks[fi-1]?.[lmIdx];
-      const curr = allFrameLandmarks[fi]?.[lmIdx];
-      const next = allFrameLandmarks[fi+1]?.[lmIdx];
-      if(!curr) continue;
+    // Collect x, y series across all frames for this landmark
+    const xs = new Array(n), ys = new Array(n);
+    const vis = new Array(n); // visibility for confidence gating
+    for(let fi = 0; fi < n; fi++) {
+      const lm = allFrameLandmarks[fi]?.[lmIdx];
+      xs[fi]  = lm?.x  ?? null;
+      ys[fi]  = lm?.y  ?? null;
+      vis[fi] = lm?.visibility ?? 0;
+    }
 
-      const currConf = curr.visibility || 0;
-      // Only smooth low-confidence landmarks — high confidence readings are real
-      if(currConf > 0.7) continue;
+    // Only smooth if we have enough valid values
+    const validCount = xs.filter(v => v != null).length;
+    if(validCount < 3) continue;
 
-      const prevConf = prev?.visibility || 0;
-      const nextConf = next?.visibility || 0;
-      if(!prev || !next) continue;
+    // Fill gaps with linear interpolation before filtering (OneEuro needs continuous input)
+    const xFilled = _fillGaps(xs);
+    const yFilled = _fillGaps(ys);
 
-      // Weights: current frame gets 50%, neighbors 25% each
-      // But scale neighbor weights by their confidence
-      const wPrev = 0.25 * prevConf;
-      const wCurr = 0.50;
-      const wNext = 0.25 * nextConf;
-      const wSum  = wPrev + wCurr + wNext;
-      if(wSum < 0.1) continue;
+    const xSmooth = _oneEuroFilter1D(xFilled, dt, MIN_CUTOFF, BETA, D_CUTOFF);
+    const ySmooth = _oneEuroFilter1D(yFilled, dt, MIN_CUTOFF, BETA, D_CUTOFF);
 
-      if(smoothed[fi]) {
-        smoothed[fi][lmIdx] = {
-          ...curr,
-          x: (prev.x*wPrev + curr.x*wCurr + next.x*wNext) / wSum,
-          y: (prev.y*wPrev + curr.y*wCurr + next.y*wNext) / wSum,
-          smoothed: true
-        };
-      }
+    // Write smoothed values back, but only for landmarks that existed in the original
+    // and only blend based on confidence: high-confidence landmarks get less smoothing
+    for(let fi = 0; fi < n; fi++) {
+      if(!smoothed[fi]?.[lmIdx] || xs[fi] == null) continue;
+      const conf = vis[fi];
+      // High confidence (>0.7): keep 80% original, 20% smoothed
+      // Low confidence (<0.3): keep 20% original, 80% smoothed
+      // Mid confidence: linear blend
+      const smoothWeight = conf > 0.7 ? 0.2 : conf < 0.3 ? 0.8 : 0.2 + (0.7 - conf) * 1.5;
+      smoothed[fi][lmIdx] = {
+        ...smoothed[fi][lmIdx],
+        x: xs[fi] * (1 - smoothWeight) + xSmooth[fi] * smoothWeight,
+        y: ys[fi] * (1 - smoothWeight) + ySmooth[fi] * smoothWeight,
+        smoothed: true
+      };
     }
   }
   return smoothed;
+}
+
+// ── Gap-fill helper for OneEuro (needs continuous signal) ──────────────────
+function _fillGaps(arr) {
+  const out = [...arr];
+  // Forward fill
+  for(let i = 1; i < out.length; i++) {
+    if(out[i] == null && out[i-1] != null) out[i] = out[i-1];
+  }
+  // Backward fill
+  for(let i = out.length - 2; i >= 0; i--) {
+    if(out[i] == null && out[i+1] != null) out[i] = out[i+1];
+  }
+  return out;
 }
 
 // ── Master fusion pipeline — takes raw MP results + images, returns fused landmarks ──
@@ -5873,12 +5946,19 @@ function extractAngles(lm, view='side', movement='') {
 
   if(isGaitMov) {
     // Running/gait: thigh-from-vertical (preferred over shoulder-hip-knee)
+    // Use max(3D, 2D) because 3D worldLandmarks can underestimate hip flex
+    // in side view due to unreliable depth (z-axis) estimation — e.g. 28° vs
+    // true 50°.  2D image-plane measurement is reliable in side view.  Taking
+    // the max catches 3D depth-collapse without affecting MoveNet frames
+    // (which lack worldLandmarks and always fall back to 2D).
     if(lHip&&lKnee) {
-      const val = hipFlexV3D(lHip,lKnee) ?? hipFlexV2D(lHip,lKnee);
+      const v3 = hipFlexV3D(lHip,lKnee), v2 = hipFlexV2D(lHip,lKnee);
+      const val = (v3 != null && v2 != null) ? Math.max(v3, v2) : (v3 ?? v2);
       if(val!=null) angles['Left Hip Flexion'] = val;
     }
     if(rHip&&rKnee) {
-      const val = hipFlexV3D(rHip,rKnee) ?? hipFlexV2D(rHip,rKnee);
+      const v3 = hipFlexV3D(rHip,rKnee), v2 = hipFlexV2D(rHip,rKnee);
+      const val = (v3 != null && v2 != null) ? Math.max(v3, v2) : (v3 ?? v2);
       if(val!=null) angles['Right Hip Flexion'] = val;
     }
   } else {
@@ -9177,6 +9257,8 @@ let _rvAnnotated    = null;  // annotatedFrames reference (updated after edit)
 let _rvFusedResults = null;  // fusedResults reference
 let _rvActiveFrame  = 0;
 let _rvEdited       = [];    // bool per frame
+let _rvFrameTimes   = [];    // video timestamp (seconds) per primary frame — for correction matching
+let _rvFramePhases  = [];    // phase _baseId per primary frame — for correction validation
 let _rvResolve      = null;  // Promise resolver
 let _rvDragging     = null;  // {lmIdx} | null
 let _rvImgCache     = {};    // frameIdx → ImageBitmap/Image
@@ -9186,6 +9268,8 @@ let _rvOriginals2   = null;
 let _rvRawFrames2   = null;
 let _rvAnnotated2   = null;
 let _rvEdited2      = [];
+let _rvFrameTimes2  = [];    // video timestamp (seconds) per secondary frame
+let _rvFramePhases2 = [];    // phase _baseId per secondary frame
 let _rvN1           = 0;     // number of primary frames (secondary starts at _rvN1)
 
 // Landmark styling
@@ -9229,6 +9313,23 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     _rvImgCache     = {};
     _rvN1           = extractedFrames.length;
 
+    // ── Compute frame timestamps for correction persistence ─────────────────
+    // Timestamps survive frame-selection changes: corrections stored by time,
+    // not index, so they stay valid across code versions.
+    const _phSel = window_primaryPhaseSelection;
+    const _primDur = window._primaryVidEl?.duration;
+    if(_phSel?.fractions && _primDur && isFinite(_primDur)) {
+      const _displayFracs = _phSel.vizFractions || _phSel.fractions;
+      _rvFrameTimes  = _displayFracs.map(f => Math.round(f * _primDur * 1000) / 1000); // ms precision
+      _rvFramePhases = (_phSel.labels || []).map(l => l?._baseId || l?.id || '');
+    } else {
+      _rvFrameTimes  = [];
+      _rvFramePhases = [];
+    }
+    if(_rvFrameTimes.length > 0) {
+      console.log(`[Corrections] Primary frame times: ${_rvFrameTimes.map(t=>t.toFixed(3)+'s').join(', ')}`);
+    }
+
     // Deep clone primary landmarks
     _rvOriginals = refinedLandmarks.map(lms =>
       lms ? lms.map(lm => lm ? {...lm} : null) : null
@@ -9241,6 +9342,17 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     _rvRawFrames2  = extractedFrames2  || null;
     _rvAnnotated2  = annotatedFrames2  || null;
     _rvEdited2     = extractedFrames2  ? new Array(extractedFrames2.length).fill(false) : [];
+    // Secondary timestamps from secondary phase selection (if available)
+    const _secPhSel = window._secondaryPhaseSelection;
+    const _secDur   = window._secondaryVidEl?.duration;
+    if(_secPhSel?.fractions && _secDur && isFinite(_secDur)) {
+      const _secDisplayFracs = _secPhSel.vizFractions || _secPhSel.fractions;
+      _rvFrameTimes2  = _secDisplayFracs.map(f => Math.round(f * _secDur * 1000) / 1000);
+      _rvFramePhases2 = (_secPhSel.labels || []).map(l => l?._baseId || l?.id || '');
+    } else {
+      _rvFrameTimes2  = [];
+      _rvFramePhases2 = [];
+    }
     if(refinedLandmarks2) {
       _rvOriginals2 = refinedLandmarks2.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null);
       _rvLandmarks2 = refinedLandmarks2.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null);
@@ -12453,10 +12565,15 @@ function _corrSave() {
   try {
     const data = {
       ts:      Date.now(),
+      v:       2,                                          // format version (v2 = timestamp-based)
       primary: _corrPack(_rvLandmarks, _rvEdited),
       pEd:     [..._rvEdited],
+      pTimes:  _rvFrameTimes.length  ? [..._rvFrameTimes]  : null,  // video seconds per frame
+      pPhases: _rvFramePhases.length ? [..._rvFramePhases] : null,  // phase _baseId per frame
       sec:     _corrPack(_rvLandmarks2, _rvEdited2),
       sEd:     _rvEdited2 ? [..._rvEdited2] : [],
+      sTimes:  _rvFrameTimes2.length  ? [..._rvFrameTimes2]  : null,
+      sPhases: _rvFramePhases2.length ? [..._rvFramePhases2] : null,
     };
     localStorage.setItem(CORRECTIONS_PREFIX + key, JSON.stringify(data));
     // Prune oldest sets over limit
@@ -12493,25 +12610,82 @@ function _corrLoad(key) {
 function _corrApply(savedData) {
   if(!savedData) return 0;
   let applied = 0;
-  const primUnpacked = _corrUnpack(savedData.primary);
-  if(primUnpacked && _rvLandmarks) {
-    savedData.pEd.forEach((edited, i) => {
-      if(edited && primUnpacked[i] && i < _rvLandmarks.length) {
-        _rvLandmarks[i] = primUnpacked[i];
-        _rvEdited[i]    = true;
-        applied++;
+  let skippedNoMatch = 0;
+  const MATCH_TOL = 0.060; // 60ms tolerance (slightly >1 frame at 30fps, <1 frame at 120fps)
+  const isV2 = savedData.v >= 2 && savedData.pTimes;
+
+  // ── Helper: match saved corrections to current frames by timestamp ─────────
+  function _matchByTime(savedTimes, savedEd, savedUnpacked, savedPhases,
+                        curTimes, curLandmarks, curEdited, curPhases) {
+    let n = 0, skip = 0;
+    if(!savedTimes || !curTimes?.length || !savedUnpacked || !curLandmarks) return {n, skip};
+    const used = new Set(); // prevent double-mapping
+    savedTimes.forEach((savedT, si) => {
+      if(!savedEd[si] || !savedUnpacked[si]) return;
+      let bestIdx = -1, bestDist = Infinity;
+      for(let ci = 0; ci < curTimes.length; ci++) {
+        if(used.has(ci)) continue;
+        const dist = Math.abs(curTimes[ci] - savedT);
+        if(dist < bestDist) { bestDist = dist; bestIdx = ci; }
+      }
+      if(bestIdx >= 0 && bestDist <= MATCH_TOL) {
+        curLandmarks[bestIdx] = savedUnpacked[si];
+        curEdited[bestIdx]    = true;
+        used.add(bestIdx);
+        n++;
+        const phaseMatch = !savedPhases?.[si] || !curPhases?.[bestIdx] ||
+                           savedPhases[si] === curPhases[bestIdx];
+        if(!phaseMatch) {
+          console.warn(`[Corrections] Phase mismatch at frame ${bestIdx}: saved="${savedPhases[si]}" current="${curPhases[bestIdx]}" (applied anyway, \u0394t=${(bestDist*1000).toFixed(0)}ms)`);
+        }
+      } else {
+        skip++;
+        console.warn(`[Corrections] Saved frame (t=${savedT.toFixed(3)}s) no match within ${MATCH_TOL*1000}ms (nearest: ${bestDist < 99 ? (bestDist*1000).toFixed(0)+'ms' : 'N/A'})`);
       }
     });
+    return {n, skip};
   }
-  const secUnpacked = _corrUnpack(savedData.sec);
-  if(secUnpacked && _rvLandmarks2) {
-    (savedData.sEd || []).forEach((edited, i) => {
-      if(edited && secUnpacked[i] && i < _rvLandmarks2.length) {
-        _rvLandmarks2[i] = secUnpacked[i];
-        _rvEdited2[i]    = true;
-        applied++;
-      }
-    });
+
+  const primUnpacked = _corrUnpack(savedData.primary);
+  if(isV2) {
+    // ── v2 timestamp-based matching ─────────────────────────────────────────
+    const pResult = _matchByTime(savedData.pTimes, savedData.pEd, primUnpacked, savedData.pPhases,
+                                  _rvFrameTimes, _rvLandmarks, _rvEdited, _rvFramePhases);
+    applied += pResult.n;
+    skippedNoMatch += pResult.skip;
+    // Secondary
+    const secUnpacked = _corrUnpack(savedData.sec);
+    if(secUnpacked && _rvLandmarks2 && savedData.sTimes) {
+      const sResult = _matchByTime(savedData.sTimes, savedData.sEd, secUnpacked, savedData.sPhases,
+                                    _rvFrameTimes2, _rvLandmarks2, _rvEdited2, _rvFramePhases2);
+      applied += sResult.n;
+      skippedNoMatch += sResult.skip;
+    }
+    if(skippedNoMatch > 0) {
+      console.warn(`[Corrections] ${skippedNoMatch} saved correction(s) could not be matched (frame timing shifted >${MATCH_TOL*1000}ms)`);
+    }
+  } else {
+    // ── Legacy v1 index-based matching (for old saved corrections) ───────────
+    if(primUnpacked && _rvLandmarks) {
+      savedData.pEd.forEach((edited, i) => {
+        if(edited && primUnpacked[i] && i < _rvLandmarks.length) {
+          _rvLandmarks[i] = primUnpacked[i];
+          _rvEdited[i]    = true;
+          applied++;
+        }
+      });
+    }
+    const secUnpacked = _corrUnpack(savedData.sec);
+    if(secUnpacked && _rvLandmarks2) {
+      (savedData.sEd || []).forEach((edited, i) => {
+        if(edited && secUnpacked[i] && i < _rvLandmarks2.length) {
+          _rvLandmarks2[i] = secUnpacked[i];
+          _rvEdited2[i]    = true;
+          applied++;
+        }
+      });
+    }
+    console.log('[Corrections] Used legacy index-based matching (v1 format)');
   }
   return applied;
 }

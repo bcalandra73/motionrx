@@ -4,7 +4,7 @@
 Single-file HTML clinical motion analysis app.
 - **File:** `index.html`
 - **Deployed:** `bcalandra73.github.io/motionrx/`
-- **Current version:** v0.10.0 (2026.04.12)
+- **Current version:** v0.11.0 (2026.04.12)
 - **GitHub repo:** `bcalandra73/motionrx`
 
 ## Stack
@@ -77,11 +77,20 @@ Gallery (MP-Heavy 3D worldLandmarks) overrides dense (MoveNet 2D) when:
 - `_isGaitSideView = /running|gait|walk/.test(_mvt) && view === 'side'`
 - Declared BEFORE `if(poseResult && poseResult.poseLandmarks)` block (scope fix)
 
-### Correction System
-- Stored per video in localStorage: `{primary: [], pEd: [], sec: [], sEd: []}`
-- 16 saved corrections (8 primary + 8 secondary) for current test video
+### Correction System (v2 — timestamp-based, v0.11.0+)
+- Stored per video in localStorage: `{v:2, primary:[], pEd:[], pTimes:[], pPhases:[], sec:[], sEd:[], sTimes:[], sPhases:[]}`
+- **v2 matching**: corrections stored with video timestamps (seconds) and matched to current gallery frames by nearest-timestamp within 60ms tolerance. Survives frame selection changes across code versions.
+- **v1 fallback**: old corrections (no `pTimes`) use legacy index-based matching
+- `_rvFrameTimes[]` computed from `window_primaryPhaseSelection.fractions * duration`
 - `_corrSave()`, `_corrLoad(key)`, `_corrApply(data)`, `_corrUnpack(packed)`
-- Clear button: "🗑 Clear saved" — reverts landmarks and enables Option 2
+- Clear button: "Clear saved" — reverts landmarks and enables Option 2
+
+### Temporal Smoothing (OneEuro filter, v0.11.0+)
+- Replaced simple 3-frame weighted average with OneEuro adaptive filter
+- Parameters: minCutoff=1.5Hz, beta=0.5, dCutoff=1.0Hz
+- Confidence-weighted blending: high-confidence landmarks (>0.7) get 20% smoothing, low-confidence (<0.3) get 80%
+- Applied to all 33 landmarks across the dense 128-frame MoveNet scan
+- Preserves fast ankle/knee movements during swing while aggressively smoothing stance jitter
 
 ## Known Issues / Active Work
 1. **Visual frame selection tuning** — scorer thresholds need calibration against more test runs
@@ -94,8 +103,16 @@ Gallery (MP-Heavy 3D worldLandmarks) overrides dense (MoveNet 2D) when:
    - Root cause: leg-swap frames have left knee tracking swinging right leg (high flexion) while left ankle is planted on ground (high y), producing 28°/24° gallery hip flex → fails 35° floor → dense wins
    - v0.9.5 fix (y<0.87) was too lenient — planted ankle at y=0.859 still passed
    - v0.9.6 fix: `midswing` scorer now `k < 120 && y < 0.80` — true mid-swing ankle y≈0.60-0.75
+   - v0.10.1 fix: `extractAngles` now uses `max(hipFlexV3D, hipFlexV2D)` — catches 3D depth collapse in side view
    - Needs test run to confirm `[Analysis] Hip flex override: MP gallery L=49° R=53°` appears in console
 4. **catmullRomSpline duplicate declaration** — benign syntax warning, doesn't affect runtime
+
+## v0.11.0 Features (2026.04.12 — do not reintroduce)
+- **Timestamp-based correction storage (v2)**: Corrections now store video timestamps (seconds) and phase labels alongside landmark data. On load, corrections match to current gallery frames by nearest-timestamp within 60ms tolerance instead of by frame index. This means corrections survive upstream frame-selection changes (which previously invalidated all saved corrections). Legacy v1 corrections (index-based) still load via automatic fallback. Format: `{v:2, pTimes:[], pPhases:[], sTimes:[], sPhases:[], ...}`. Console logs show match quality: `[Corrections] Primary frame times: X.XXXs, ...` and warnings for unmatched frames.
+- **OneEuro adaptive temporal smoothing**: Replaced the simple 3-frame weighted average in `applyTemporalSmoothing` with a proper OneEuro filter (Casiez et al. CHI 2012). The filter adapts its smoothing cutoff based on landmark velocity: aggressive smoothing for slow/stationary landmarks (hip during stance = less jitter) and light smoothing for fast-moving landmarks (ankle during swing = preserves peak values). Parameters: minCutoff=1.5Hz, beta=0.5, dCutoff=1.0Hz. Confidence-weighted blending prevents over-smoothing high-confidence detections. Applied to all 33 landmarks across the 128-frame dense MoveNet scan.
+
+## v0.10.1 Fixes (2026.04.12 — do not reintroduce)
+- **Hip flex 3D depth-collapse fix**: Gallery hip flex measured 28°/24° instead of ~49-53° because MediaPipe Heavy's worldLandmark z-axis (depth) estimation is unreliable in side view. The `hipFlexV3D` function underestimated the knee's forward displacement, returning a low angle, but since it returned a non-null value the 2D fallback never fired. Fix: compute BOTH `hipFlexV3D` and `hipFlexV2D` and take `Math.max(v3, v2)`. The 2D measurement is reliable in side view (~50-56°), so taking the max catches 3D depth collapse. MoveNet frames (no worldLandmarks) are unaffected — they already fall back to 2D. This should make the hip flex override fire: gallery ~49-53° vs dense 56°/56° → `mpLower` triggers, `mpInRange` passes.
 
 ## v0.10.0 Fixes (2026.04.12 — do not reintroduce)
 - **Gallery phase label recovery FIXED**: v0.9.9 regression where gallery frames showed "Frame 1" through "Frame 8" instead of gait phase labels (e.g. "Left Initial Contact"). Root cause: annotatedFrames lost their phase labels during the annotation/re-extraction pipeline, while `window_primaryPhaseSelection.labels` retained them correctly (proven by posterior filter working). Fix: renderReport now recovers phase labels from `window_primaryPhaseSelection.labels` whenever annotatedFrames have placeholder `id='frame'` phases. Applied to both dual-view and single-view gallery paths. Also fixed `phaseId` extraction to prefer `_baseId` over `id` for consistent gait phase identification.
