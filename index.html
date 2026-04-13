@@ -12753,15 +12753,22 @@ function _corrApply(savedData) {
         if(dist < bestDist) { bestDist = dist; bestIdx = ci; }
       }
       if(bestIdx >= 0 && bestDist <= MATCH_TOL) {
+        // v0.13.1 fix: REJECT corrections when the phase labels don't match.
+        // A correction recorded on "contact" must not be applied to a new
+        // "midstance" frame even if the timestamps are close — the landmark
+        // edits were made on biomechanically different poses and will corrupt
+        // the new analysis.
+        const phaseMatch = !savedPhases?.[si] || !curPhases?.[bestIdx] ||
+                           savedPhases[si] === curPhases[bestIdx];
+        if(!phaseMatch) {
+          skip++;
+          console.warn(`[Corrections] Phase mismatch at frame ${bestIdx}: saved="${savedPhases[si]}" current="${curPhases[bestIdx]}" — REJECTED (\u0394t=${(bestDist*1000).toFixed(0)}ms, but different phase)`);
+          return; // do NOT apply mismatched-phase corrections
+        }
         curLandmarks[bestIdx] = savedUnpacked[si];
         curEdited[bestIdx]    = true;
         used.add(bestIdx);
         n++;
-        const phaseMatch = !savedPhases?.[si] || !curPhases?.[bestIdx] ||
-                           savedPhases[si] === curPhases[bestIdx];
-        if(!phaseMatch) {
-          console.warn(`[Corrections] Phase mismatch at frame ${bestIdx}: saved="${savedPhases[si]}" current="${curPhases[bestIdx]}" (applied anyway, \u0394t=${(bestDist*1000).toFixed(0)}ms)`);
-        }
       } else {
         skip++;
         console.warn(`[Corrections] Saved frame (t=${savedT.toFixed(3)}s) no match within ${MATCH_TOL*1000}ms (nearest: ${bestDist < 99 ? (bestDist*1000).toFixed(0)+'ms' : 'N/A'})`);
