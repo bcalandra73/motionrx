@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.0 · 2026.04.12</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.1 · 2026.04.13</p>
     </div>
 
     <div class="two-col">
@@ -2573,6 +2573,20 @@ function startFrameExtraction(file, vid) {
                 };
 
                 const _refineIC = (seedIdx, minIdx = 0) => {
+                  // ── HIGH-CONFIDENCE SEED CHECK (v0.13.1) ──────────────
+                  // If the stride engine seed has a very high ground score
+                  // (ankle Y near floor → foot on ground) AND reasonable
+                  // knee extension, trust it directly. The MoveNet displacement
+                  // signal is UNRELIABLE in side-view running due to left/right
+                  // ankle label swaps when legs cross. Ankle Y (vertical position)
+                  // is NOT affected by leg swap and reliably detects ground contact.
+                  const _seedGs = _groundScore(seedIdx);
+                  const _seedK  = perFrame[seedIdx]?.[_refKneeKey];
+                  if(_seedGs >= 0.85 && _seedK != null && _seedK >= 100) {
+                    console.log(`[Zeni2008] IC: seed=${seedIdx} has high ground confidence (g=${_seedGs.toFixed(2)}, k=${_seedK.toFixed(0)}°) — trusting stride engine directly`);
+                    return seedIdx;
+                  }
+
                   const _r = Math.max(5, Math.round(_strideWin * 0.50));
                   const _s = Math.max(minIdx, seedIdx - _r); // respect floor
                   const _e = Math.min(N-1, seedIdx + _r);
