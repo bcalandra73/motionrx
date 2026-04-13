@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.12.1 · 2026.04.12</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.0 · 2026.04.12</p>
     </div>
 
     <div class="two-col">
@@ -2556,53 +2556,80 @@ function startFrameExtraction(file, vid) {
                 // _refineIC(seedIdx, minIdx): minIdx is the floor of the search range.
                 // When searching for nextIC, pass _zIcIdx+1 as minIdx so the search
                 // cannot select the same frame as IC even if it has the best displacement.
+                // Ankle Y check: at true IC the assessed ankle is on/near the ground
+                // (high Y in image coords). Leg-swap artifacts have the contralateral
+                // swinging ankle tracked instead — it's airborne (lower Y).
+                // Returns a ground-contact score: 1.0 if clearly grounded, 0.0 if airborne.
+                const _ankYKey = _refAnkKey.replace('X','Y'); // lAnkX → lAnkY
+                const _ankYvals = perFrame.map(f => f?.[_ankYKey]).filter(v => v != null);
+                const _ankYmax = _ankYvals.length > 5 ? Math.max(..._ankYvals) : 0.90;
+                const _ankYmin = _ankYvals.length > 5 ? Math.min(..._ankYvals) : 0.60;
+                const _ankYrange = Math.max(0.01, _ankYmax - _ankYmin);
+                const _groundScore = (idx) => {
+                  const y = perFrame[idx]?.[_ankYKey];
+                  if(y == null) return 0.5; // unknown — neutral
+                  // 1.0 when at max Y (on ground), 0.0 when at min Y (airborne)
+                  return Math.max(0, Math.min(1, (y - _ankYmin) / _ankYrange));
+                };
+
                 const _refineIC = (seedIdx, minIdx = 0) => {
                   const _r = Math.max(5, Math.round(_strideWin * 0.50));
                   const _s = Math.max(minIdx, seedIdx - _r); // respect floor
                   const _e = Math.min(N-1, seedIdx + _r);
 
-                  // Collect all candidate IC frames: displacement local minima with near-extended knee
-                  // AND followed by increasing displacement (O'Connor criterion).
+                  // Collect IC candidates: displacement local minima with semi-extended knee
+                  // AND followed by increasing displacement (O'Connor criterion)
+                  // AND ankle near ground (rejects leg-swap artifacts where airborne
+                  // contralateral ankle mimics forward-reach displacement).
+                  //
+                  // KNEE THRESHOLD: 115° (was 140°). At ~110ms dense frame spacing,
+                  // we may capture 1-2 frames AFTER true IC when the knee has flexed
+                  // for shock absorption (130-140° → 115-130°). Midfoot/forefoot
+                  // strikers also have lower knee extension at IC. The O'Connor
+                  // criterion and ankle-Y ground check prevent false positives.
+                  const _kThresh = 115;
                   const _candidates = [];
-                  // Log displacement values for key frames to diagnose IC detection
                   const _diagFrames = [];
                   for(let _si = _s; _si <= _e; _si++) {
                     const d  = _getDisp(_si);
                     const k  = perFrame[_si]?.[_refKneeKey];
                     if(d == null || k == null) continue;
                     const inc = _dispIncreases(_si);
-                    _diagFrames.push(`${_si}(k=${k.toFixed(0)},d=${d.toFixed(3)},↑=${inc?'Y':'N'})`);
-                    if(k < 140) continue;              // must have near-extended knee
-                    if(!inc) continue;                 // must be followed by increasing displacement
-                    _candidates.push({idx: _si, d, k});
+                    const gs = _groundScore(_si);
+                    _diagFrames.push(`${_si}(k=${k.toFixed(0)},d=${d.toFixed(3)},↑=${inc?'Y':'N'},g=${gs.toFixed(2)})`);
+                    if(k < _kThresh) continue;           // knee must be semi-extended
+                    if(!inc) continue;                    // must be followed by increasing displacement
+                    if(gs < 0.40) continue;               // ankle must be near ground (rejects leg-swap)
+                    _candidates.push({idx: _si, d, k, gs});
                   }
                   console.log(`[Zeni2008] Search ${_s}-${_e}: ${_diagFrames.join(' ')}`);
 
                   if(_candidates.length > 0) {
-                    // Among valid IC candidates, pick the one with smallest displacement (most forward ankle)
-                    _candidates.sort((a,b) => a.d - b.d);
+                    // Among valid IC candidates, pick the one with smallest displacement
+                    // (most forward ankle). Tie-break: prefer higher ground score.
+                    _candidates.sort((a,b) => {
+                      const dDiff = a.d - b.d;
+                      if(Math.abs(dDiff) > 0.02) return dDiff; // displacement dominant
+                      return b.gs - a.gs; // tie-break: prefer grounded
+                    });
                     const best = _candidates[0];
                     if(best.idx !== seedIdx)
-                      console.log(`[Zeni2008] IC refined (O'Connor): seed=${seedIdx}(knee=${perFrame[seedIdx]?.[_refKneeKey]?.toFixed(0)}°) → ${best.idx}(knee=${best.k.toFixed(0)}°, disp=${best.d.toFixed(3)})`);
+                      console.log(`[Zeni2008] IC refined (O'Connor+ankY): seed=${seedIdx}(knee=${perFrame[seedIdx]?.[_refKneeKey]?.toFixed(0)}°) → ${best.idx}(knee=${best.k.toFixed(0)}°, disp=${best.d.toFixed(3)}, ground=${best.gs.toFixed(2)})`);
                     return best.idx;
                   }
 
-                  // Fallback: among knee-extended frames, prefer the one with the SMALLEST
-                  // displacement (most forward ankle = most likely to be IC not late swing).
-                  // Late swing has ankle still moving forward (displacement still decreasing);
-                  // IC has the most-forward ankle position.
-                  const _kneeAtSeed = perFrame[seedIdx]?.[_refKneeKey];
+                  // Fallback: among semi-extended-knee frames, prefer minimum displacement
                   const _extFrames = [];
                   for(let _si = _s; _si <= _e; _si++) {
                     const k = perFrame[_si]?.[_refKneeKey];
                     const d = _getDisp(_si);
-                    if(k != null && k >= 140 && d != null) _extFrames.push({idx:_si, k, d});
+                    const gs = _groundScore(_si);
+                    if(k != null && k >= _kThresh && d != null) _extFrames.push({idx:_si, k, d, gs});
                   }
                   if(_extFrames.length > 0) {
-                    // Pick the extended-knee frame with minimum displacement
                     _extFrames.sort((a,b) => a.d - b.d);
                     const pick = _extFrames[0];
-                    console.log(`[Zeni2008] IC fallback (min-disp among extended-knee): → frame ${pick.idx}(knee=${pick.k.toFixed(0)}°, disp=${pick.d.toFixed(3)})`);
+                    console.log(`[Zeni2008] IC fallback (min-disp, k≥${_kThresh}°): → frame ${pick.idx}(knee=${pick.k.toFixed(0)}°, disp=${pick.d.toFixed(3)}, ground=${pick.gs.toFixed(2)})`);
                     return pick.idx;
                   }
 
