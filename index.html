@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.12.0 · 2026.04.12</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.12.1 · 2026.04.12</p>
     </div>
 
     <div class="two-col">
@@ -2905,28 +2905,109 @@ function startFrameExtraction(file, vid) {
               const _reextFracs = window_primaryPhaseSelection.vizFractions || window_primaryPhaseSelection.fractions;
               const _reextDur = vid.duration;
               if(_reextDur && isFinite(_reextDur) && _reextDur > 0) {
-                statusText.textContent = 'Re-extracting gallery at precise phase times...';
-                console.group('[GalleryReextract] Replacing sparse dense frames with phase-accurate frames');
-                let _reextOK = 0;
+                statusText.textContent = 'Re-extracting gallery at precise phase times…';
+                console.group('[GalleryReextract v2] Playback-based stride window capture');
+
+                // ── Compute target times ──
+                const _reextTargets = [];
                 for(let _ri = 0; _ri < Math.min(_reextFracs.length, frames.length); _ri++) {
-                  const _rt = Math.max(0.05, Math.min(_reextFracs[_ri] * _reextDur, _reextDur - 0.05));
-                  const _rLbl = frames[_ri]?.phase?.label || frames[_ri]?.phase?._baseId || '?';
-                  const _rb64 = await seekCapture(vid, _rt);
-                  if(_rb64) {
-                    frames[_ri] = {...frames[_ri], imageData: _rb64};
-                    console.log(`  Frame ${_ri+1} [${_rLbl}]: frac=${_reextFracs[_ri].toFixed(4)} → t=${_rt.toFixed(3)}s ✓`);
-                    _reextOK++;
+                  _reextTargets.push({
+                    idx:   _ri,
+                    time:  Math.max(0.05, Math.min(_reextFracs[_ri] * _reextDur, _reextDur - 0.05)),
+                    frac:  _reextFracs[_ri],
+                    label: frames[_ri]?.phase?.label || frames[_ri]?.phase?._baseId || '?',
+                    captured: false, b64: null, actualTime: null
+                  });
+                }
+                const _windowStart = Math.max(0.02, _reextTargets[0].time - 0.30);
+                const _windowEnd   = _reextTargets[_reextTargets.length-1].time + 0.15;
+                console.log(`  Stride window: ${_windowStart.toFixed(3)}s → ${_windowEnd.toFixed(3)}s (${(_windowEnd-_windowStart).toFixed(3)}s)`);
+                console.log(`  Target times: ${_reextTargets.map(t=>t.time.toFixed(3)+'s').join(', ')}`);
+
+                // ── Strategy A: playback capture with requestVideoFrameCallback ──
+                const _hasRVFC = typeof vid.requestVideoFrameCallback === 'function';
+                let _reextOK = 0;
+
+                if(_hasRVFC) {
+                  console.log('  Using requestVideoFrameCallback (frame-accurate)');
+                  vid.muted = true;
+
+                  // Seek to window start first (with double-rAF wait)
+                  await new Promise((_res) => {
+                    const _onSk = () => {
+                      vid.removeEventListener('seeked', _onSk);
+                      requestAnimationFrame(() => requestAnimationFrame(_res));
+                    };
+                    vid.addEventListener('seeked', _onSk);
+                    vid.currentTime = _windowStart;
+                  });
+
+                  // Play and capture frames as they decode
+                  await new Promise((_res) => {
+                    let _nextTarget = 0;
+                    const _onFrame = (now, metadata) => {
+                      const _mt = metadata.mediaTime;
+                      // Check each uncaptured target to see if this frame is closest
+                      while(_nextTarget < _reextTargets.length) {
+                        const _tgt = _reextTargets[_nextTarget];
+                        // Capture when we're within half a frame of target or past it
+                        if(_mt >= _tgt.time - 0.020) {
+                          const _b64 = captureFrameFromVideo(vid);
+                          if(_b64) {
+                            _tgt.captured = true;
+                            _tgt.b64 = _b64;
+                            _tgt.actualTime = _mt;
+                            _reextOK++;
+                          }
+                          _nextTarget++;
+                        } else {
+                          break;
+                        }
+                      }
+                      if(_nextTarget >= _reextTargets.length || _mt > _windowEnd) {
+                        vid.pause();
+                        _res();
+                      } else {
+                        vid.requestVideoFrameCallback(_onFrame);
+                      }
+                    };
+                    vid.requestVideoFrameCallback(_onFrame);
+                    vid.play().catch(() => { vid.pause(); _res(); });
+                  });
+                  vid.pause();
+
+                } else {
+                  // ── Strategy B: sequential seeks with double-rAF (fallback) ──
+                  console.log('  Using sequential seeks with double-rAF (requestVideoFrameCallback unavailable)');
+                  for(let _ri = 0; _ri < _reextTargets.length; _ri++) {
+                    const _tgt = _reextTargets[_ri];
+                    const _b64 = await seekCapture(vid, _tgt.time);
+                    if(_b64) {
+                      _tgt.captured = true;
+                      _tgt.b64 = _b64;
+                      _tgt.actualTime = vid.currentTime;
+                      _reextOK++;
+                    }
+                  }
+                }
+
+                // ── Apply captured frames ──
+                for(const _tgt of _reextTargets) {
+                  if(_tgt.captured && _tgt.b64) {
+                    frames[_tgt.idx] = {...frames[_tgt.idx], imageData: _tgt.b64};
+                    const _drift = _tgt.actualTime !== null ? `actual=${_tgt.actualTime.toFixed(3)}s drift=${((_tgt.actualTime-_tgt.time)*1000).toFixed(1)}ms` : '';
+                    console.log(`  Frame ${_tgt.idx+1} [${_tgt.label}]: target=${_tgt.time.toFixed(3)}s ${_drift} ✓`);
                   } else {
-                    console.warn(`  Frame ${_ri+1} [${_rLbl}]: seek failed at t=${_rt.toFixed(3)}s — keeping dense frame`);
+                    console.warn(`  Frame ${_tgt.idx+1} [${_tgt.label}]: capture failed at t=${_tgt.time.toFixed(3)}s — keeping dense frame`);
                   }
                 }
                 console.groupEnd();
-                console.log(`[GalleryReextract] Replaced ${_reextOK}/${frames.length} gallery frames with phase-accurate images`);
+                console.log(`[GalleryReextract v2] Replaced ${_reextOK}/${_reextTargets.length} gallery frames (${_hasRVFC ? 'playback' : 'seek'} mode)`);
               } else {
-                console.warn('[GalleryReextract] Video duration unavailable — keeping sparse dense frames');
+                console.warn('[GalleryReextract v2] Video duration unavailable — keeping sparse dense frames');
               }
             } catch(_reextErr) {
-              console.warn('[GalleryReextract] Re-extraction failed:', _reextErr.message);
+              console.warn('[GalleryReextract v2] Re-extraction failed:', _reextErr.message);
             }
           }
 
@@ -3228,13 +3309,20 @@ function seekCapture(vid, t, barMode=false) {
   return new Promise(resolve => {
     let done = false;
     const timer = setTimeout(() => { if(!done){done=true;resolve(null);} }, 5000);
-    const onSeeked = () => {
+    const doCapture = () => {
       if(done) return; done=true; clearTimeout(timer);
-      vid.removeEventListener('seeked', onSeeked);
       resolve(barMode ? captureBarFrame(vid) : captureFrameFromVideo(vid));
     };
+    const onSeeked = () => {
+      if(done) return;
+      vid.removeEventListener('seeked', onSeeked);
+      // CRITICAL FIX: wait for 2 animation frames after seeked fires
+      // so the browser actually composites the decoded frame before we drawImage.
+      // Without this, drawImage captures a stale/previous frame.
+      requestAnimationFrame(() => requestAnimationFrame(doCapture));
+    };
     vid.addEventListener('seeked', onSeeked);
-    try { vid.currentTime = t; } catch(e) { resolve(null); }
+    try { vid.currentTime = t; } catch(e) { if(!done){done=true;resolve(null);} }
   });
 }
 
@@ -3561,13 +3649,18 @@ function seekCapture2(vid, t) {
   return new Promise(resolve => {
     let done = false;
     const timer = setTimeout(() => { if(!done){done=true;resolve(null);} }, 5000);
-    const onSeeked = () => {
+    const doCapture = () => {
       if(done) return; done=true; clearTimeout(timer);
-      vid.removeEventListener('seeked', onSeeked);
       resolve(captureFrameFromVideo(vid));
     };
+    const onSeeked = () => {
+      if(done) return;
+      vid.removeEventListener('seeked', onSeeked);
+      // Double-rAF: wait for frame compositing (same fix as seekCapture)
+      requestAnimationFrame(() => requestAnimationFrame(doCapture));
+    };
     vid.addEventListener('seeked', onSeeked);
-    try { vid.currentTime = t; } catch(e) { resolve(null); }
+    try { vid.currentTime = t; } catch(e) { if(!done){done=true;resolve(null);} }
   });
 }
 
