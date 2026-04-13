@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.11.0 · 2026.04.12</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.12.0 · 2026.04.12</p>
     </div>
 
     <div class="two-col">
@@ -2884,6 +2884,52 @@ function startFrameExtraction(file, vid) {
             }
           });
           console.log(`[SmartPhase] Stored ${window._phaseLandmarkAnchors.length} landmark anchors for dense bar tracking`);
+
+          // ── Re-extract gallery frames at precise Zeni phase times ──────────────
+          // CRITICAL FIX: The dense scan has only ~7 frames per stride (~110ms apart)
+          // but there are 8 gait phases to show. The gallery selection above assigns
+          // these sparse frames to phases greedily — by the time we reach Toe Off or
+          // Mid Swing, the assigned dense frame can be 150-300ms off from the actual
+          // gait event. This causes persistent wrong-phase images in the gallery.
+          //
+          // Solution: now that window_primaryPhaseSelection has precise Zeni-computed
+          // fractions, re-extract 8 frames from the original 120fps video at those
+          // exact times. This replaces the sparse dense images with phase-accurate
+          // images BEFORE the landmark review panel, so:
+          //   a) The user sees correct frames for correction
+          //   b) Corrections are tied to the right images
+          //   c) Stage 3a (post-correction re-extraction) is no longer needed
+          const _needsGaitReextract = /running|gait|walk/i.test(movement);
+          if(_needsGaitReextract && window_primaryPhaseSelection?.fractions?.length >= 4) {
+            try {
+              const _reextFracs = window_primaryPhaseSelection.vizFractions || window_primaryPhaseSelection.fractions;
+              const _reextDur = vid.duration;
+              if(_reextDur && isFinite(_reextDur) && _reextDur > 0) {
+                statusText.textContent = 'Re-extracting gallery at precise phase times...';
+                console.group('[GalleryReextract] Replacing sparse dense frames with phase-accurate frames');
+                let _reextOK = 0;
+                for(let _ri = 0; _ri < Math.min(_reextFracs.length, frames.length); _ri++) {
+                  const _rt = Math.max(0.05, Math.min(_reextFracs[_ri] * _reextDur, _reextDur - 0.05));
+                  const _rLbl = frames[_ri]?.phase?.label || frames[_ri]?.phase?._baseId || '?';
+                  const _rb64 = await seekCapture(vid, _rt);
+                  if(_rb64) {
+                    frames[_ri] = {...frames[_ri], imageData: _rb64};
+                    console.log(`  Frame ${_ri+1} [${_rLbl}]: frac=${_reextFracs[_ri].toFixed(4)} → t=${_rt.toFixed(3)}s ✓`);
+                    _reextOK++;
+                  } else {
+                    console.warn(`  Frame ${_ri+1} [${_rLbl}]: seek failed at t=${_rt.toFixed(3)}s — keeping dense frame`);
+                  }
+                }
+                console.groupEnd();
+                console.log(`[GalleryReextract] Replaced ${_reextOK}/${frames.length} gallery frames with phase-accurate images`);
+              } else {
+                console.warn('[GalleryReextract] Video duration unavailable — keeping sparse dense frames');
+              }
+            } catch(_reextErr) {
+              console.warn('[GalleryReextract] Re-extraction failed:', _reextErr.message);
+            }
+          }
+
         } catch(e) {
           console.warn('Smart phase detection failed, using time-based labels:', e);
         }
@@ -9317,17 +9363,24 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     // Timestamps survive frame-selection changes: corrections stored by time,
     // not index, so they stay valid across code versions.
     const _phSel = window_primaryPhaseSelection;
-    const _primDur = window._primaryVidEl?.duration;
-    if(_phSel?.fractions && _primDur && isFinite(_primDur)) {
+    // Try _primaryVidEl.duration first, fall back to strideMetrics.videoDurationS
+    const _primDurVid = window._primaryVidEl?.duration;
+    const _primDurSM  = window_strideMetrics?.videoDurationS;
+    const _primDur = (_primDurVid && isFinite(_primDurVid)) ? _primDurVid
+                   : (_primDurSM  && isFinite(_primDurSM))  ? _primDurSM : null;
+    if(_phSel?.fractions && _primDur) {
       const _displayFracs = _phSel.vizFractions || _phSel.fractions;
       _rvFrameTimes  = _displayFracs.map(f => Math.round(f * _primDur * 1000) / 1000); // ms precision
       _rvFramePhases = (_phSel.labels || []).map(l => l?._baseId || l?.id || '');
     } else {
       _rvFrameTimes  = [];
       _rvFramePhases = [];
+      console.warn('[Corrections] Could not compute primary frame times — phSel:',
+        !!_phSel, 'fractions:', !!_phSel?.fractions,
+        'vidDur:', _primDurVid, 'smDur:', _primDurSM);
     }
     if(_rvFrameTimes.length > 0) {
-      console.log(`[Corrections] Primary frame times: ${_rvFrameTimes.map(t=>t.toFixed(3)+'s').join(', ')}`);
+      console.log(`[Corrections] Primary frame times (from ${_primDurVid && isFinite(_primDurVid) ? 'video' : 'strideMetrics'}): ${_rvFrameTimes.map(t=>t.toFixed(3)+'s').join(', ')}`);
     }
 
     // Deep clone primary landmarks
@@ -10965,82 +11018,18 @@ async function runAnalysis() {
     }
   }
 
-  // ── Stage 3a: Re-extract primary gallery at accurate phase-aligned positions ──
-  // The GaitFSM dense array has only ~6 frames per stride (~9fps equivalent across the clip).
-  // Each gallery frame could be off by up to 110ms. Now that window_primaryPhaseSelection
-  // has time-based fractions (computed from stride engine), re-seek the original 120fps video
-  // to those exact times and replace annotatedFrames with high-temporal-resolution images.
+  // ── Stage 3a: RETIRED ──────────────────────────────────────────────────────
+  // Gallery frame re-extraction now happens in doExtract() immediately after
+  // GaitFSM computes window_primaryPhaseSelection, BEFORE the landmark review
+  // panel. This eliminates the vicious cycle where:
+  //   1. Sparse dense frames (wrong images) were shown for correction
+  //   2. Corrections set _primaryCorrectionsMade = true
+  //   3. Stage 3a was skipped to preserve corrections
+  //   4. Report showed wrong frames forever
+  // Now the landmark review always sees phase-accurate frames, so corrections
+  // are tied to the correct images and Stage 3a is no longer needed.
   const _isGaitMovement = /running|gait|walk/i.test(movement);
-  // Skip Stage 3a if PT made manual landmark corrections — re-extracting would discard them
-  const _skipStage3a = window._primaryCorrectionsMade === true;
-  if(!_skipStage3a && _isGaitMovement && window_primaryPhaseSelection && uploadedFile && mpReady && poseLandmarkerInstance) {
-    try {
-      statusEl.textContent = 'Re-extracting gallery frames at precise phase times...';
-      const _p3aVid = document.createElement('video');
-      _p3aVid.muted = true; _p3aVid.preload = 'auto';
-      const _p3aUrl = URL.createObjectURL(uploadedFile);
-      _p3aVid.src = _p3aUrl;
-      await new Promise(res => {
-        _p3aVid.oncanplay = res; _p3aVid.onloadeddata = res;
-        _p3aVid.onerror = res; setTimeout(res, 8000);
-      });
-      const _p3aDur = isFinite(_p3aVid.duration) && _p3aVid.duration > 0 ? _p3aVid.duration : null;
-      if(_p3aDur) {
-        const _phSel = window_primaryPhaseSelection;
-        const _phDisplayFracs = _phSel.vizFractions || _phSel.fractions;
-        const _newFrames = [];
-        console.group('[Stage 3a] Seeking primary gallery at phase-aligned times (vidDur=' + _p3aDur.toFixed(2) + 's)');
-        for(let _i = 0; _i < _phDisplayFracs.length; _i++) {
-          const _t = Math.max(0.05, Math.min(_phDisplayFracs[_i] * _p3aDur, _p3aDur - 0.05));
-          const _lbl = _phSel.labels[_i]?.label || _phSel.labels[_i]?._baseId || '?';
-          console.log(`  Frame ${_i+1} [${_lbl}]: frac=${_phDisplayFracs[_i].toFixed(3)} → t=${_t.toFixed(3)}s`);
-          const _b64 = await seekCapture(_p3aVid, _t);
-          if(_b64) _newFrames.push({imageData: _b64, phase: _phSel.labels[_i]});
-        }
-        console.groupEnd();
-        if(_newFrames.length >= 4) {
-          // Run MP + skeleton on re-extracted frames
-          const _newMp = await runMediaPipeOnFrames(_newFrames);
-          const _newFused = await fusedLandmarkPipeline(
-            _newMp, _newFrames.map(f=>f.imageData), movement, cameraView
-          );
-          // Foot refinement for gait
-          let _newRef = _newFused;
-          if(mpReady && poseLandmarkerInstance) {
-            _newRef = await Promise.all(_newFused.map((lms,i) =>
-              lms ? refineFootLandmarks(_newFrames[i].imageData, lms) : Promise.resolve(null)
-            ));
-            const _tapeCfgP3a = readTapeConfig();
-            if(_tapeCfgP3a) {
-              _newRef = await Promise.all(_newRef.map((lms,i) =>
-                lms ? applyTapeRefinement(_newFrames[i].imageData, lms, _tapeCfgP3a) : Promise.resolve(null)
-              ));
-            }
-          }
-          const _newAnnotated = [];
-          for(let _i = 0; _i < _newFrames.length; _i++) {
-            const _mp = {poseLandmarks: _newRef[_i]};
-            const {canvas, base64} = await drawSkeleton(_newFrames[_i].imageData, _mp, null, cameraView, _newFrames[_i].phase);
-            _newAnnotated.push({base64, canvas, phase: _newFrames[_i].phase});
-          }
-          if(_newAnnotated.length >= 4) {
-            annotatedFrames.length = 0;
-            _newAnnotated.forEach(f => annotatedFrames.push(f));
-            console.log('[Analysis] Stage 3a: Primary gallery re-extracted at accurate phase times (' + _newAnnotated.length + ' frames)');
-            console.log('[Analysis] Stage 3a phases: ' +
-              annotatedFrames.map((f,i) => `${i+1}:${f.phase?._baseId || f.phase?.id || '?'}`).join(' '));
-          }
-        }
-      }
-      URL.revokeObjectURL(_p3aUrl);
-    } catch(_p3aErr) {
-      console.warn('[Analysis] Stage 3a: Primary re-extraction failed (will use GaitFSM frames):', _p3aErr.message);
-    }
-  } else {
-    const _skipReason = _skipStage3a ? 'corrections made' : !_isGaitMovement ? 'not gait' :
-      !window_primaryPhaseSelection ? 'no phase selection' : !uploadedFile ? 'no file' : 'MP not ready';
-    console.log('[Analysis] Stage 3a SKIPPED: ' + _skipReason);
-  }
+  console.log('[Analysis] Stage 3a RETIRED: gallery frames already phase-accurate from GalleryReextract in doExtract()');
   // Diagnostic: final annotatedFrames state before Stage 3b
   console.log('[Analysis] Pre-3b annotatedFrames: ' +
     annotatedFrames.map((f,i) => `${i+1}:${f.phase?._baseId || f.phase?.label?.slice(0,10) || '?'}`).join(' '));
@@ -12586,7 +12575,8 @@ function _corrSave() {
       localStorage.removeItem(sorted[0].k);
     }
     const count = _rvEdited.filter(Boolean).length + (_rvEdited2?.filter(Boolean).length ?? 0);
-    console.log(`[Corrections] Saved ${count} frame edits for "${key}"`);
+    const _hasTs = !!data.pTimes;
+    console.log(`[Corrections] Saved ${count} frame edits for "${key}" (v${data.v}, timestamps: ${_hasTs ? data.pTimes.map(t=>t.toFixed(3)+'s').join(',') : 'NONE'})`);
   } catch(e) {
     console.warn('[Corrections] Save failed:', e.message);
   }
@@ -12647,8 +12637,16 @@ function _corrApply(savedData) {
   }
 
   const primUnpacked = _corrUnpack(savedData.primary);
-  if(isV2) {
+  console.log(`[Corrections] Loading: format=v${savedData.v || 1}, savedPTimes=${savedData.pTimes ? savedData.pTimes.length+'frames' : 'NONE'}, currentFrameTimes=${_rvFrameTimes.length}frames`);
+  // Determine matching strategy: v2 timestamp requires BOTH saved AND current frame times
+  const _useTimestampMatch = isV2 && _rvFrameTimes.length > 0;
+  if(isV2 && !_rvFrameTimes.length) {
+    console.warn('[Corrections] v2 data has timestamps but current frame times are empty — falling back to legacy index matching');
+  }
+
+  if(_useTimestampMatch) {
     // ── v2 timestamp-based matching ─────────────────────────────────────────
+    console.log('[Corrections] Using v2 timestamp-based matching');
     const pResult = _matchByTime(savedData.pTimes, savedData.pEd, primUnpacked, savedData.pPhases,
                                   _rvFrameTimes, _rvLandmarks, _rvEdited, _rvFramePhases);
     applied += pResult.n;
@@ -12665,7 +12663,8 @@ function _corrApply(savedData) {
       console.warn(`[Corrections] ${skippedNoMatch} saved correction(s) could not be matched (frame timing shifted >${MATCH_TOL*1000}ms)`);
     }
   } else {
-    // ── Legacy v1 index-based matching (for old saved corrections) ───────────
+    // ── Legacy v1 index-based matching (for old or fallback corrections) ─────
+    console.log('[Corrections] Using legacy index-based matching' + (isV2 ? ' (v2 fallback — no current frame times)' : ' (v1 format)'));
     if(primUnpacked && _rvLandmarks) {
       savedData.pEd.forEach((edited, i) => {
         if(edited && primUnpacked[i] && i < _rvLandmarks.length) {
@@ -12685,7 +12684,6 @@ function _corrApply(savedData) {
         }
       });
     }
-    console.log('[Corrections] Used legacy index-based matching (v1 format)');
   }
   return applied;
 }
