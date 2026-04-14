@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.1 · 2026.04.13</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.2 · 2026.04.14</p>
     </div>
 
     <div class="two-col">
@@ -6135,11 +6135,18 @@ function extractAngles(lm, view='side', movement='') {
       const v3 = hipFlexV3D(lHip,lKnee), v2 = hipFlexV2D(lHip,lKnee);
       const val = (v3 != null && v2 != null) ? Math.max(v3, v2) : (v3 ?? v2);
       if(val!=null) angles['Left Hip Flexion'] = val;
+      // [HipFlex Debug v0.13.2] stash raw 2D/3D picks for end-of-analysis audit
+      angles['_lHipFlex2D'] = v2;
+      angles['_lHipFlex3D'] = v3;
+      angles['_lHipFlexPick'] = (v3 != null && v2 != null) ? (v3 >= v2 ? '3D' : '2D') : (v3 != null ? '3D-only' : (v2 != null ? '2D-only' : 'none'));
     }
     if(rHip&&rKnee) {
       const v3 = hipFlexV3D(rHip,rKnee), v2 = hipFlexV2D(rHip,rKnee);
       const val = (v3 != null && v2 != null) ? Math.max(v3, v2) : (v3 ?? v2);
       if(val!=null) angles['Right Hip Flexion'] = val;
+      angles['_rHipFlex2D'] = v2;
+      angles['_rHipFlex3D'] = v3;
+      angles['_rHipFlexPick'] = (v3 != null && v2 != null) ? (v3 >= v2 ? '3D' : '2D') : (v3 != null ? '3D-only' : (v2 != null ? '2D-only' : 'none'));
     }
   } else {
     // Other movements: shoulder-hip-knee (trunk lean is clinically relevant reference)
@@ -8808,6 +8815,53 @@ function aggregateAngles(allFrameAngles, framePhases) {
       lowConfidence: hitRate < 0.40,      // flagged when fewer than 40% of frames contributed
     };
   });
+
+  // ── [HipFlex Debug v0.13.2] Per-frame hip flexion trace audit ────────────
+  // Dumps the 10 highest-hip-flex frames per side with phase tags and 2D/3D
+  // pick, plus a pick distribution summary.  Helps diagnose peak-missing vs
+  // landmark-bias causes of under-reading.
+  try {
+    const hipRows = [];
+    const pickCounts = { L: {}, R: {} };
+    allFrameAngles.forEach((fa, fi) => {
+      const phaseRaw = framePhases?.[fi];
+      const phaseId = phaseRaw?._baseId || phaseRaw?.id || null;
+      const row = {
+        frame: fi,
+        phase: phaseId || '-',
+        L: fa['Left Hip Flexion'] ?? null,
+        L2D: fa['_lHipFlex2D'] ?? null,
+        L3D: fa['_lHipFlex3D'] ?? null,
+        Lpick: fa['_lHipFlexPick'] ?? null,
+        R: fa['Right Hip Flexion'] ?? null,
+        R2D: fa['_rHipFlex2D'] ?? null,
+        R3D: fa['_rHipFlex3D'] ?? null,
+        Rpick: fa['_rHipFlexPick'] ?? null,
+      };
+      if(row.Lpick) pickCounts.L[row.Lpick] = (pickCounts.L[row.Lpick]||0) + 1;
+      if(row.Rpick) pickCounts.R[row.Rpick] = (pickCounts.R[row.Rpick]||0) + 1;
+      if(row.L != null || row.R != null) hipRows.push(row);
+    });
+    if(hipRows.length) {
+      const topL = [...hipRows].filter(r=>r.L!=null).sort((a,b)=>b.L-a.L).slice(0,10);
+      const topR = [...hipRows].filter(r=>r.R!=null).sort((a,b)=>b.R-a.R).slice(0,10);
+      console.log(`[HipFlex Debug] ─── Pick distribution ─── L:`, pickCounts.L, 'R:', pickCounts.R);
+      console.log(`[HipFlex Debug] Top 10 L frames (frame / phase / L° / 2D° / 3D° / pick):`);
+      console.table(topL.map(r=>({frame:r.frame, phase:r.phase, L:r.L, '2D':r.L2D, '3D':r.L3D, pick:r.Lpick})));
+      console.log(`[HipFlex Debug] Top 10 R frames (frame / phase / R° / 2D° / 3D° / pick):`);
+      console.table(topR.map(r=>({frame:r.frame, phase:r.phase, R:r.R, '2D':r.R2D, '3D':r.R3D, pick:r.Rpick})));
+      // Peak comparison: aggregator-reported max vs raw trace max (per side)
+      const rawMaxL = Math.max(...hipRows.map(r=>r.L ?? -Infinity));
+      const rawMaxR = Math.max(...hipRows.map(r=>r.R ?? -Infinity));
+      const rawMax2DL = Math.max(...hipRows.map(r=>r.L2D ?? -Infinity));
+      const rawMax3DL = Math.max(...hipRows.map(r=>r.L3D ?? -Infinity));
+      const rawMax2DR = Math.max(...hipRows.map(r=>r.R2D ?? -Infinity));
+      const rawMax3DR = Math.max(...hipRows.map(r=>r.R3D ?? -Infinity));
+      console.log(`[HipFlex Debug] Raw trace max — L: ${isFinite(rawMaxL)?rawMaxL:'?'}° (2D max ${isFinite(rawMax2DL)?rawMax2DL:'?'}°, 3D max ${isFinite(rawMax3DL)?rawMax3DL:'?'}°) | R: ${isFinite(rawMaxR)?rawMaxR:'?'}° (2D max ${isFinite(rawMax2DR)?rawMax2DR:'?'}°, 3D max ${isFinite(rawMax3DR)?rawMax3DR:'?'}°)`);
+      console.log(`[HipFlex Debug] Aggregator-reported max — L: ${result['Left Hip Flexion']?.max ?? '?'}° | R: ${result['Right Hip Flexion']?.max ?? '?'}° (swing frames only)`);
+    }
+  } catch(e) { console.warn('[HipFlex Debug] trace dump failed:', e); }
+
   return result;
 }
 
