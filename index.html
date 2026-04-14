@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.2 · 2026.04.14</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.3 · 2026.04.14</p>
     </div>
 
     <div class="two-col">
@@ -8749,6 +8749,16 @@ function flagAngle(name, val) {
 function aggregateAngles(allFrameAngles, framePhases) {
   const combined = {};
   const frameCounts = {}; // total frames where metric was attempted
+  // Determine REF leg from any tagged phase (_side='L' or 'R', set by GaitFSM v4).
+  // When REF=L, phase ids describe the Left leg's gait cycle.  The Right leg is
+  // offset by ~50% — so L-stance frames are approximately R-swing and vice versa.
+  // This matters for hip flexion: Right hip flex peaks during L-stance (propulsion/
+  // toeoff), which was being incorrectly filtered as "stance" and dropping peak R
+  // values by up to 10° (v0.13.3 fix).
+  let refSide = null;
+  for(const p of Object.values(framePhases || {})) {
+    if(p?._side === 'L' || p?._side === 'R') { refSide = p._side; break; }
+  }
   allFrameAngles.forEach((frameAngles, fi) => {
     // Read phaseId from _baseId first (set by GaitFSM position-based selector),
     // falling back to .id (set by event-based path). Both are valid phase keys.
@@ -8770,17 +8780,24 @@ function aggregateAngles(allFrameAngles, framePhases) {
       // have the heel rotating away; toeoff has it fully lifted.
       // Fall through (allow) if phaseId is null (no phase info available — old videos).
       if(k.includes('Pronation') && phaseId !== null && phaseId !== 'loading' && phaseId !== 'contact') return;
-      // Hip Flexion: swing frames only for .max peak.
-      // During stance the hip is near-neutral (10-20°). Including stance frames
-      // depresses .max and makes peak hip flexion appear lower than it really is.
-      // We still collect stance values for .avg but tag them for gaitDisplayVal.
-      if(isStance && (k === 'Left Hip Flexion' || k === 'Right Hip Flexion')) {
-        // Store separately as stance hip values — not counted toward swing peak
-        const stanceKey = k + '__stance';
-        if(!combined[stanceKey]) { combined[stanceKey] = []; frameCounts[stanceKey] = 0; }
-        frameCounts[stanceKey]++;
-        combined[stanceKey].push(v);
-        return; // don't add to main pool (which .max reads from)
+      // Hip Flexion: exclude frames where THE LEG BEING MEASURED is in its own stance.
+      // The phase labels describe the REF leg. For the contralateral leg, stance ≈ REF swing
+      // (runner is ~50% out of phase). Before v0.13.3 we applied the REF-leg stance filter
+      // to BOTH legs, which filtered out the contralateral leg's PEAK swing (its true peak
+      // hip flex occurs during REF stance). The fix is to invert the filter for contralateral.
+      if(k === 'Left Hip Flexion' || k === 'Right Hip Flexion') {
+        const measuredLegIsL   = (k === 'Left Hip Flexion');
+        const measuredIsRefLeg = refSide ? ((measuredLegIsL && refSide === 'L') || (!measuredLegIsL && refSide === 'R')) : true;
+        // "Own-leg stance" = REF-stance for ref leg, REF-swing for contralateral leg.
+        const ownLegInStance = measuredIsRefLeg ? isStance : isSwing;
+        if(ownLegInStance) {
+          // Store separately as stance hip values — not counted toward swing peak
+          const stanceKey = k + '__stance';
+          if(!combined[stanceKey]) { combined[stanceKey] = []; frameCounts[stanceKey] = 0; }
+          frameCounts[stanceKey]++;
+          combined[stanceKey].push(v);
+          return; // don't add to main pool (which .max reads from)
+        }
       }
       if(!combined[k]) { combined[k] = []; frameCounts[k] = 0; }
       frameCounts[k]++;
@@ -8845,6 +8862,7 @@ function aggregateAngles(allFrameAngles, framePhases) {
     if(hipRows.length) {
       const topL = [...hipRows].filter(r=>r.L!=null).sort((a,b)=>b.L-a.L).slice(0,10);
       const topR = [...hipRows].filter(r=>r.R!=null).sort((a,b)=>b.R-a.R).slice(0,10);
+      console.log(`[HipFlex Debug] REF=${refSide || '?'} — filter inverts for contralateral leg (v0.13.3)`);
       console.log(`[HipFlex Debug] ─── Pick distribution ─── L:`, pickCounts.L, 'R:', pickCounts.R);
       console.log(`[HipFlex Debug] Top 10 L frames (frame / phase / L° / 2D° / 3D° / pick):`);
       console.table(topL.map(r=>({frame:r.frame, phase:r.phase, L:r.L, '2D':r.L2D, '3D':r.L3D, pick:r.Lpick})));
