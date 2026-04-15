@@ -413,7 +413,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="page-header">
       <h1>New Motion Assessment</h1>
       <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
-      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.3 · 2026.04.14</p>
+      <p style="font-size:.65rem;opacity:.4;margin-top:4px;letter-spacing:.04em;">v0.13.4 · 2026.04.14</p>
     </div>
 
     <div class="two-col">
@@ -6447,6 +6447,32 @@ function extractAngles(lm, view='side', movement='') {
 
       if(lPron != null) { angles['Left Pronation']  = lPron.deg; angles['_lPronEverted'] = lPron.everted; }
       if(rPron != null) { angles['Right Pronation'] = rPron.deg; angles['_rPronEverted'] = rPron.everted; }
+
+      // ── [Pronation Debug v0.13.4] per-frame landmark + computation audit ─────
+      // Stashed on angles for end-of-analysis dump (see aggregator audit block).
+      // Helps identify why L may over-read (heel-landmark bias, stance gating, etc.).
+      const _pronSnap = (side, knee, ankle, heelFiltered, heelRaw, stance, pron) => {
+        if(!knee || !ankle) return null;
+        const heelForXY = heelFiltered || heelRaw;
+        return {
+          side,
+          stance,
+          kneeConf:   knee  ? +(combinedConf(knee)).toFixed(2)  : null,
+          ankleConf:  ankle ? +(combinedConf(ankle)).toFixed(2) : null,
+          heelConfRaw: heelRaw ? +(combinedConf(heelRaw)).toFixed(2) : null,
+          heelUsed:   !!heelFiltered,  // false = MediaPipe heel dropped by conf threshold
+          heelSrc:    heelForXY?.source || null,
+          kneeXY:     knee      ? [+knee.x.toFixed(3),  +knee.y.toFixed(3)]   : null,
+          ankleXY:    ankle     ? [+ankle.x.toFixed(3), +ankle.y.toFixed(3)]  : null,
+          heelXYraw:  heelRaw   ? [+heelRaw.x.toFixed(3), +heelRaw.y.toFixed(3)] : null,
+          ankleY:     ankle ? +ankle.y.toFixed(3) : null,
+          deg:        pron?.deg ?? null,
+          everted:    pron?.everted ?? null,
+          pronResult: pron == null ? (stance ? (heelFiltered ? 'null-from-compute' : 'heel-rejected-by-conf') : 'no-stance') : 'ok',
+        };
+      };
+      angles['_lPronDebug'] = _pronSnap('L', lKneePost, lAnkPost, lHeelPost, lm[29], lStance, lPron);
+      angles['_rPronDebug'] = _pronSnap('R', rKneePost, rAnkPost, rHeelPost, lm[30], rStance, rPron);
     }
     // More accurate from frontal than sagittal. Trunk lateral deviation angle.
     if(lShoulder && rShoulder && lHipF && rHipF) {
@@ -8880,6 +8906,49 @@ function aggregateAngles(allFrameAngles, framePhases) {
     }
   } catch(e) { console.warn('[HipFlex Debug] trace dump failed:', e); }
 
+  // ── [Pronation Debug v0.13.4] Per-frame pronation audit ──────────────────
+  // Dumps every frame where pronation was computed (posterior view only) with
+  // landmark positions, confidence, heel source, stance gating, and computed
+  // angle. Helps diagnose asymmetric over-reading (e.g. L=12° vs GT=6° when
+  // R=6° matches GT).
+  try {
+    const pronRowsL = [], pronRowsR = [];
+    allFrameAngles.forEach((fa, fi) => {
+      const phaseRaw = framePhases?.[fi];
+      const phaseId = phaseRaw?._baseId || phaseRaw?.id || null;
+      const ld = fa['_lPronDebug'], rd = fa['_rPronDebug'];
+      if(ld) pronRowsL.push({frame: fi, phase: phaseId || '-', ...ld});
+      if(rd) pronRowsR.push({frame: fi, phase: phaseId || '-', ...rd});
+    });
+    if(pronRowsL.length || pronRowsR.length) {
+      console.log('[Pronation Debug] ─── all posterior frames with landmark snapshot ───');
+      const _toRow = (r) => ({
+        frame: r.frame, phase: r.phase,
+        stance: r.stance, ankleY: r.ankleY,
+        kneeXY: r.kneeXY?.join(','), ankleXY: r.ankleXY?.join(','), heelXYraw: r.heelXYraw?.join(','),
+        kneeConf: r.kneeConf, ankleConf: r.ankleConf, heelConfRaw: r.heelConfRaw, heelUsed: r.heelUsed,
+        heelSrc: (r.heelSrc || '').slice(0, 20),
+        deg: r.deg, everted: r.everted, result: r.pronResult,
+      });
+      if(pronRowsL.length) {
+        console.log('[Pronation Debug] LEFT (all posterior frames):');
+        console.table(pronRowsL.map(_toRow));
+      }
+      if(pronRowsR.length) {
+        console.log('[Pronation Debug] RIGHT (all posterior frames):');
+        console.table(pronRowsR.map(_toRow));
+      }
+      const lDegs = pronRowsL.map(r=>r.deg).filter(v=>v!=null);
+      const rDegs = pronRowsR.map(r=>r.deg).filter(v=>v!=null);
+      const lContribL = pronRowsL.filter(r=>r.deg!=null && (r.phase==='contact' || r.phase==='loading')).map(r=>r.deg);
+      const rContribR = pronRowsR.filter(r=>r.deg!=null && (r.phase==='contact' || r.phase==='loading')).map(r=>r.deg);
+      const _avg = (a) => a.length ? +(a.reduce((x,y)=>x+y,0)/a.length).toFixed(1) : '?';
+      console.log(`[Pronation Debug] L: computed ${lDegs.length}/${pronRowsL.length} frames, contact+loading ${lContribL.length} → avg ${_avg(lContribL)}° | max ${lDegs.length?Math.max(...lDegs):'?'}°`);
+      console.log(`[Pronation Debug] R: computed ${rDegs.length}/${pronRowsR.length} frames, contact+loading ${rContribR.length} → avg ${_avg(rContribR)}° | max ${rDegs.length?Math.max(...rDegs):'?'}°`);
+      console.log(`[Pronation Debug] Aggregator-reported L avg ${result['Left Pronation']?.avg ?? '?'}° / R avg ${result['Right Pronation']?.avg ?? '?'}° (contact+loading only filter applied)`);
+    }
+  } catch(e) { console.warn('[Pronation Debug] trace dump failed:', e); }
+
   return result;
 }
 
@@ -9601,16 +9670,24 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     _rvRawFrames2  = extractedFrames2  || null;
     _rvAnnotated2  = annotatedFrames2  || null;
     _rvEdited2     = extractedFrames2  ? new Array(extractedFrames2.length).fill(false) : [];
-    // Secondary timestamps from secondary phase selection (if available)
-    const _secPhSel = window._secondaryPhaseSelection;
+    // Secondary timestamps — the secondary video uses the SAME fractions as primary
+    // (Stage 3b re-extracts at window_primaryPhaseSelection.fractions applied to the
+    // secondary video's duration). So we reuse the primary phase selection, just
+    // multiplied by the secondary video's duration. v0.13.4 fix: previously read
+    // window._secondaryPhaseSelection, which is never set anywhere — so _rvFrameTimes2
+    // was always empty, sTimes was saved as null, and the v2 load path silently
+    // dropped all secondary corrections on subsequent runs.
+    const _secPhSel = window_primaryPhaseSelection;
     const _secDur   = window._secondaryVidEl?.duration;
     if(_secPhSel?.fractions && _secDur && isFinite(_secDur)) {
       const _secDisplayFracs = _secPhSel.vizFractions || _secPhSel.fractions;
       _rvFrameTimes2  = _secDisplayFracs.map(f => Math.round(f * _secDur * 1000) / 1000);
       _rvFramePhases2 = (_secPhSel.labels || []).map(l => l?._baseId || l?.id || '');
+      console.log('[Corrections] Secondary frame times populated from primary phase selection × secondary duration (' + _rvFrameTimes2.length + ' frames, dur=' + _secDur.toFixed(2) + 's)');
     } else {
       _rvFrameTimes2  = [];
       _rvFramePhases2 = [];
+      if(refinedLandmarks2) console.warn('[Corrections] Secondary frame times NOT populated — secondary corrections will not persist across runs (missing primary phase selection or secondary video duration)');
     }
     if(refinedLandmarks2) {
       _rvOriginals2 = refinedLandmarks2.map(lms => lms ? lms.map(lm => lm ? {...lm} : null) : null);
@@ -12871,6 +12948,21 @@ function _corrApply(savedData) {
                                     _rvFrameTimes2, _rvLandmarks2, _rvEdited2, _rvFramePhases2);
       applied += sResult.n;
       skippedNoMatch += sResult.skip;
+    } else if(secUnpacked && _rvLandmarks2 && !savedData.sTimes) {
+      // v0.13.4 fallback: saved data has secondary corrections but no timestamps
+      // (pre-v0.13.4 bug — _secondaryPhaseSelection was never populated).
+      // Fall back to index-based matching to recover the corrections.
+      console.log('[Corrections] Secondary sTimes missing (legacy save) — using index-based fallback for secondary');
+      let secN = 0;
+      (savedData.sEd || []).forEach((edited, i) => {
+        if(edited && secUnpacked[i] && i < _rvLandmarks2.length) {
+          _rvLandmarks2[i] = secUnpacked[i];
+          _rvEdited2[i]    = true;
+          secN++;
+        }
+      });
+      applied += secN;
+      if(secN > 0) console.log(`[Corrections] Recovered ${secN} secondary correction(s) via index fallback`);
     }
     if(skippedNoMatch > 0) {
       console.warn(`[Corrections] ${skippedNoMatch} saved correction(s) could not be matched (frame timing shifted >${MATCH_TOL*1000}ms)`);
