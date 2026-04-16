@@ -3563,36 +3563,115 @@ async function startFrameExtraction2(file, vid) {
           if(_pf2.length >= 6) {
             const _vizFracs2 = {};
             const _used2 = new Set();
-            // Secondary video is POSTERIOR view. The 2D knee angle (k) represents frontal-plane
-            // geometry — in posterior view k is always ~165-180° (leg looks straight) so k-based
-            // scorers always return -1. Use ankle height (y) as the primary phase signal instead.
-            // d = lateral ankle displacement in posterior view (not useful for stride phase detection).
-            const _scorers2 = {
-              // Stance phases: ankle near ground (y > threshold). Different multipliers
-              // mean each stance phase prefers a different ankle height, spreading selections.
-              'contact':    (d,k,y,h) => (y > 0.80) ? (y * 1.8) : -1,
-              'loading':    (d,k,y,h) => (y > 0.79) ? (y * 1.6) : -1,
-              'midstance':  (d,k,y,h) => (y > 0.78) ? (y * 1.4) : -1,
-              'propulsion': (d,k,y,h) => (y > 0.73) ? (y * 1.2) : -1,
-              // Toe-off: ankle transitioning from ground to air
-              'toeoff':     (d,k,y,h) => (y > 0.68 && y < 0.85) ? (y * 2.0) : -1,
-              // Swing phases: ankle clearly elevated (y < threshold). Different multipliers
-              // spread earlyswing / midswing / lateswing to different elevation bands.
-              'earlyswing': (d,k,y,h) => (y < 0.84) ? ((0.84 - y) * 80) : -1,
-              'midswing':   (d,k,y,h) => (y < 0.80) ? ((0.80 - y) * 200) : -1,
-              'lateswing':  (d,k,y,h) => (y < 0.84) ? ((0.84 - y) * 60) : -1,
-            };
-            // Process high-confidence phases first (midswing, toeoff, contact)
-            ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'].forEach(phId => {
-              let best = -Infinity, bestT = null, bestI = -1;
-              const sc = _scorers2[phId];
-              _pf2.forEach((f, fi) => {
-                if(_used2.has(fi)) return;
-                const s = sc(f.d, f.k, f.y, f.h);
-                if(s > best) { best = s; bestT = f.t; bestI = fi; }
+            // Secondary video is POSTERIOR view. Adaptive scoring: use percentiles of
+            // the observed ankle-Y distribution instead of fixed thresholds, because
+            // the absolute Y range varies with camera height, distance, and treadmill
+            // geometry. Fixed thresholds caused 3/8 phases to fail (v0.13.4 fix).
+            //
+            // Strategy: find ONE complete stride cycle in the posterior scan, then
+            // select the 8 phase frames from within that cycle using phase timing
+            // ratios from the primary analysis (Zeni2008 fractions).
+            //
+            // Step 1: detect ankle-Y peaks (contact events) in the posterior scan
+            const _yVals2 = _pf2.map(f => f.y);
+            const _ySort2 = [..._yVals2].sort((a,b)=>a-b);
+            const _yP25   = _ySort2[Math.floor(_ySort2.length * 0.25)];
+            const _yP75   = _ySort2[Math.floor(_ySort2.length * 0.75)];
+            const _yMed2  = _ySort2[Math.floor(_ySort2.length * 0.50)];
+            const _yRange2= _yP75 - _yP25;
+
+            // Find local maxima in ankle Y (foot on ground = high Y)
+            const _peaks2 = [];
+            for(let _pi = 1; _pi < _pf2.length - 1; _pi++) {
+              const py = _pf2[_pi].y;
+              if(py > _yMed2 && py > _pf2[_pi-1].y && py >= _pf2[_pi+1].y) {
+                _peaks2.push({idx: _pi, t: _pf2[_pi].t, y: py});
+              }
+            }
+
+            // Find consecutive peak pair with stride-like spacing (0.4-1.2s at video duration)
+            let _bestCycleStart = null, _bestCycleEnd = null;
+            if(_peaks2.length >= 2) {
+              // Look for pairs with duration ratio matching typical running stride
+              const _vidDur2 = dur; // secondary video duration
+              let _bestPair = null, _bestDurDiff = Infinity;
+              const _targetStrideDur = window_strideMetrics?.strideDurationS || 0.67; // from primary
+              for(let _pi = 0; _pi < _peaks2.length - 1; _pi++) {
+                const _dt = (_peaks2[_pi+1].t - _peaks2[_pi].t) * _vidDur2;
+                const _diff = Math.abs(_dt - _targetStrideDur);
+                if(_dt >= 0.35 && _dt <= 1.5 && _diff < _bestDurDiff) {
+                  _bestDurDiff = _diff;
+                  _bestPair = [_peaks2[_pi], _peaks2[_pi+1]];
+                }
+              }
+              if(_bestPair) {
+                _bestCycleStart = _bestPair[0].t;
+                _bestCycleEnd   = _bestPair[1].t;
+              }
+            }
+
+            if(_bestCycleStart != null && _bestCycleEnd != null && window_primaryPhaseSelection?.fractions) {
+              // Step 2: map primary Zeni fractions into this posterior stride cycle.
+              // Primary fractions are normalised to the primary video; we need them
+              // relative to the stride cycle (0 = IC, 1 = next IC).
+              const _primFracs = window_primaryPhaseSelection.fractions;
+              const _primStart = _primFracs[0]; // IC fraction in primary video
+              const _primEnd   = _primFracs[_primFracs.length - 1]; // last phase
+              // Approximate next IC: assume stride continues at same rate
+              const _primStride = (_primEnd - _primStart) / 0.875; // 8 phases span ~87.5% of stride
+              const _phaseRatios = _primFracs.map(f => (f - _primStart) / _primStride);
+
+              // Map into the posterior stride cycle
+              const _secStrideDur = _bestCycleEnd - _bestCycleStart;
+              const _secPhFracs = _phaseRatios.map(r => {
+                const frac = _bestCycleStart + r * _secStrideDur;
+                return Math.max(0, Math.min(1, frac));
               });
-              if(bestI >= 0 && best >= 0) { _vizFracs2[phId] = bestT; _used2.add(bestI); }
-            });
+
+              // For each phase, find the closest scanned frame
+              const _labels2 = window_primaryPhaseSelection.labels || [];
+              _labels2.forEach((lbl, li) => {
+                const phId = lbl?._baseId || lbl?.id;
+                if(!phId) return;
+                const target = _secPhFracs[li];
+                let closestI = -1, closestDist = Infinity;
+                _pf2.forEach((f, fi) => {
+                  if(_used2.has(fi)) return;
+                  const dist = Math.abs(f.t - target);
+                  if(dist < closestDist) { closestDist = dist; closestI = fi; }
+                });
+                if(closestI >= 0) {
+                  _vizFracs2[phId] = _pf2[closestI].t;
+                  _used2.add(closestI);
+                }
+              });
+              console.log(`[FrameExtract2] Secondary stride-matched: cycle ${(_bestCycleStart*100).toFixed(0)}%–${(_bestCycleEnd*100).toFixed(0)}% (${(_secStrideDur*dur*1000).toFixed(0)}ms, target ${(_targetStrideDur*1000).toFixed(0)}ms)`);
+            } else {
+              // Fallback: adaptive percentile-based scoring (better than fixed thresholds)
+              const _stanceThresh = _yMed2 + _yRange2 * 0.15;
+              const _swingThresh  = _yMed2 - _yRange2 * 0.10;
+              const _scorers2 = {
+                'contact':    (d,k,y,h) => (y > _stanceThresh) ? (y * 1.8) : -1,
+                'loading':    (d,k,y,h) => (y > _stanceThresh) ? (y * 1.6) : -1,
+                'midstance':  (d,k,y,h) => (y > _stanceThresh) ? (y * 1.4) : -1,
+                'propulsion': (d,k,y,h) => (y > _yMed2)        ? (y * 1.2) : -1,
+                'toeoff':     (d,k,y,h) => (y > _yMed2 - _yRange2*0.3 && y < _stanceThresh) ? (y * 2.0) : -1,
+                'earlyswing': (d,k,y,h) => (y < _yMed2) ? ((_yMed2 - y) * 80) : -1,
+                'midswing':   (d,k,y,h) => (y < _swingThresh) ? ((_swingThresh - y) * 200) : -1,
+                'lateswing':  (d,k,y,h) => (y < _yMed2) ? ((_yMed2 - y) * 60) : -1,
+              };
+              ['midswing','toeoff','contact','propulsion','lateswing','midstance','earlyswing','loading'].forEach(phId => {
+                let best = -Infinity, bestT = null, bestI = -1;
+                const sc = _scorers2[phId];
+                _pf2.forEach((f, fi) => {
+                  if(_used2.has(fi)) return;
+                  const s = sc(f.d, f.k, f.y, f.h);
+                  if(s > best) { best = s; bestT = f.t; bestI = fi; }
+                });
+                if(bestI >= 0 && best >= 0) { _vizFracs2[phId] = bestT; _used2.add(bestI); }
+              });
+              console.log('[FrameExtract2] Secondary fallback: adaptive percentile scoring (no stride cycle found)');
+            }
             // Build times array using secondary vizFracs (fall back to primary conversion)
             times = primarySel.labels.map((lbl, i) => {
               const phId = lbl?._baseId;
