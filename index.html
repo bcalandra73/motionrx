@@ -8890,6 +8890,12 @@ function aggregateAngles(allFrameAngles, framePhases) {
     }
   } catch(e) { console.warn('[HipFlex Debug] trace dump failed:', e); }
 
+  // v0.13.4: Pronation summary — lightweight verification of RCSP method
+  const lPronR = result['Left Pronation'], rPronR = result['Right Pronation'];
+  if(lPronR || rPronR) {
+    console.log(`[Pronation] Aggregated — L: ${lPronR ? lPronR.avg+'° (n='+lPronR.count+', range '+lPronR.min+'–'+lPronR.max+'°)' : 'no data'} | R: ${rPronR ? rPronR.avg+'° (n='+rPronR.count+', range '+rPronR.min+'–'+rPronR.max+'°)' : 'no data'}`);
+  }
+
   return result;
 }
 
