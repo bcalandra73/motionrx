@@ -6438,7 +6438,7 @@ function extractAngles(lm, view='side', movement='') {
 
       // Only compute pronation when the ankle is clearly in stance (near the belt).
       // Stance proxy: ankle Y > 0.60 (ankle in lower 40% of frame).
-      // The phase-level filter in aggregateAngles further restricts to contact+loading only.
+      // The phase-level filter in aggregateAngles further restricts to contact+loading+midstance.
       const lStance = lAnkPost && lAnkPost.y > 0.60;
       const rStance = rAnkPost && rAnkPost.y > 0.60;
 
@@ -8809,11 +8809,14 @@ function aggregateAngles(allFrameAngles, framePhases) {
       // Ankle DF physiological clamp: running DF range is −5° to +30°.
       // Values outside this indicate misplaced landmarks — exclude from aggregation.
       if(k.includes('Ankle Dorsiflexion') && (v < -5 || v > 30)) return;
-      // Pronation: contact and loading frames only — these are the two moments where the
-      // foot is fully flat and the heel faces the posterior camera. Midstance and propulsion
-      // have the heel rotating away; toeoff has it fully lifted.
-      // Fall through (allow) if phaseId is null (no phase info available — old videos).
-      if(k.includes('Pronation') && phaseId !== null && phaseId !== 'loading' && phaseId !== 'contact') return;
+      // Pronation: contact, loading, and midstance frames only — these three phases are
+      // weight-bearing with the heel grounded and facing the posterior camera.  Peak
+      // pronation often occurs during midstance (full foot-flat), so excluding it loses
+      // valuable data.  Propulsion has the heel lifting; toeoff and swing have it airborne.
+      // v0.13.4 fix: null-phase frames (e.g. from the dense pass) are now EXCLUDED.
+      // Previously they slipped through the filter, allowing swing-phase noise into the
+      // pronation average.  Only phase-labelled stance frames are reliable.
+      if(k.includes('Pronation') && (phaseId == null || (phaseId !== 'loading' && phaseId !== 'contact' && phaseId !== 'midstance'))) return;
       // Hip Flexion: exclude frames where THE LEG BEING MEASURED is in its own stance.
       // The phase labels describe the REF leg. For the contralateral leg, stance ≈ REF swing
       // (runner is ~50% out of phase). Before v0.13.3 we applied the REF-leg stance filter
@@ -8951,12 +8954,13 @@ function aggregateAngles(allFrameAngles, framePhases) {
       }
       const lDegs = pronRowsL.map(r=>r.deg).filter(v=>v!=null);
       const rDegs = pronRowsR.map(r=>r.deg).filter(v=>v!=null);
-      const lContribL = pronRowsL.filter(r=>r.deg!=null && (r.phase==='contact' || r.phase==='loading')).map(r=>r.deg);
-      const rContribR = pronRowsR.filter(r=>r.deg!=null && (r.phase==='contact' || r.phase==='loading')).map(r=>r.deg);
+      const _stancePhase = (p) => p==='contact' || p==='loading' || p==='midstance';
+      const lContribL = pronRowsL.filter(r=>r.deg!=null && _stancePhase(r.phase)).map(r=>r.deg);
+      const rContribR = pronRowsR.filter(r=>r.deg!=null && _stancePhase(r.phase)).map(r=>r.deg);
       const _avg = (a) => a.length ? +(a.reduce((x,y)=>x+y,0)/a.length).toFixed(1) : '?';
-      console.log(`[Pronation Debug] L: computed ${lDegs.length}/${pronRowsL.length} frames, contact+loading ${lContribL.length} → avg ${_avg(lContribL)}° | max ${lDegs.length?Math.max(...lDegs):'?'}°`);
-      console.log(`[Pronation Debug] R: computed ${rDegs.length}/${pronRowsR.length} frames, contact+loading ${rContribR.length} → avg ${_avg(rContribR)}° | max ${rDegs.length?Math.max(...rDegs):'?'}°`);
-      console.log(`[Pronation Debug] Aggregator-reported L avg ${result['Left Pronation']?.avg ?? '?'}° / R avg ${result['Right Pronation']?.avg ?? '?'}° (contact+loading only filter applied)`);
+      console.log(`[Pronation Debug] L: computed ${lDegs.length}/${pronRowsL.length} frames, stance ${lContribL.length} → avg ${_avg(lContribL)}° | max ${lDegs.length?Math.max(...lDegs):'?'}°`);
+      console.log(`[Pronation Debug] R: computed ${rDegs.length}/${pronRowsR.length} frames, stance ${rContribR.length} → avg ${_avg(rContribR)}° | max ${rDegs.length?Math.max(...rDegs):'?'}°`);
+      console.log(`[Pronation Debug] Aggregator-reported L avg ${result['Left Pronation']?.avg ?? '?'}° / R avg ${result['Right Pronation']?.avg ?? '?'}° (contact+loading+midstance filter applied)`);
     }
   } catch(e) { console.warn('[Pronation Debug] trace dump failed:', e); }
 
@@ -11263,11 +11267,12 @@ async function runAnalysis() {
           );
           // Selectively upgrade: only override metrics where dense gives more extremal values
           // (better peak detection) for the clinically important dynamic metrics
+          // v0.13.4: Pronation removed — dense frames have no phase labels,
+          // so pronation must come from phase-accurate gallery frames only.
           const upgradeKeys = [
             'Left Knee Valgus','Right Knee Valgus',
             'Left Hip Adduction','Right Hip Adduction',
             'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
-            'Left Pronation','Right Pronation',
           ];
           let upgraded = 0;
           upgradeKeys.forEach(k => {
@@ -11507,10 +11512,12 @@ async function runAnalysis() {
             if(secCurves.length >= 6) {
               const secDenseAgg = aggregateAngles(secCurves.map(c => c.angles), secCurves.map(() => null));
               // Upgrade aggregated2 with dense peaks for frontal metrics
+              // v0.13.4: Pronation removed — dense secondary frames have no phase labels,
+              // so pronation from them mixes in swing-phase noise.  Pronation must come
+              // from the phase-accurate gallery frames (contact+loading+midstance only).
               const sec_upgradeKeys = [
                 'Left Knee Valgus','Right Knee Valgus',
                 'Left Hip Adduction','Right Hip Adduction',
-                'Left Pronation','Right Pronation',
                 'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
               ];
               let sec_upgraded = 0;
@@ -11808,7 +11815,7 @@ ${(() => {
     if(rADF!=null) lines.push(`Right ankle DF (dense refined): ${rADF}°`);
     if(lPron!=null) lines.push(`Left pronation (dense): ${lPron}°`);
     if(rPron!=null) lines.push(`Right pronation (dense): ${rPron}°`);
-    lines.push('Ankle and pronation values from dense pass have improved foot landmark precision from multi-scale crop refinement — prefer these over 8-frame estimates.');
+    lines.push('Ankle values from dense pass have improved foot landmark precision from multi-scale crop refinement — prefer these over 8-frame estimates. Pronation values come from phase-accurate gallery frames (contact+loading+midstance only) and may not appear in the dense pass.');
   }
 
   return '\nDENSE DYNAMIC PASS RESULTS:\n' + lines.map(l=>'- '+l).join('\n');
