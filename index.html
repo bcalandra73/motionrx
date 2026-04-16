@@ -6398,31 +6398,38 @@ function extractAngles(lm, view='side', movement='') {
     // Only valid from posterior view where both heel and ankle face the camera.
     const isPosterior = (view === 'posterior');
     if(isPosterior) {
-      const computePronation = (kneeLM, ankleLM, heelLM) => {
+      // v0.13.4: RCSP (Relaxed Calcaneal Stance Position) method — angle of heel
+      // from vertical through ankle.  Clinical calcaneal eversion is measured
+      // relative to the ground/vertical, not the tibial axis.  The old knee-based
+      // method used the knee→ankle vector as the reference, but the knee position
+      // in posterior view is noisy due to perspective (the knee is deeper in the
+      // scene, creating artificial lateral offset).  This inflated L by ~5° and
+      // caused R to exceed the 14° clamp on most frames.
+      //
+      // The vertical reference removes the knee landmark from the angle computation
+      // entirely.  The knee is still used for a heel-distance sanity check.
+      const computePronation = (kneeLM, ankleLM, heelLM, isLeft) => {
         if(!kneeLM || !ankleLM || !heelLM) return null;
-        // Vector: lower leg axis (knee → ankle)
-        const legDx = ankleLM.x - kneeLM.x;
-        const legDy = ankleLM.y - kneeLM.y;
-        const legLen = Math.hypot(legDx, legDy);
+        // Sanity check: heel distance relative to leg length
+        const legLen = Math.hypot(ankleLM.x - kneeLM.x, ankleLM.y - kneeLM.y);
         if(legLen < 0.03) return null;
-        // Heel must be reasonably close to ankle (within 1.5× the ankle-knee segment)
-        // and below the ankle Y (heels don't float above the ankle in stance)
         const heelDx = heelLM.x - ankleLM.x;
         const heelDy = heelLM.y - ankleLM.y;
         const heelLen = Math.hypot(heelDx, heelDy);
         if(heelLen < 0.005) return null;
         const heelMaxRatio = (heelLM?.source?.includes('tape-')) ? 0.90 : 0.80;
         if(heelLen > legLen * heelMaxRatio) return null; // heel too far from ankle — misplaced
-        // Cross product sign gives eversion direction; magnitude gives angle
-        const cross = (legDx / legLen) * (heelDy / heelLen) - (legDy / legLen) * (heelDx / heelLen);
-        const dot   = (legDx / legLen) * (heelDx / heelLen) + (legDy / legLen) * (heelDy / heelLen);
-        const angleDeg = Math.atan2(Math.abs(cross), dot) * 180 / Math.PI;
+        // Heel must be below ankle (positive heelDy = lower in frame)
+        if(heelDy < 0.005) return null;
+        // RCSP angle: deviation of heel from vertical through ankle
+        const angleDeg = Math.atan2(Math.abs(heelDx), heelDy) * 180 / Math.PI;
         // Physiological clamp: maximum clinically meaningful calcaneal eversion is ~14°.
-        // Values beyond this are almost always MediaPipe heel mis-placement artefacts,
-        // especially in side-view push-off frames where the heel faces away from camera.
-        // (Clinical "significant pronation" threshold is 10-12°; 14° gives a small safety margin.)
         if(angleDeg > 14) return null;
-        return { deg: Math.round(angleDeg), everted: cross > 0 };
+        // Eversion direction: heel displaced LATERALLY
+        // Posterior view: L foot lateral = rightward (heelDx > 0)
+        //                 R foot lateral = leftward  (heelDx < 0)
+        const everted = isLeft ? (heelDx > 0) : (heelDx < 0);
+        return { deg: Math.round(angleDeg), everted };
       };
 
       // Use combined confidence (visibility × presence) and require higher threshold
@@ -6442,45 +6449,11 @@ function extractAngles(lm, view='side', movement='') {
       const lStance = lAnkPost && lAnkPost.y > 0.60;
       const rStance = rAnkPost && rAnkPost.y > 0.60;
 
-      const lPron = lStance ? computePronation(lKneePost, lAnkPost, lHeelPost) : null;
-      const rPron = rStance ? computePronation(rKneePost, rAnkPost, rHeelPost) : null;
+      const lPron = lStance ? computePronation(lKneePost, lAnkPost, lHeelPost, true)  : null;
+      const rPron = rStance ? computePronation(rKneePost, rAnkPost, rHeelPost, false) : null;
 
       if(lPron != null) { angles['Left Pronation']  = lPron.deg; angles['_lPronEverted'] = lPron.everted; }
       if(rPron != null) { angles['Right Pronation'] = rPron.deg; angles['_rPronEverted'] = rPron.everted; }
-
-      // ── [Pronation Debug v0.13.4] per-frame landmark + computation audit ─────
-      // Stashed on angles for end-of-analysis dump (see aggregator audit block).
-      // Helps identify why L may over-read (heel-landmark bias, stance gating, etc.).
-      const _pronSnap = (side, knee, ankle, heelFiltered, heelRaw, stance, pron) => {
-        if(!knee || !ankle) return null;
-        const heelForXY = heelFiltered || heelRaw;
-        return {
-          side,
-          stance,
-          kneeConf:   knee  ? +(combinedConf(knee)).toFixed(2)  : null,
-          ankleConf:  ankle ? +(combinedConf(ankle)).toFixed(2) : null,
-          heelConfRaw: heelRaw ? +(combinedConf(heelRaw)).toFixed(2) : null,
-          heelUsed:   !!heelFiltered,  // false = MediaPipe heel dropped by conf threshold
-          heelSrc:    heelForXY?.source || null,
-          kneeXY:     knee      ? [+knee.x.toFixed(3),  +knee.y.toFixed(3)]   : null,
-          ankleXY:    ankle     ? [+ankle.x.toFixed(3), +ankle.y.toFixed(3)]  : null,
-          heelXYraw:  heelRaw   ? [+heelRaw.x.toFixed(3), +heelRaw.y.toFixed(3)] : null,
-          ankleY:     ankle ? +ankle.y.toFixed(3) : null,
-          deg:        pron?.deg ?? null,
-          everted:    pron?.everted ?? null,
-          pronResult: pron == null ? (stance ? (heelFiltered ? 'null-from-compute' : 'heel-rejected-by-conf') : 'no-stance') : 'ok',
-        };
-      };
-      const _ldSnap = _pronSnap('L', lKneePost, lAnkPost, lHeelPost, lm[29], lStance, lPron);
-      const _rdSnap = _pronSnap('R', rKneePost, rAnkPost, rHeelPost, lm[30], rStance, rPron);
-      angles['_lPronDebug'] = _ldSnap;
-      angles['_rPronDebug'] = _rdSnap;
-      // Diagnostic: confirm debug data IS being set (appears only for posterior frames)
-      if(!window._pronDebugLogCount) window._pronDebugLogCount = 0;
-      if(window._pronDebugLogCount < 3) {
-        console.log(`[Pronation Debug] extractAngles view=${view} isPosterior=${isPosterior} lKnee=${!!lKneePost} lAnk=${!!lAnkPost} rKnee=${!!rKneePost} rAnk=${!!rAnkPost} lSnap=${!!_ldSnap} rSnap=${!!_rdSnap} lPron=${lPron?.deg ?? 'null'} rPron=${rPron?.deg ?? 'null'}`);
-        window._pronDebugLogCount++;
-      }
     }
     // More accurate from frontal than sagittal. Trunk lateral deviation angle.
     if(lShoulder && rShoulder && lHipF && rHipF) {
@@ -8917,53 +8890,6 @@ function aggregateAngles(allFrameAngles, framePhases) {
     }
   } catch(e) { console.warn('[HipFlex Debug] trace dump failed:', e); }
 
-  // ── [Pronation Debug v0.13.4] Per-frame pronation audit ──────────────────
-  // Dumps every frame where pronation was computed (posterior view only) with
-  // landmark positions, confidence, heel source, stance gating, and computed
-  // angle. Helps diagnose asymmetric over-reading (e.g. L=12° vs GT=6° when
-  // R=6° matches GT).
-  try {
-    const pronRowsL = [], pronRowsR = [];
-    let _pronScanCount = 0, _pronHasL = 0, _pronHasR = 0;
-    allFrameAngles.forEach((fa, fi) => {
-      _pronScanCount++;
-      const phaseRaw = framePhases?.[fi];
-      const phaseId = phaseRaw?._baseId || phaseRaw?.id || null;
-      const ld = fa['_lPronDebug'], rd = fa['_rPronDebug'];
-      if(ld) { _pronHasL++; pronRowsL.push({frame: fi, phase: phaseId || '-', ...ld}); }
-      if(rd) { _pronHasR++; pronRowsR.push({frame: fi, phase: phaseId || '-', ...rd}); }
-    });
-    console.log(`[Pronation Debug] Aggregator scan: ${_pronScanCount} frames checked, ${_pronHasL} with L debug, ${_pronHasR} with R debug (cameraView2=${typeof cameraView2 !== 'undefined' ? cameraView2 : 'N/A'})`);
-    if(pronRowsL.length || pronRowsR.length) {
-      console.log('[Pronation Debug] ─── all posterior frames with landmark snapshot ───');
-      const _toRow = (r) => ({
-        frame: r.frame, phase: r.phase,
-        stance: r.stance, ankleY: r.ankleY,
-        kneeXY: r.kneeXY?.join(','), ankleXY: r.ankleXY?.join(','), heelXYraw: r.heelXYraw?.join(','),
-        kneeConf: r.kneeConf, ankleConf: r.ankleConf, heelConfRaw: r.heelConfRaw, heelUsed: r.heelUsed,
-        heelSrc: (r.heelSrc || '').slice(0, 20),
-        deg: r.deg, everted: r.everted, result: r.pronResult,
-      });
-      if(pronRowsL.length) {
-        console.log('[Pronation Debug] LEFT (all posterior frames):');
-        console.table(pronRowsL.map(_toRow));
-      }
-      if(pronRowsR.length) {
-        console.log('[Pronation Debug] RIGHT (all posterior frames):');
-        console.table(pronRowsR.map(_toRow));
-      }
-      const lDegs = pronRowsL.map(r=>r.deg).filter(v=>v!=null);
-      const rDegs = pronRowsR.map(r=>r.deg).filter(v=>v!=null);
-      const _stancePhase = (p) => p==='contact' || p==='loading' || p==='midstance';
-      const lContribL = pronRowsL.filter(r=>r.deg!=null && _stancePhase(r.phase)).map(r=>r.deg);
-      const rContribR = pronRowsR.filter(r=>r.deg!=null && _stancePhase(r.phase)).map(r=>r.deg);
-      const _avg = (a) => a.length ? +(a.reduce((x,y)=>x+y,0)/a.length).toFixed(1) : '?';
-      console.log(`[Pronation Debug] L: computed ${lDegs.length}/${pronRowsL.length} frames, stance ${lContribL.length} → avg ${_avg(lContribL)}° | max ${lDegs.length?Math.max(...lDegs):'?'}°`);
-      console.log(`[Pronation Debug] R: computed ${rDegs.length}/${pronRowsR.length} frames, stance ${rContribR.length} → avg ${_avg(rContribR)}° | max ${rDegs.length?Math.max(...rDegs):'?'}°`);
-      console.log(`[Pronation Debug] Aggregator-reported L avg ${result['Left Pronation']?.avg ?? '?'}° / R avg ${result['Right Pronation']?.avg ?? '?'}° (contact+loading+midstance filter applied)`);
-    }
-  } catch(e) { console.warn('[Pronation Debug] trace dump failed:', e); }
-
   return result;
 }
 
@@ -11381,9 +11307,6 @@ async function runAnalysis() {
     const s2b = document.getElementById('s2b');
     if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
     console.log('[Analysis] Stage 3b: Running second video pipeline — cameraView2=' + cameraView2);
-    if(/running|gait|walk/i.test(movement) && cameraView2 !== 'posterior') {
-      console.warn('[Analysis] ⚠ cameraView2 is "' + cameraView2 + '" but movement is running/gait — pronation will NOT be computed. Select "Posterior" for the second camera view to enable pronation analysis.');
-    }
     // Small delay to let MediaPipe settle after primary run
     await new Promise(r => setTimeout(r, 200));
     if(mpReady && poseLandmarkerInstance) {  // use poseLandmarkerInstance (Heavy) not legacy poseInstance
