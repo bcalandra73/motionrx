@@ -6471,8 +6471,16 @@ function extractAngles(lm, view='side', movement='') {
           pronResult: pron == null ? (stance ? (heelFiltered ? 'null-from-compute' : 'heel-rejected-by-conf') : 'no-stance') : 'ok',
         };
       };
-      angles['_lPronDebug'] = _pronSnap('L', lKneePost, lAnkPost, lHeelPost, lm[29], lStance, lPron);
-      angles['_rPronDebug'] = _pronSnap('R', rKneePost, rAnkPost, rHeelPost, lm[30], rStance, rPron);
+      const _ldSnap = _pronSnap('L', lKneePost, lAnkPost, lHeelPost, lm[29], lStance, lPron);
+      const _rdSnap = _pronSnap('R', rKneePost, rAnkPost, rHeelPost, lm[30], rStance, rPron);
+      angles['_lPronDebug'] = _ldSnap;
+      angles['_rPronDebug'] = _rdSnap;
+      // Diagnostic: confirm debug data IS being set (appears only for posterior frames)
+      if(!window._pronDebugLogCount) window._pronDebugLogCount = 0;
+      if(window._pronDebugLogCount < 3) {
+        console.log(`[Pronation Debug] extractAngles view=${view} isPosterior=${isPosterior} lKnee=${!!lKneePost} lAnk=${!!lAnkPost} rKnee=${!!rKneePost} rAnk=${!!rAnkPost} lSnap=${!!_ldSnap} rSnap=${!!_rdSnap} lPron=${lPron?.deg ?? 'null'} rPron=${rPron?.deg ?? 'null'}`);
+        window._pronDebugLogCount++;
+      }
     }
     // More accurate from frontal than sagittal. Trunk lateral deviation angle.
     if(lShoulder && rShoulder && lHipF && rHipF) {
@@ -8913,13 +8921,16 @@ function aggregateAngles(allFrameAngles, framePhases) {
   // R=6° matches GT).
   try {
     const pronRowsL = [], pronRowsR = [];
+    let _pronScanCount = 0, _pronHasL = 0, _pronHasR = 0;
     allFrameAngles.forEach((fa, fi) => {
+      _pronScanCount++;
       const phaseRaw = framePhases?.[fi];
       const phaseId = phaseRaw?._baseId || phaseRaw?.id || null;
       const ld = fa['_lPronDebug'], rd = fa['_rPronDebug'];
-      if(ld) pronRowsL.push({frame: fi, phase: phaseId || '-', ...ld});
-      if(rd) pronRowsR.push({frame: fi, phase: phaseId || '-', ...rd});
+      if(ld) { _pronHasL++; pronRowsL.push({frame: fi, phase: phaseId || '-', ...ld}); }
+      if(rd) { _pronHasR++; pronRowsR.push({frame: fi, phase: phaseId || '-', ...rd}); }
     });
+    console.log(`[Pronation Debug] Aggregator scan: ${_pronScanCount} frames checked, ${_pronHasL} with L debug, ${_pronHasR} with R debug`);
     if(pronRowsL.length || pronRowsR.length) {
       console.log('[Pronation Debug] ─── all posterior frames with landmark snapshot ───');
       const _toRow = (r) => ({
