@@ -3720,10 +3720,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Belt-and-suspenders: inline onchange on the element + this listener + polling fallback
   function updateRunningCard() {
     const sel = document.getElementById('movementType');
+    if(!sel) return;
+    const v = sel.value || '';
+    const isGait = /running|gait|walk/i.test(v);
+    const isJump = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v);
     const card = document.getElementById('runningInputsCard');
-    if(!sel || !card) return;
-    const isGait = /running|gait|walk/i.test(sel.value || '');
-    card.style.display = isGait ? 'block' : 'none';
+    const jump = document.getElementById('jumpInputsCard');
+    const tape = document.getElementById('tapeMarkersCard');
+    if(card) card.style.display = isGait ? 'block' : 'none';
+    if(jump) jump.style.display = isJump ? 'block' : 'none';
+    if(tape) tape.style.display = (isGait || isJump) ? 'block' : 'none';
   }
   const movSel = document.getElementById('movementType');
   if(movSel) {
@@ -7578,6 +7584,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       }
     }
 
+    // If the hip-fallback (or last-resort) set toeoffIdx but gcPct wasn't computed
+    // by the ankle-Y path, compute it now from whatever toeoffIdx we have.
+    if(gcPct == null && toeoffIdx != null && toeoffIdx > startIdx && toeoffIdx < endIdx) {
+      const stanceFrames = toeoffIdx - startIdx;
+      const rawGcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
+      if(rawGcPct >= 20 && rawGcPct <= 80) gcPct = rawGcPct;
+    }
+
     // Float phase: both ankles below groundThresh simultaneously.
     // Only reliable if ankle Y signal has sufficient range.
     const allYs = [...lAnkSmooth,...rAnkSmooth].filter(v=>v!=null);
@@ -7588,10 +7602,23 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 
     let floatPct = null; // null = unreliable
     if(floatReliable) {
-      const groundThresh = medY - 0.04;
+      // Per-leg ground threshold: use each leg's own median minus a fraction of
+      // its own range.  This handles perspective asymmetry in side view where the
+      // far-side ankle has a compressed Y range compared to the near side.
+      const lVals = strideIdxs.map(i=>lAnkSmooth[i]).filter(v=>v!=null);
+      const rVals = strideIdxs.map(i=>rAnkSmooth[i]).filter(v=>v!=null);
+      const med = arr => { const s=[...arr].sort((a,b)=>a-b); return s[Math.floor(s.length/2)]; };
+      const lMed = lVals.length > 2 ? med(lVals) : medY;
+      const rMed = rVals.length > 2 ? med(rVals) : medY;
+      const lRange = lVals.length > 2 ? Math.max(...lVals) - Math.min(...lVals) : yRange;
+      const rRange = rVals.length > 2 ? Math.max(...rVals) - Math.min(...rVals) : yRange;
+      // Threshold: each ankle must be above its own median minus 30% of its range
+      // (less aggressive than the old fixed -0.04, adapts to per-leg signal amplitude)
+      const lThresh = lMed - lRange * 0.30;
+      const rThresh = rMed - rRange * 0.30;
       const bothElevated = perFrameData.map((_,i) => {
         const ly = lAnkSmooth[i], ry = rAnkSmooth[i];
-        return (ly!=null && ry!=null && ly < groundThresh && ry < groundThresh);
+        return (ly!=null && ry!=null && ly < lThresh && ry < rThresh);
       });
       const floatCount = strideIdxs.filter(i=>bothElevated[i]).length;
       const rawFloatPct = Math.round((floatCount / (endIdx - startIdx)) * 100);
@@ -12698,7 +12725,12 @@ function autoSaveRestore() {
     // Restore form fields
     if(state.patient)   document.getElementById('patientName').value    = state.patient;
     if(state.age)       document.getElementById('patientAge').value     = state.age;
-    if(state.movement)  document.getElementById('movementType').value   = state.movement;
+    if(state.movement) {
+      const mvEl = document.getElementById('movementType');
+      mvEl.value = state.movement;
+      // Fire the onchange logic so dependent cards (running params, tape markers, jump inputs) show
+      mvEl.dispatchEvent(new Event('change'));
+    }
     if(state.cameraView)document.getElementById('cameraView').value     = state.cameraView;
     // Restore rendered report
     const reportEl = document.getElementById('reportGrid');
