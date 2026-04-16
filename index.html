@@ -8930,7 +8930,7 @@ function aggregateAngles(allFrameAngles, framePhases) {
       if(ld) { _pronHasL++; pronRowsL.push({frame: fi, phase: phaseId || '-', ...ld}); }
       if(rd) { _pronHasR++; pronRowsR.push({frame: fi, phase: phaseId || '-', ...rd}); }
     });
-    console.log(`[Pronation Debug] Aggregator scan: ${_pronScanCount} frames checked, ${_pronHasL} with L debug, ${_pronHasR} with R debug`);
+    console.log(`[Pronation Debug] Aggregator scan: ${_pronScanCount} frames checked, ${_pronHasL} with L debug, ${_pronHasR} with R debug (cameraView2=${typeof cameraView2 !== 'undefined' ? cameraView2 : 'N/A'})`);
     if(pronRowsL.length || pronRowsR.length) {
       console.log('[Pronation Debug] ─── all posterior frames with landmark snapshot ───');
       const _toRow = (r) => ({
@@ -11375,7 +11375,10 @@ async function runAnalysis() {
     }
     const s2b = document.getElementById('s2b');
     if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
-    console.log('[Analysis] Stage 3b: Running second video pipeline');
+    console.log('[Analysis] Stage 3b: Running second video pipeline — cameraView2=' + cameraView2);
+    if(/running|gait|walk/i.test(movement) && cameraView2 !== 'posterior') {
+      console.warn('[Analysis] ⚠ cameraView2 is "' + cameraView2 + '" but movement is running/gait — pronation will NOT be computed. Select "Posterior" for the second camera view to enable pronation analysis.');
+    }
     // Small delay to let MediaPipe settle after primary run
     await new Promise(r => setTimeout(r, 200));
     if(mpReady && poseLandmarkerInstance) {  // use poseLandmarkerInstance (Heavy) not legacy poseInstance
