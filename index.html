@@ -7849,7 +7849,21 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const gcpReliable   = fpsGate && gcpReliableCount >= Math.ceil(strideDetails.length / 2);
   const floatReliable = fpsGate && floatReliableCount >= Math.ceil(strideDetails.length / 2);
   const avgGcPct   = (gcpReliable && gcPcts.length > 0) ? Math.round(mean(gcPcts)) : null;
-  const avgFloatPct= (floatReliable && floatPcts.length > 0) ? Math.round(mean(floatPcts)) : null;
+  let avgFloatPct= (floatReliable && floatPcts.length > 0) ? Math.round(mean(floatPcts)) : null;
+
+  // v0.13.4 Analytical float fallback: the 128-frame coarse scan (~9 fps) can't
+  // reliably detect brief float phases (≈100-150 ms each at 170-180 spm).
+  // For running, float = 100% − 2 × GCT% (no double-support in running gait).
+  // Use the analytical value when GCT is reliable and visual detection returns
+  // 0% or null (under-detection due to temporal resolution, not true absence).
+  if(avgGcPct != null && avgGcPct < 50) {
+    const analyticalFloat = Math.max(0, 100 - 2 * avgGcPct);
+    if(analyticalFloat > 0 && (avgFloatPct == null || avgFloatPct === 0)) {
+      console.log(`[StrideEngine] Float analytical fallback: visual=${avgFloatPct}%, analytical=${analyticalFloat}% (100 - 2×${avgGcPct})`);
+      avgFloatPct = analyticalFloat;
+    }
+  }
+
   const hasFloat   = avgFloatPct != null && avgFloatPct > 5;
 
   // Foot strike consensus
