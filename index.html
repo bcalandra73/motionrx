@@ -3496,7 +3496,11 @@ async function startFrameExtraction2(file, vid) {
       const _existingCorr = _corrLoad(window._currentCorrKey);
       const _hasSavedSecCorr = _existingCorr?.sec && (_existingCorr.sEd || []).some(Boolean);
 
-      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5 && _isGaitMvt && !_hasSavedSecCorr) {
+      // v0.13.4: Always use independent phase detection for gait movements.
+      // Dual-view videos are almost always recorded independently (async cameras),
+      // so applying the primary's phase fractions to the secondary is unreliable
+      // even when durations are similar. Synced-camera support can be added later.
+      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && _isGaitMvt && !_hasSavedSecCorr) {
         // Independent secondary analysis — find the best frame for each phase
         // by scanning 32 uniformly-spaced frames and scoring biomechanically.
         console.log(`[FrameExtract2] Option 2: independent secondary phase detection (${dur.toFixed(1)}s clip)`);
@@ -3699,7 +3703,7 @@ async function startFrameExtraction2(file, vid) {
             return Math.max(0.05, Math.min(dur - 0.05, absTime));
           });
         }
-      } else if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5 && _isGaitMvt && _hasSavedSecCorr) {
+      } else if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && _isGaitMvt && _hasSavedSecCorr) {
         // Saved secondary corrections exist — use absolute time conversion to preserve them.
         // Option 2 (independent phase detection) would pick different timestamps and
         // invalidate the saved landmark positions. Clear corrections first to enable Option 2.
