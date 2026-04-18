@@ -2583,7 +2583,24 @@ function startFrameExtraction(file, vid) {
                   const _seedGs = _groundScore(seedIdx);
                   const _seedK  = perFrame[seedIdx]?.[_refKneeKey];
                   if(_seedGs >= 0.85 && _seedK != null && _seedK >= 100) {
-                    console.log(`[Zeni2008] IC: seed=${seedIdx} has high ground confidence (g=${_seedGs.toFixed(2)}, k=${_seedK.toFixed(0)}°) — trusting stride engine directly`);
+                    // v0.13.4: High ground confidence (foot firmly planted) typically
+                    // corresponds to Loading Response, not true Initial Contact.
+                    // True IC occurs 1-2 frames earlier when the foot first contacts
+                    // the ground — ankle at peak forward reach, knee still extended.
+                    // Check backward for a frame with more forward displacement.
+                    const _seedD = _getDisp(seedIdx);
+                    for(let _back = 1; _back <= 2; _back++) {
+                      const _bIdx = seedIdx - _back;
+                      if(_bIdx < (minIdx || 0) || _bIdx < 0) break;
+                      const _bD  = _getDisp(_bIdx);
+                      const _bK  = perFrame[_bIdx]?.[_refKneeKey];
+                      // More forward reach (more negative disp) + extended knee = IC
+                      if(_bD != null && _seedD != null && _bD < _seedD - 0.02 && _bK != null && _bK >= 120) {
+                        console.log(`[Zeni2008] IC: high ground conf at ${seedIdx} (g=${_seedGs.toFixed(2)}) = Loading Response → shifted to ${_bIdx} (disp ${_seedD.toFixed(3)}→${_bD.toFixed(3)}, k=${_bK.toFixed(0)}°)`);
+                        return _bIdx;
+                      }
+                    }
+                    console.log(`[Zeni2008] IC: seed=${seedIdx} has high ground confidence (g=${_seedGs.toFixed(2)}, k=${_seedK.toFixed(0)}°) — no earlier IC found, trusting stride engine`);
                     return seedIdx;
                   }
 
@@ -7584,16 +7601,37 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // Float phase detection is now done per-stride inside the strideDetails loop (signal reliability check)
 
   // ── 3. Compute stride-level timing metrics ──
-  // REF leg selection — stabilized with hysteresis margin (mirrors GaitFSM logic)
-  // Only switch to R if it has meaningfully more contacts (>20% margin).
-  // L is default to match standard right-side camera setup where L is near side.
+  // v0.13.4: Detect runner facing direction BEFORE REF selection so we can
+  // prefer the camera-near leg. The near leg has less occlusion and more
+  // accurate landmark tracking, improving IC/TO detection and angle accuracy.
+  // Use the left ankle's mean displacement relative to hip as a facing proxy:
+  //   mean < 0 → runner faces LEFT → left leg is camera-near
+  //   mean > 0 → runner faces RIGHT → right leg is camera-near
+  const _facingDisps = perFrameData.map(f => {
+    const ax = f.lAnkX, hx = f.hipMidX;
+    return (ax != null && hx != null) ? ax - hx : null;
+  }).filter(v => v != null);
+  const _facingMean = _facingDisps.length > 0
+    ? _facingDisps.reduce((s,v) => s+v, 0) / _facingDisps.length : 0;
+  const _facesLeft = _facingMean <= 0;
+  const _cameraNearLeg = _facesLeft ? 'L' : 'R';
+
+  // REF leg selection — prefer camera-near leg for tracking accuracy.
+  // Override only if one side has meaningfully more contacts (>20% margin),
+  // indicating the other side tracks poorly regardless of camera proximity.
   const lContactCount = lContactIdxs.length;
   const rContactCount = rContactIdxs.length;
-  const switchToR_stride = rContactCount > lContactCount * 1.20;
-  const REF = switchToR_stride ? 'R' : 'L';
+  let REF;
+  if(rContactCount > lContactCount * 1.20) {
+    REF = 'R';  // R has significantly more contacts — trust contact quality
+  } else if(lContactCount > rContactCount * 1.20) {
+    REF = 'L';  // L has significantly more contacts
+  } else {
+    REF = _cameraNearLeg;  // contacts roughly equal — use camera-near leg
+  }
   const refContacts = REF==='L' ? lContactIdxs : rContactIdxs;
   const oppContacts = REF==='L' ? rContactIdxs : lContactIdxs;
-  console.log(`[StrideEngine] REF=${REF} contacts L=${lContactCount} R=${rContactCount} switchToR=${switchToR_stride}`);
+  console.log(`[StrideEngine] REF=${REF} contacts L=${lContactCount} R=${rContactCount} facing=${_facesLeft?'left':'right'} cameraNear=${_cameraNearLeg}`);
 
   // Convert frame indices to timestamps
   const idxToTime = (idx) => perFrameData[Math.min(idx,N-1)]?.t * videoDuration;
