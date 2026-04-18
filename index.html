@@ -3595,11 +3595,11 @@ async function startFrameExtraction2(file, vid) {
 
             // Find consecutive peak pair with stride-like spacing (0.4-1.2s at video duration)
             let _bestCycleStart = null, _bestCycleEnd = null;
+            const _targetStrideDur = window_strideMetrics?.strideDurationS || 0.67; // from primary
             if(_peaks2.length >= 2) {
               // Look for pairs with duration ratio matching typical running stride
               const _vidDur2 = dur; // secondary video duration
               let _bestPair = null, _bestDurDiff = Infinity;
-              const _targetStrideDur = window_strideMetrics?.strideDurationS || 0.67; // from primary
               for(let _pi = 0; _pi < _peaks2.length - 1; _pi++) {
                 const _dt = (_peaks2[_pi+1].t - _peaks2[_pi].t) * _vidDur2;
                 const _diff = Math.abs(_dt - _targetStrideDur);
