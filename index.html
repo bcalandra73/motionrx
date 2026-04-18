@@ -1807,6 +1807,7 @@ function startFrameExtraction(file, vid) {
               const v = (n) => lms[n] && (lms[n].visibility||0) > 0.18 ? lms[n] : null;
               const lH=v(23),lK=v(25),lA=v(27), rH=v(24),rK=v(26),rA=v(28);
               const lS=v(11), rS=v(12);
+              const nose=v(0);  // v0.13.4: nose for facing direction detection
               return {
                 fi,
                 t: (effectiveProportions||phaseTimeProportions)[fi] ?? (fi/Math.max(1,frames.length-1)),
@@ -1814,6 +1815,7 @@ function startFrameExtraction(file, vid) {
                 rAnkY: rA?.y ?? null,
                 lAnkX: lA?.x ?? null,   // horizontal position for step length asymmetry
                 rAnkX: rA?.x ?? null,
+                noseX: nose?.x ?? null, // v0.13.4: for facing direction detection
                 lKnee: lH&&lK&&lA ? calcAngle(lH,lK,lA) : null,
                 rKnee: rH&&rK&&rA ? calcAngle(rH,rK,rA) : null,
                 // Hip flexion as thigh-from-vertical (degrees from standing neutral).
@@ -2015,8 +2017,13 @@ function startFrameExtraction(file, vid) {
               // lAnkRelX/facingDir were removed in a prior refactor — reconstruct here.
               // For a left-facing runner: at IC ankle is leftward (low X) → signal is at MINIMUM.
               //                           at TO ankle is rightward (high X) → signal is at MAXIMUM.
-              // Auto-detect travel direction from the sign of the mean displacement across
-              // all frames: negative mean = runner faces left (ankle leads on left side).
+              // Auto-detect travel direction: IC=minimum displacement for left-facing runner.
+              // PRIMARY: nose position relative to hip (structural signal, works on treadmill).
+              // FALLBACK: mean displacement sign (fails on treadmill due to symmetric oscillation).
+              const _noseDispsGFSM = perFrame.map(f => {
+                const nx = f.noseX, hx = f.hipMidX;
+                return (nx != null && hx != null) ? nx - hx : null;
+              }).filter(v => v != null);
               const _lDispRaw = perFrame.map(f => {
                 const ax = REF==='L' ? f.lAnkX : f.rAnkX;
                 return (ax != null && f.hipMidX != null) ? ax - f.hipMidX : null;
@@ -2027,10 +2034,17 @@ function startFrameExtraction(file, vid) {
               });
               // Smoothed reference-leg displacement (forward = more negative for left-facing)
               const _refDispS = smooth5(_lDispRaw.map((v,i) => REF==='L' ? v : _rDispRaw[i]));
-              // Auto-detect: if mean displacement < 0, runner faces left → IC = minimum; TO = maximum
-              const _dispVals = _refDispS.filter(v=>v!=null);
-              const _dispMean = _dispVals.length > 0 ? _dispVals.reduce((s,v)=>s+v,0)/_dispVals.length : 0;
-              const _icIsMin  = _dispMean <= 0; // true when runner faces left (standard)
+              let _icIsMin;
+              if(_noseDispsGFSM.length >= perFrame.length * 0.3) {
+                const _noseMeanGFSM = _noseDispsGFSM.reduce((s,v)=>s+v,0) / _noseDispsGFSM.length;
+                _icIsMin = _noseMeanGFSM < 0; // nose left of hip → faces left → IC = min
+                console.log(`[GaitFSM] Facing (nose): mean noseX-hipX = ${_noseMeanGFSM.toFixed(4)} → _icIsMin=${_icIsMin}`);
+              } else {
+                const _dispVals = _refDispS.filter(v=>v!=null);
+                const _dispMean = _dispVals.length > 0 ? _dispVals.reduce((s,v)=>s+v,0)/_dispVals.length : 0;
+                _icIsMin = _dispMean <= 0;
+                console.log(`[GaitFSM] Facing (disp fallback): mean disp = ${_dispMean.toFixed(4)} → _icIsMin=${_icIsMin}`);
+              }
 
               const lAnkFwdS = smooth5(perFrame.map(f => {
                 const ax = f.lAnkX, hx = f.hipMidX;
@@ -7483,7 +7497,7 @@ const PHASE_MAPS = {
 // Analyzes all detected strides across a multi-stride clip.
 // Called during gait analysis after pose detection on dense frames.
 //
-// Input: perFrameData — array of {t, fi, lAnkY, rAnkY, lKnee, rKnee, lHip, rHip, lAnkX, rAnkX}
+// Input: perFrameData — array of {t, fi, lAnkY, rAnkY, lKnee, rKnee, lHip, rHip, lAnkX, rAnkX, noseX, hipMidX}
 //        videoDuration — in seconds
 //        fps — video frame rate (used for timing calculations)
 //        cameraViewLocal — 'side' | 'front' | 'posterior'
@@ -7604,16 +7618,45 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // v0.13.4: Detect runner facing direction BEFORE REF selection so we can
   // prefer the camera-near leg. The near leg has less occlusion and more
   // accurate landmark tracking, improving IC/TO detection and angle accuracy.
-  // Use the left ankle's mean displacement relative to hip as a facing proxy:
-  //   mean < 0 → runner faces LEFT → left leg is camera-near
-  //   mean > 0 → runner faces RIGHT → right leg is camera-near
-  const _facingDisps = perFrameData.map(f => {
-    const ax = f.lAnkX, hx = f.hipMidX;
-    return (ax != null && hx != null) ? ax - hx : null;
+  // PRIMARY: Use nose position relative to hip midpoint — the nose is always
+  // on the side the runner faces. This is a structural/anatomical signal,
+  // robust on both treadmill and overground (unlike ankle displacement which
+  // produces symmetric oscillation on treadmill with near-zero mean).
+  // FALLBACK: If nose data is sparse, use displacement at detected contacts
+  // (foot is ahead of body at IC, so displacement sign reveals facing).
+  const _noseDisps = perFrameData.map(f => {
+    const nx = f.noseX, hx = f.hipMidX;
+    return (nx != null && hx != null) ? nx - hx : null;
   }).filter(v => v != null);
-  const _facingMean = _facingDisps.length > 0
-    ? _facingDisps.reduce((s,v) => s+v, 0) / _facingDisps.length : 0;
-  const _facesLeft = _facingMean <= 0;
+  let _facesLeft, _facingMethod;
+  if(_noseDisps.length >= perFrameData.length * 0.3) {
+    // Nose data available in ≥30% of frames — use it
+    const _noseMean = _noseDisps.reduce((s,v) => s+v, 0) / _noseDisps.length;
+    _facesLeft = _noseMean < 0;  // nose left of hip → faces left
+    _facingMethod = 'nose';
+    console.log(`[StrideEngine] Facing detection (nose): mean noseX-hipX = ${_noseMean.toFixed(4)}, ${_noseDisps.length}/${perFrameData.length} frames → faces ${_facesLeft?'LEFT':'RIGHT'}`);
+  } else {
+    // Fallback: displacement at contact frames (foot ahead of body at IC)
+    const _allContacts = [...lContactIdxs, ...rContactIdxs];
+    const _contactDisps = _allContacts.map(ci => {
+      const f = perFrameData[ci];
+      if(!f) return null;
+      // Use the leg with more contacts for its ankle displacement at IC
+      const ax = lContactIdxs.length >= rContactIdxs.length ? f.lAnkX : f.rAnkX;
+      const hx = f.hipMidX;
+      return (ax != null && hx != null) ? ax - hx : null;
+    }).filter(v => v != null);
+    if(_contactDisps.length > 0) {
+      const _contactMean = _contactDisps.reduce((s,v) => s+v, 0) / _contactDisps.length;
+      _facesLeft = _contactMean < 0;
+      _facingMethod = 'contact-disp';
+      console.log(`[StrideEngine] Facing detection (contact-disp): mean ankX-hipX at contacts = ${_contactMean.toFixed(4)}, ${_contactDisps.length} contacts → faces ${_facesLeft?'LEFT':'RIGHT'}`);
+    } else {
+      _facesLeft = true;  // default to left-facing
+      _facingMethod = 'default';
+      console.log(`[StrideEngine] Facing detection: insufficient data, defaulting to LEFT`);
+    }
+  }
   const _cameraNearLeg = _facesLeft ? 'L' : 'R';
 
   // REF leg selection — prefer camera-near leg for tracking accuracy.
@@ -7631,7 +7674,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   }
   const refContacts = REF==='L' ? lContactIdxs : rContactIdxs;
   const oppContacts = REF==='L' ? rContactIdxs : lContactIdxs;
-  console.log(`[StrideEngine] REF=${REF} contacts L=${lContactCount} R=${rContactCount} facing=${_facesLeft?'left':'right'} cameraNear=${_cameraNearLeg}`);
+  console.log(`[StrideEngine] REF=${REF} contacts L=${lContactCount} R=${rContactCount} facing=${_facesLeft?'left':'right'} (method=${_facingMethod}) cameraNear=${_cameraNearLeg}`);
 
   // Convert frame indices to timestamps
   const idxToTime = (idx) => perFrameData[Math.min(idx,N-1)]?.t * videoDuration;
@@ -7778,10 +7821,9 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       const hx = perFrameData[idx]?.hipMidX;
       return (ax != null && hx != null) ? ax - hx : null;
     };
-    // Auto-detect facing direction from mean displacement (negative = faces left)
-    const _allDispSE = perFrameData.map((_, i) => _dispAtIdx(i)).filter(v=>v!=null);
-    const _meanDispSE = _allDispSE.length > 0 ? _allDispSE.reduce((s,v)=>s+v,0)/_allDispSE.length : -1;
-    const _icIsMinSE  = _meanDispSE <= 0; // IC = displacement minimum for left-facing runner
+    // v0.13.4: Use nose-based facing detection computed earlier (robust on treadmill)
+    const _icIsMinSE  = _facesLeft; // IC = displacement minimum for left-facing runner
+    console.log(`[StrideEngine] IC refinement: _icIsMinSE=${_icIsMinSE} (from _facesLeft=${_facesLeft}, method=${_facingMethod})`);
     const _searchR_se = Math.max(5, Math.round((endIdx - startIdx) * 0.50));
     // O'Connor (2007) IC: displacement minimum that is FOLLOWED BY INCREASING displacement.
     const _dispIncreases_se = (idx) => {
