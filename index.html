@@ -3835,16 +3835,16 @@ function seekCapture2(vid, t) {
   });
 }
 
-// ── Focus chips ──
+// ── Focus chips (event delegation — robust against DOM timing issues) ──
+document.addEventListener('click', function(e) {
+  const chip = e.target.closest('.focus-chip');
+  if(!chip) return;
+  e.preventDefault();
+  chip.classList.toggle('on');
+  const cb = chip.querySelector('input[type=checkbox]');
+  if(cb) cb.checked = chip.classList.contains('on');
+});
 document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('.focus-chip').forEach(chip => {
-    chip.addEventListener('click', function(e) {
-      e.preventDefault();
-      this.classList.toggle('on');
-      const cb = this.querySelector('input[type=checkbox]');
-      if(cb) cb.checked = this.classList.contains('on');
-    });
-  });
 
   // Show/hide running parameters card based on movement type
   // Belt-and-suspenders: inline onchange on the element + this listener + polling fallback
