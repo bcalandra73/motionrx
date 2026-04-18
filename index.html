@@ -2660,6 +2660,22 @@ function startFrameExtraction(file, vid) {
                 // Also pass _zIcIdx+1 as the search floor so even if radius extends back,
                 // frame _zIcIdx cannot be selected as nextIC.
                 _zNextIcIdx = _refineIC(Math.min(_nextIcSeedClamped, N-1), _zIcIdx + 1);
+
+                // v0.13.4: Validate Zeni stride span against StrideEngine stride.
+                // The nextIC refinement sorts IC candidates by minimum displacement
+                // (most forward ankle), which can select a candidate from a LATER stride
+                // when the search radius extends far enough. If the Zeni stride span
+                // exceeds 1.35× the StrideEngine stride, clamp nextIC to stay within
+                // one stride of the current IC.
+                const _zeniSpan = _zNextIcIdx - _zIcIdx;
+                if(_strideWin >= 5 && _zeniSpan > _strideWin * 1.35) {
+                  const _origNextIc = _zNextIcIdx;
+                  // Fall back to StrideEngine's nextIC index (unrefined), clamped to
+                  // 1.1× stride window to allow small natural variation.
+                  _zNextIcIdx = Math.min(N-1, _zIcIdx + Math.round(_strideWin * 1.1));
+                  console.log(`[Zeni2008] ⚠ Stride span ${_zeniSpan} frames >> expected ${_strideWin} — clamped nextIC: ${_origNextIc} → ${_zNextIcIdx}`);
+                }
+
                 console.log(`[Zeni2008] IC: seed=${_icIdx}(knee=${perFrame[_icIdx]?.[_refKneeKey]?.toFixed(0)}°) → refined=${_zIcIdx}(knee=${perFrame[_zIcIdx]?.[_refKneeKey]?.toFixed(0)}°) | radius=${Math.max(5,Math.round(_strideWin*0.50))}`);
                 const _icFrac     = perFrame[_zIcIdx]?.t;
                 const _nextIcFrac = perFrame[Math.min(_zNextIcIdx, N-1)]?.t;
