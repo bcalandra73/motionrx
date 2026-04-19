@@ -7817,13 +7817,18 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // At true IC the ref knee should be near-extended (included angle > 140°).
     // Use the horizontal ankle displacement signal to find the true IC frame.
     const _refAnkKey_se = REF === 'L' ? 'lAnkX' : 'rAnkX';
+    // v0.13.4: Use nose-based facing detection computed earlier (robust on treadmill)
+    const _icIsMinSE  = _facesLeft; // IC = displacement minimum for left-facing runner
+    // v0.13.4: Apply sign flip so IC is ALWAYS the minimum displacement value,
+    // regardless of facing direction. This lets the rest of the code (sorting,
+    // O'Connor increase check) work identically for both directions.
     const _dispAtIdx = (idx) => {
       const ax = perFrameData[idx]?.[_refAnkKey_se];
       const hx = perFrameData[idx]?.hipMidX;
-      return (ax != null && hx != null) ? ax - hx : null;
+      if(ax == null || hx == null) return null;
+      const raw = ax - hx;
+      return _icIsMinSE ? raw : -raw; // normalize: IC = minimum for both directions
     };
-    // v0.13.4: Use nose-based facing detection computed earlier (robust on treadmill)
-    const _icIsMinSE  = _facesLeft; // IC = displacement minimum for left-facing runner
     console.log(`[StrideEngine] IC refinement: _icIsMinSE=${_icIsMinSE} (from _facesLeft=${_facesLeft}, method=${_facingMethod})`);
     const _searchR_se = Math.max(5, Math.round((endIdx - startIdx) * 0.50));
     // O'Connor (2007) IC: displacement minimum that is FOLLOWED BY INCREASING displacement.
