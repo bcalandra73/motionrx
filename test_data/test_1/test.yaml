@@ -1,0 +1,28 @@
+patient:
+  name: Brian
+  age: 37
+  diagnosis: knee pain
+  movement_type: running
+  height: 66
+  height_unit: in
+  injured_side: right
+
+media:
+  primary:
+    file: side.mov
+    camera_view: side
+  secondary:
+    file: post.mov
+    camera_view: posterior
+
+focus: []
+
+running:
+  treadmill_speed: "7.0"
+  speed_unit: mph
+  treadmill_incline: "0"
+  surface: treadmill
+  fps: 120
+  shoe: minimalist
+  experience: recreational
+  include_footwear: false
