@@ -42,9 +42,10 @@ interface FrameData {
 }
 
 export interface RunnerOutput {
-  dir:          string;
-  movementType: string;
-  cameraView:   string;
+  dir:               string;
+  movementType:      string;
+  cameraView:        string;
+  secondaryCameraView?: string;
   patient: {
     name:      string;
     age:       number | string;
@@ -55,6 +56,7 @@ export interface RunnerOutput {
     phaseSelection:    StepResult<{ frameCount: number; phases: string[]; frames: FrameData[] }>;
     poseDetection:     StepResult<{ detectedCount: number; totalCount: number; perFrameAngles: Record<string, number>[]; annotatedFrames: string[] }>;
     angleCalculation:  StepResult<{ aggregated: Record<string, AngleStat> }>;
+    secondaryPipeline: StepResult<{ frameCount: number; phases: string[]; frames: FrameData[]; aggregated: Record<string, AngleStat>; annotatedFrames: string[]; pairedFrames: string[] }> | null;
     reportGeneration:  StepResult<{ prompt: string; report: unknown }> | null;
   };
 }
@@ -163,6 +165,72 @@ async function annotateFrame(
   });
 }
 
+async function compositeSideBySide(
+  img1: string,
+  img2: string,
+  label: string,
+  view1: string,
+  view2: string,
+): Promise<string> {
+  return new Promise(resolve => {
+    const i1 = new Image(), i2 = new Image();
+    let loaded = 0;
+    const onLoad = () => {
+      if (++loaded < 2) return;
+      const LABEL_H = 32;
+      const W = i1.width + i2.width;
+      const H = Math.max(i1.height, i2.height) + LABEL_H;
+      const canvas = document.createElement('canvas');
+      canvas.width  = W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d')!;
+
+      // Background
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, W, H);
+
+      // Frames
+      ctx.drawImage(i1, 0, 0);
+      ctx.drawImage(i2, i1.width, 0);
+
+      // Divider
+      ctx.strokeStyle = '#0e7c6a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(i1.width, 0);
+      ctx.lineTo(i1.width, H - LABEL_H);
+      ctx.stroke();
+
+      // Label bar
+      ctx.fillStyle = '#0e7c6a';
+      ctx.fillRect(0, H - LABEL_H, W, LABEL_H);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const mid = H - LABEL_H / 2;
+      ctx.fillText(label, W / 2, mid);
+
+      // View labels
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.fillText(view1, 8, mid);
+      ctx.textAlign = 'right';
+      ctx.fillText(view2, W - 8, mid);
+
+      resolve(canvas.toDataURL('image/jpeg', 0.88).replace('data:image/jpeg;base64,', ''));
+    };
+    i1.onload = onLoad;
+    i2.onload = onLoad;
+    i1.onerror = () => resolve(img1);
+    i2.onerror = () => resolve(img1);
+    i1.src = `data:image/jpeg;base64,${img1}`;
+    i2.src = `data:image/jpeg;base64,${img2}`;
+  });
+}
+
 function toFrameData(frames: { index: number; timestamp: number; phase: { id: string; label: string; desc: string; fraction: number }; imageData: string }[]): FrameData[] {
   return frames.map(f => ({
     index:     f.index,
@@ -182,10 +250,14 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
   const movementType = assessment.patient.movementType || 'Running';
   const cameraView   = assessment.media.primary.cameraView;
 
+  const secondaryMeta = assessment.media.secondary;
+  const secondaryCameraView = secondaryMeta?.cameraView;
+
   const output: RunnerOutput = {
     dir,
     movementType,
     cameraView,
+    secondaryCameraView,
     patient: {
       name:      assessment.patient.name,
       age:       assessment.patient.age,
@@ -196,6 +268,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
       phaseSelection:   { ok: false, ms: 0, data: null, error: null },
       poseDetection:    { ok: false, ms: 0, data: null, error: null },
       angleCalculation: { ok: false, ms: 0, data: null, error: null },
+      secondaryPipeline: secondaryMeta ? { ok: false, ms: 0, data: null, error: null } : null,
       reportGeneration: null,
     },
   };
@@ -276,11 +349,77 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
           };
           status(`[${dir}] Step 4 ✓ — ${Object.keys(aggregated).length} metrics computed`);
 
+          // ── Step 3b: Secondary video pipeline (optional) ──────────────────
+
+          let phaseFrames2: typeof phaseFrames = [];
+          let aggregated2: Record<string, AngleStat> = {};
+          if (secondaryMeta) {
+            status(`[${dir}] Step 3b — processing secondary video (${secondaryCameraView})...`);
+            const t3b = performance.now();
+            try {
+              const videoFile2 = await fetchVideoFile(dir, secondaryMeta.file);
+              const rawFrames2  = await extractFrames(videoFile2, movementType);
+              const cameraView2 = (secondaryCameraView ?? 'front') as 'side' | 'front' | 'posterior';
+              const selected2   = await selectPhaseFrames(rawFrames2, movementType, { cameraView: cameraView2 });
+              phaseFrames2 = selected2;
+
+              const poseResults2   = await detectPoseOnFrames(landmarker, phaseFrames2);
+              const allAngles2     = poseResults2.map(r =>
+                extractAngles(
+                  mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
+                  cameraView2,
+                  movementType,
+                ),
+              );
+              aggregated2 = aggregateAngles(allAngles2, phaseFrames2.map(f => f.phase));
+
+              const annotated2 = await Promise.all(
+                poseResults2.map((r, i) =>
+                  r.poseLandmarks
+                    ? annotateFrame(phaseFrames2[i].imageData, r.poseLandmarks)
+                    : Promise.resolve(phaseFrames2[i].imageData),
+                ),
+              );
+
+              // Composite paired frames (primary left, secondary right)
+              const pairedFrames: string[] = [];
+              const pairCount = Math.min(annotatedFrames.length, annotated2.length);
+              for (let i = 0; i < pairCount; i++) {
+                const label  = phaseFrames[i]?.phase?.label ?? `Frame ${i + 1}`;
+                const paired = await compositeSideBySide(
+                  annotatedFrames[i], annotated2[i],
+                  label, cameraView, cameraView2,
+                );
+                pairedFrames.push(paired);
+              }
+
+              const ms3b = Math.round(performance.now() - t3b);
+              output.steps.secondaryPipeline = {
+                ok: true, ms: ms3b,
+                data: {
+                  frameCount:      phaseFrames2.length,
+                  phases:          phaseFrames2.map(f => f.phase.id),
+                  frames:          toFrameData(phaseFrames2),
+                  aggregated:      aggregated2,
+                  annotatedFrames: annotated2,
+                  pairedFrames,
+                },
+                error: null,
+              };
+              status(`[${dir}] Step 3b ✓ — ${phaseFrames2.length} secondary frames in ${ms3b}ms`);
+            } catch (e) {
+              const err = e instanceof Error ? e.message : String(e);
+              output.steps.secondaryPipeline!.error = err;
+              status(`[${dir}] Step 3b ✗ — ${err} (continuing with primary only)`);
+            }
+          }
+
           // ── Step 5: Report generation (optional) ──────────────────────────
 
           if (apiKey?.trim()) {
             status(`[${dir}] Step 5 — generating report...`);
             try {
+              const hasDualView = phaseFrames2.length > 0;
               const prompt = buildReportPrompt({
                 patient: {
                   patientName:   assessment.patient.name,
@@ -294,17 +433,20 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
                 },
                 movementType,
                 cameraView,
-                hasDualView:  !!assessment.media.secondary,
+                hasDualView,
+                secondaryCameraView: secondaryCameraView as 'side' | 'front' | 'posterior' | undefined,
                 focusAreas:   assessment.focus,
                 aggregated,
+                aggregated2:  hasDualView ? aggregated2 : undefined,
                 proms:        assessment.proms ?? {},
                 running:      assessment.running,
                 jump:         assessment.jump,
                 frameCount:   phaseFrames.length,
+                frameCount2:  hasDualView ? phaseFrames2.length : undefined,
               });
 
               const { ms: ms5, value: report } = await timed(() =>
-                generateReport({ apiKey, prompt, frames: phaseFrames }),
+                generateReport({ apiKey, prompt, frames: phaseFrames, frames2: phaseFrames2 }),
               );
               output.steps.reportGeneration = {
                 ok: true, ms: ms5,

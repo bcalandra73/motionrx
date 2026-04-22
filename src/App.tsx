@@ -116,20 +116,62 @@ export default function App() {
       const aggregated = aggregateAngles(allFrameAngles, phaseFrames.map(f => f.phase));
       console.log(`[Step 4 ✓] Angles calculated in ${Math.round(performance.now() - t4)}ms —`, aggregated);
 
+      // Step 3b: Secondary video pipeline (non-fatal — failure falls back to single-view)
+      let phaseFrames2: typeof phaseFrames = [];
+      let aggregated2: typeof aggregated   = {};
+      if (video.secondary.file) {
+        video.setStage('detecting', 'Extracting second camera angle...', 0);
+        const t3b = performance.now();
+        console.log('[Step 3b] Processing secondary video —', video.secondary.cameraView);
+        try {
+          const rawFrames2 = await extractFrames(
+            video.secondary.file,
+            form.form.movementType,
+            { onProgress: (pct, label) => video.setStage('detecting', label, pct * 0.3) },
+          );
+          const selected2 = await selectPhaseFrames(rawFrames2, form.form.movementType, {
+            cameraView: video.secondary.cameraView as 'side' | 'front' | 'posterior',
+            onProgress: (pct, label) => video.setStage('detecting', label, 30 + pct * 0.3),
+          });
+          phaseFrames2 = selected2;
+          video.updateSecondary({ extractedFrames: phaseFrames2 });
+
+          const poseResults2 = await detectPoseOnFrames(landmarker, phaseFrames2, {
+            onProgress: (pct, label) => video.setStage('detecting', label, 60 + pct * 0.4),
+          });
+          const cameraView2 = (video.secondary.cameraView ?? 'front') as 'side' | 'front' | 'posterior';
+          const allFrameAngles2 = poseResults2.map(r =>
+            extractAngles(
+              mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
+              cameraView2,
+              form.form.movementType,
+            ),
+          );
+          aggregated2 = aggregateAngles(allFrameAngles2, phaseFrames2.map(f => f.phase));
+          console.log(`[Step 3b ✓] Secondary pipeline done in ${Math.round(performance.now() - t3b)}ms —`, aggregated2);
+        } catch (err2) {
+          console.warn('[Step 3b] Secondary pipeline failed (non-critical):', err2);
+          phaseFrames2 = [];
+          aggregated2  = {};
+        }
+      }
+
       // Step 5: build prompt and call Claude for report generation
       video.setStage('analyzing', 'Generating clinical report...', 50);
       const t5 = performance.now();
       console.log('[Step 5] Building prompt and calling Claude API...');
       const isRunning = /running|gait|walk/i.test(form.form.movementType);
       const isJump    = /jump|landing/i.test(form.form.movementType);
+      const hasDualView = phaseFrames2.length > 0;
       const prompt = buildReportPrompt({
         patient:     form.form,
         movementType: form.form.movementType,
         cameraView,
-        hasDualView: video.secondary.file != null,
+        hasDualView,
         secondaryCameraView: video.secondary.cameraView as 'side' | 'front' | 'posterior',
         focusAreas,
         aggregated,
+        aggregated2: hasDualView ? aggregated2 : undefined,
         proms: {
           nprs:       proms.nprs,
           psfs:       proms.psfs,
@@ -139,15 +181,16 @@ export default function App() {
         },
         running: isRunning ? running.inputs : undefined,
         jump:    isJump    ? jump.inputs    : undefined,
-        frameCount: phaseFrames.length,
+        frameCount:  phaseFrames.length,
+        frameCount2: hasDualView ? phaseFrames2.length : undefined,
       });
 
-      console.log(`[Step 5] Prompt length: ${prompt.length} chars, sending ${phaseFrames.length} frames to Claude...`);
+      console.log(`[Step 5] Prompt length: ${prompt.length} chars, sending ${phaseFrames.length} primary + ${phaseFrames2.length} secondary frames to Claude...`);
       const report = await generateReport({
         apiKey,
         prompt,
         frames:  phaseFrames,
-        frames2: video.secondary.file ? (video.secondary.extractedFrames ?? []) : [],
+        frames2: phaseFrames2,
       });
       console.log(`[Step 5 ✓] Report received in ${Math.round(performance.now() - t5)}ms — score: ${report.score}, findings: ${report.findings?.length ?? 0}`);
       console.log(`[Pipeline ✓] Total time: ${Math.round(performance.now() - t0)}ms`);
@@ -426,7 +469,7 @@ export default function App() {
 
         {/* LOADING STATE */}
         {isAnalyzing && (
-          <LoadingState stage={video.analysis.stage} label={video.analysis.stageLabel} />
+          <LoadingState stage={video.analysis.stage} label={video.analysis.stageLabel} hasDualView={!!video.secondary.file} />
         )}
 
         {/* ERROR STATE */}

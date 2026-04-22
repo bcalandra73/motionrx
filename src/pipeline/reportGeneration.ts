@@ -18,6 +18,7 @@ export interface ReportContext {
   secondaryCameraView?: 'side' | 'front' | 'posterior';
   focusAreas:         string[];
   aggregated:         Record<string, AngleStat>;
+  aggregated2?:       Record<string, AngleStat>;
   proms: {
     nprs?:      NPRSData;
     psfs?:      PSFSItem[];
@@ -28,6 +29,7 @@ export interface ReportContext {
   running?:    RunningInputs;
   jump?:       JumpInputs;
   frameCount:  number;
+  frameCount2?: number;
 }
 
 // ── Movement norms ───────────────────────────────────────────────────────────
@@ -476,7 +478,7 @@ HIP STRATEGY: Only flag inadequate if Hip Flexion (peak) < 30°. Values of 60-90
 export function buildReportPrompt(ctx: ReportContext): string {
   const {
     patient, movementType, cameraView, hasDualView, secondaryCameraView,
-    focusAreas, aggregated, proms, running, jump, frameCount,
+    focusAreas, aggregated, aggregated2, proms, running, jump, frameCount, frameCount2,
   } = ctx;
 
   const isLanding  = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movementType);
@@ -485,19 +487,22 @@ export function buildReportPrompt(ctx: ReportContext): string {
 
   const focusText  = focusAreas.length ? focusAreas.join(', ') : 'General movement quality and injury risk factors';
 
-  const angleLines = formatAnglesForPrompt(aggregated, movementType);
-  const asiText    = formatASI(aggregated, movementType);
+  // Merge secondary angles into primary — primary wins on conflict, secondary supplements
+  const mergedAggregated: Record<string, AngleStat> = { ...aggregated2, ...aggregated };
+
+  const angleLines = formatAnglesForPrompt(mergedAggregated, movementType);
+  const asiText    = formatASI(mergedAggregated, movementType);
   const promsText  = formatPROMs(proms);
   const norms      = getNormsForMovement(movementType);
   const normsText  = norms
     ? Object.entries(norms).map(([joint, ref]) => `  ${joint}: ${ref.label}`).join('\n')
     : 'Standard clinical ranges apply.';
 
-  const camNote      = cameraViewNote(movementType, cameraView, hasDualView, secondaryCameraView, frameCount);
+  const camNote      = cameraViewNote(movementType, cameraView, hasDualView, secondaryCameraView, frameCount, frameCount2);
   const conventions  = angleConventions(movementType, cameraView);
   const runCtx       = isRunning ? formatRunningContext(running, patient) : '';
   const jumpCtx      = isLanding ? formatJumpContext(jump) : '';
-  const footwearReq  = formatFootwearRequest(aggregated, running, movementType);
+  const footwearReq  = formatFootwearRequest(mergedAggregated, running, movementType);
 
   const landingAssessment = isLanding ? `
 LANDING MECHANICS ASSESSMENT — ACL RETURN-TO-SPORT CONTEXT:

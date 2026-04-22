@@ -6,34 +6,25 @@ Clinical motion analysis tool for physiotherapists and sports medicine practitio
 
 ## Processing pipeline
 
-Each analysis runs through four sequential steps:
+Each analysis runs through five sequential steps. When a second camera angle is provided, steps 1–4 run on both videos before report generation.
 
-**1. Frame extraction** (`src/pipeline/frameExtraction.ts`)
-Seeks to phase-targeted timestamps rather than decoding every frame. Most movements extract 8 frames; Running extracts 128 and Gait / Walking extracts 64 to capture full stride cycles.
+**1. Frame extraction**
+Targets specific timestamps within each movement phase rather than decoding every frame. The number of frames extracted varies by movement type to ensure adequate cycle coverage — running and gait use more frames to capture complete stride patterns.
 
-**2. Phase selection** (`src/pipeline/phaseSelection.ts`)
-Runs a coarse MoveNet scan on the extracted frames and applies movement-specific logic to pick the 8 most diagnostically useful frames:
-- *Gait / Running* — GaitFSM detects stride events (initial contact, midstance, toe-off, midswing, etc.) and selects one representative frame per canonical phase.
-- *Squats / Deadlifts / Landing* — smart relabeling finds the true peak-flexion or lockout frame by a composite knee + hip score, then reassigns the phase label.
-- *All other movements* — frames are already phase-targeted by extraction, so this step is a passthrough.
+**2. Phase selection**
+Analyzes the extracted frames and selects the 8 most diagnostically useful ones using movement-specific logic. Gait and running movements identify key stride events and pick one representative frame per phase. Strength and landing movements find the true peak-flexion or lockout frame. For other movements, frames pass through unchanged.
 
-**3. Pose detection** (`src/pipeline/poseDetection.ts`)
-Runs MediaPipe PoseLandmarker Heavy on the 8 selected frames. Returns 33 normalised landmarks and 33 world landmarks (in metres) per frame. Includes a mild contrast/brightness pre-processing pass for underexposed footage.
+**3. Pose detection**
+Runs landmark detection on the selected frames to identify 33 body landmarks per frame. Includes a pre-processing pass to improve results on underexposed footage.
 
-**4. Angle calculation** (`src/pipeline/angleCalculation.ts`)
-Computes joint angles from the landmark data and aggregates them across frames:
-- *Side view* — knee flexion, hip flexion (thigh-from-vertical for running/gait; shoulder-hip-knee for everything else), trunk lean, ankle dorsiflexion (stance frames only; heel preferred over toe; Z-depth cross-check to reject non-sagittal frames).
-- *Front / posterior view* — pelvic drop, knee valgus (perpendicular offset method), hip adduction, pronation/RCSP (contact and midstance frames only).
-- `extractAngles()` returns a flat `Record<string, number>` for one frame; `aggregateAngles()` reduces all frames to `{ min, max, avg, count, hitRate, lowConfidence }` per metric, with phase-aware filters.
-- `REF_RANGES` provides physiological reference bands for each metric.
+**3b. Secondary video pipeline** *(dual-plane only)*
+If a second camera angle is uploaded, steps 1–3 run independently on that video using the same movement type and the secondary camera's view setting. Failures are non-fatal — the pipeline falls back to single-view if the secondary video cannot be processed.
 
-**5. Report generation** (`src/pipeline/reportGeneration.ts` + `src/api/index.ts`)
-Builds a structured prompt from all available context and calls Claude AI (`claude-sonnet-4-6`) to generate the clinical report:
-- `buildReportPrompt()` assembles: patient metadata, measured angles (with movement-aware display-value selection), limb symmetry index, PROMs (NPRS, PSFS, LEFS, ODI, hop LSI), movement-specific reference norms, angle interpretation conventions, and optional running/jump context.
-- *Display-value selection* — running/gait knee flexion converts `180 − min_included` to peak swing flexion; landing knee/hip uses the same conversion; landing valgus/trunk uses `max` (worst-case); shoulder/elbow ROM uses `max`; everything else uses `avg`.
-- *Upper extremity* — lower-body metrics are suppressed from the prompt for shoulder/overhead movements.
-- *Footwear recommendation* — optionally requested (running/gait only) based on pronation and hip adduction data.
-- `generateReport()` sends the phase frames as base64 images and the prompt to the Anthropic API; the response is parsed into a structured `AnalysisReport` (score, findings, biomechanical analysis, clinical impressions, recommendations, patient education).
+**4. Angle calculation**
+Computes joint angles from landmark positions and summarizes them across frames. Side-view metrics include knee flexion, hip flexion, trunk lean, and ankle dorsiflexion. Front and posterior metrics include pelvic drop, knee valgus, hip adduction, and foot pronation. When dual-plane is active, angles from both views are merged — the primary view's values take precedence on any overlap.
+
+**5. Report generation**
+Assembles all available data — patient metadata, measured angles from both views, limb symmetry index, and patient-reported outcome measures — into a structured prompt and sends it to Claude AI along with the annotated frames from both cameras. The response is parsed into a structured clinical report covering findings, biomechanical analysis, clinical impressions, recommendations, and patient education.
 
 ---
 
@@ -71,14 +62,35 @@ These cover pure functions across three modules:
 
 ### End-to-end pipeline runner
 
-Runs the full pipeline on real video files and saves all intermediate results to disk. Video files are **not checked into git** — place them in `test_data/` alongside a `test.yaml` describing each case:
+Runs the full pipeline on real video files and saves all intermediate results to disk. Test cases live in `test_data/` — each case is a directory containing a `test.yaml` and the video files referenced by it.
+
+**Running the tests:**
+
+```bash
+# Run all test cases in test_data/
+npm run pipeline
+
+# Run a single named case
+npm run pipeline -- --test test_1
+
+# Include Claude report generation (requires API key)
+npm run pipeline -- --key sk-ant-...
+# or set ANTHROPIC_API_KEY in your environment and just run npm run pipeline
+
+# Write output to a custom directory (default: test_output/)
+npm run pipeline -- --out results/
+```
+
+The script starts a Vite dev server and headless Chromium — the same code path as the production app. On first run, the MediaPipe WASM + model (~30 MB) is downloaded and cached; subsequent runs are fast.
+
+**Test case structure:**
 
 ```
 test_data/
   test_1/
     test.yaml
     side.mov
-    front.mov   # optional secondary angle
+    front.mov       # optional — triggers dual-plane analysis
   test_2/
     test.yaml
     side.mov
@@ -86,40 +98,83 @@ test_data/
 
 `test.yaml` format:
 ```yaml
-patient_name: Jane Doe
-age: 34
-complaint: Left knee pain on stairs
-movement_type: Running
+# Required
+patient:
+  name: Jane Doe
+  age: 34
+  diagnosis: Left knee pain on stairs
+  movement_type: Running        # must match a movement type in the app
+  height: 170                   # optional
+  height_unit: cm               # cm | in  (default: in)
+  injured_side: left            # left | right (optional)
+  notes: |                      # optional free-text clinical notes
+    Antalgic gait noted.
+
 media:
   primary:
     file: side.mov
-    angle: Side (right)
-  secondary:
+    camera_view: side           # side | front | posterior
+  secondary:                    # optional — triggers dual-plane analysis
     file: front.mov
-    angle: Front
+    camera_view: front
+
+focus:                          # optional — analysis focus areas
+  - knee alignment and tracking
+  - hip symmetry and mobility
+
+# Optional — include for running/gait movements
+running:
+  treadmill_speed: 6.0
+  speed_unit: mph               # mph | kph | mps
+  treadmill_incline: 0
+  surface: treadmill            # treadmill | track | road | trail
+  fps: 60
+  shoe: standard                # standard | stability | minimalist | carbon | maximalist
+  experience: recreational      # beginner | recreational | competitive | elite
+  include_footwear: true
+
+# Optional — include for jump/landing movements
+jump:
+  fps: 120
+  involved_limb: left           # left | right | bilateral
+  protocol: 30cm                # 30cm | 45cm | dvj | 3hop | custom
+  time_post_op: 6mo             # 3mo | 6mo | 9mo | 12mo | >12mo
+
+# Optional — patient-reported outcome measures
+proms:
+  nprs:
+    current: 5
+    best: 2
+    worst: 8
+  psfs:
+    - activity: Running 5km
+      score: 4
+    - activity: Descending stairs
+      score: 3
+  lsi_injured: 85
+  lsi_uninjured: 100
 ```
 
-```bash
-npm run pipeline                          # run all test cases
-npm run pipeline -- --test test_1         # run a single case
-npm run pipeline -- --key sk-ant-...      # include Claude report generation (step 5)
-npm run pipeline -- --out results/        # override output directory (default: test_output/)
-```
+**Output** is written to `test_output/{test_name}/`:
 
-Output is written to `test_output/{test_name}/`:
 ```
 test_output/
   test_1/
-    summary.json    ← timings, phase labels, aggregated angles, per-frame angles
-    prompt.txt      ← the full Claude prompt (always written)
-    report.json     ← Claude's structured report (only with --key)
-    frames/
+    summary.json          ← timings, phase labels, aggregated angles (both views), per-frame angles
+    prompt.txt            ← full Claude prompt (always written)
+    report.json           ← Claude's structured report (only with --key)
+    frames/               ← raw phase-selected frames, all views
+      00_contact_side.jpg
+      00_contact_front.jpg
+      ...
+    frames_annotated/     ← same frames with MediaPipe skeleton overlay
+      00_contact_side.jpg
+      00_contact_front.jpg
+      ...
+    frames_paired/        ← primary + secondary composited side by side (dual-plane only)
       00_contact.jpg
-      01_loading.jpg
       ...
 ```
-
-The script starts a headless Chromium via Playwright and a Vite dev server — same code path as the production app. On first run the MediaPipe WASM + model (~30 MB) is downloaded and cached; subsequent runs are fast.
 
 ### Type checking
 

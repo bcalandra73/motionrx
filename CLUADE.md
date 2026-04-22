@@ -1,235 +1,248 @@
-# CLAUDE.md — HTML → React + Vite + TypeScript Refactor
+# MotionRx — Claude Development Guide
 
-## Project Context
-
-This project is being migrated from a single monolithic `index.html` file (with all CSS, JS logic,
-API calls, and state management inlined) into a standard **React + Vite + TypeScript** project.
-
-The original `index.html` is the source of truth. Do not delete it until the migration is complete
-and verified working.
+Clinical motion analysis tool for physiotherapists and sports medicine practitioners. Processes patient video through a five-step pipeline (frame extraction → phase selection → pose detection → angle calculation → report generation) and produces a structured clinical report via Claude AI.
 
 ---
 
-## Migration Goals
+## Tech stack
 
-1. Scaffold a clean Vite + React + TypeScript project alongside the existing file
-2. Extract inline styles → component-scoped CSS modules (or a chosen styling solution)
-3. Extract inline JS logic → typed React components and custom hooks
-4. Extract API calls → a dedicated service/api layer
-5. Extract state management → `useState` / `useReducer` hooks (or a state library if complex)
-6. Ensure the running app is functionally identical to the original HTML file
+| Layer | Technology |
+|---|---|
+| Framework | React + TypeScript |
+| Build tool | Vite (dev server at `localhost:5173`, output to `dist/`) |
+| Pose detection | MediaPipe (WASM + model, ~30 MB, cached after first run) |
+| Report generation | Anthropic Claude API (`/v1/messages`) |
+| Testing (unit) | Vitest (Node, no browser) |
+| Testing (E2E) | Playwright + headless Chromium + Vite dev server |
+| Test data | Local video files in `test_data/` |
 
 ---
 
-## Scaffold Instructions
+## Project structure
 
-When initializing the project, run:
+```
+src/
+  ├── components/         # React UI components
+  ├── hooks/              # React hooks (useVideoAnalysis, usePatientForm, etc.)
+  ├── pipeline/           # Core processing logic (pure functions where possible)
+  │   ├── frameExtraction # getPhaseTimes, extractFrames — phase-targeted frame capture
+  │   ├── phaseSelection  # selectPhaseFrames — MoveNet scan + movement-specific frame picking
+  │   ├── poseDetection   # initPoseLandmarker, detectPoseOnFrames — MediaPipe Heavy
+  │   ├── angleCalculation# mergeWorldLandmarks, extractAngles, aggregateAngles, REF_RANGES
+  │   ├── reportGeneration# buildReportPrompt — assembles Claude prompt
+  │   └── __tests__/      # Unit tests (*.test.ts)
+  ├── api/                # generateReport — Anthropic API call + response parsing
+  ├── runner/             # Browser-side pipeline runner (used by E2E script)
+  ├── data/               # phaseMaps, cameraGuides
+  ├── types/              # Shared TypeScript types
+  └── ...
+
+scripts/
+  └── run-pipeline.ts     # E2E pipeline runner (Playwright + Vite)
+
+test_data/                # Video files + test.yaml per case
+test_output/              # E2E output (summary.json, frames/, prompt.txt, report.json)
+
+_original_index.html      # Original single-file prototype — reference only, do not modify
+```
+
+---
+
+## Processing pipeline (five steps)
+
+Understanding this sequence is essential before modifying any pipeline code.
+
+### 1. Frame extraction
+Targets specific timestamps within each movement phase rather than decoding every frame. Frame count varies by movement type — running and gait extract more frames to capture complete stride patterns.
+
+### 2. Phase selection
+Selects the 8 most diagnostically useful frames using movement-specific logic:
+- **Gait / Running** — identifies key stride events, picks one representative frame per phase
+- **Strength / Landing** — finds true peak-flexion or lockout frame
+- **Other** — frames pass through unchanged
+
+### 3. Pose detection
+Runs MediaPipe landmark detection on selected frames (33 landmarks per frame). Includes a pre-processing pass to improve results on underexposed footage.
+
+### 3b. Secondary video pipeline *(dual-plane only)*
+If a second camera angle is uploaded, steps 1–3 run independently on that video. Failures are non-fatal — the pipeline falls back to single-view if the secondary video cannot be processed.
+
+### 4. Angle calculation
+Computes joint angles from landmark positions and aggregates across frames:
+- **Side view** — knee flexion, hip flexion, trunk lean, ankle dorsiflexion
+- **Front / Posterior view** — pelvic drop, knee valgus, hip adduction, foot pronation
+- **Dual-plane** — angles from both views are merged; primary view takes precedence on overlap
+
+### 5. Report generation
+Assembles patient metadata, measured angles (both views), limb symmetry index, and PROMs into a structured prompt → sends to Claude AI with annotated frames → parses response into a clinical report (findings, biomechanical analysis, clinical impressions, recommendations, patient education).
+
+---
+
+## Development commands
 
 ```bash
-npm create vite@latest . -- --template react-ts
-npm install
-```
+npm install             # install dependencies
 
-If the project root already has files, scaffold into a temp folder and merge manually:
+# Development
+npm run dev             # Vite dev server → http://localhost:5173
+npx tsc --noEmit        # type-check without building
 
-```bash
-npm create vite@latest _vite_temp -- --template react-ts
-```
+# Production
+npm run build           # type-check + Vite build → dist/
+npm run preview         # serve dist/ locally
 
-### Required dependencies
+# Unit tests (fast, Node only)
+npm test                # run once
+npm run test:watch      # watch mode
 
-Install these after scaffolding. Adjust versions as appropriate:
-
-```bash
-npm install
-# Add any packages already used by the original HTML (CDN scripts → npm equivalents)
-```
-
----
-
-## Target Directory Structure
-
-```
-/
-├── public/                  # Static assets (favicon, fonts, etc.)
-├── src/
-│   ├── api/                 # All external API calls
-│   │   └── index.ts         # Typed fetch wrappers, one function per endpoint
-│   ├── components/          # Reusable UI components
-│   │   └── ExampleWidget/
-│   │       ├── ExampleWidget.tsx
-│   │       └── ExampleWidget.module.css
-│   ├── hooks/               # Custom React hooks (extracted logic)
-│   │   └── useExampleHook.ts
-│   ├── types/               # Shared TypeScript interfaces and types
-│   │   └── index.ts
-│   ├── App.tsx              # Root component — mirrors original HTML structure
-│   ├── App.module.css       # Root-level styles
-│   └── main.tsx             # Vite entry point
-├── index.html               # Original source file (keep until migration verified)
-├── vite.config.ts
-├── tsconfig.json
-└── CLAUDE.md
+# E2E pipeline runner (requires test_data/)
+npm run pipeline                          # all test cases
+npm run pipeline -- --test test_1         # single case
+npm run pipeline -- --key sk-ant-...      # include Claude report (step 5)
+npm run pipeline -- --out results/        # custom output dir (default: test_output/)
 ```
 
 ---
 
-## Migration Steps (follow in order)
+## Test data setup
 
-### Step 1 — Audit the original `index.html`
+Video files are not committed. Place them in `test_data/` with a `test.yaml` per case:
 
-Before writing any React code, read the original file carefully and produce a written inventory:
-
-- List every **visual section** of the UI (header, sidebar, cards, modals, etc.)
-- List every **`<script>` block** and what each one does
-- List every **`<style>` block** and which elements it targets
-- List every **`fetch()` or `XMLHttpRequest`** call: URL, method, request shape, response shape
-- List every **piece of state** (variables that change over time and affect the UI)
-- List every **CDN dependency** (`<script src="...">`) — find the npm equivalent
-
-Do not start Step 2 until this inventory is complete.
-
----
-
-### Step 2 — Define types first (`src/types/index.ts`)
-
-For every API response shape and major data structure identified in Step 1, write a TypeScript
-interface before writing any component code. Example:
-
-```typescript
-export interface User {
-  id: string;
-  name: string;
-  email: string;
-}
-
-export interface ApiResponse<T> {
-  data: T;
-  error: string | null;
-}
+```
+test_data/
+  test_1/
+    test.yaml
+    side.mov
+    front.mov   # optional
 ```
 
----
+```yaml
+patient:
+  name: Jane Doe
+  age: 34
+  diagnosis: Left knee pain on stairs
+  movement_type: Running
+  height: 170           # optional
+  height_unit: cm       # cm | in
+  injured_side: left    # optional
+  notes: |              # optional
+    Antalgic gait noted.
 
-### Step 3 — Extract API calls (`src/api/index.ts`)
+media:
+  primary:
+    file: side.mov
+    camera_view: side           # side | front | posterior
+  secondary:                    # optional
+    file: front.mov
+    camera_view: front
 
-Move every `fetch()` from the original HTML into typed async functions here. Follow this pattern:
+focus:                          # optional
+  - knee alignment and tracking
 
-```typescript
-import type { User } from '../types';
+running:                        # optional — running/gait only
+  treadmill_speed: 6.0
+  speed_unit: mph
+  surface: treadmill
+  fps: 60
+  shoe: standard
+  experience: recreational
+  include_footwear: true
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
+jump:                           # optional — jump/landing only
+  fps: 120
+  involved_limb: left
+  protocol: 30cm
+  time_post_op: 6mo
 
-export async function getUser(id: string): Promise<User> {
-  const res = await fetch(`${BASE_URL}/users/${id}`);
-  if (!res.ok) throw new Error(`getUser failed: ${res.status}`);
-  return res.json();
-}
+proms:                          # optional
+  nprs:
+    current: 5
+    best: 2
+    worst: 8
+  psfs:
+    - activity: Running 5km
+      score: 4
+  lsi_injured: 85
+  lsi_uninjured: 100
 ```
 
-- One function per endpoint
-- All functions must be typed (no `any`)
-- Use `import.meta.env.VITE_*` for base URLs and API keys — never hardcode them
-- Create a `.env.local` file with placeholder values and document each variable here
+E2E output lands in `test_output/{test_name}/`:
+- `summary.json` — timings, phase labels, aggregated angles (both views), per-frame angles
+- `prompt.txt` — full Claude prompt (always written)
+- `report.json` — Claude's structured report (only with `--key`)
+- `frames/` — raw phase-selected frames, all views (`{i}_{phaseId}_{view}.jpg`)
+- `frames_annotated/` — skeleton overlay frames, all views (`{i}_{phaseId}_{view}.jpg`)
+- `frames_paired/` — primary + secondary composited side by side (dual-plane only)
 
 ---
 
-### Step 4 — Extract state into custom hooks (`src/hooks/`)
+## Key modules to know
 
-For each piece of stateful logic identified in Step 1, create a custom hook. Follow this pattern:
+### `angleCalculation`
+Contains the core math. Key exports tested in `angleCalculation.test.ts`:
+- `mergeWorldLandmarks` — combines normalized landmarks with world-space (metric) coordinates for a single frame
+- `extractAngles` — computes angles from a landmark set for one frame
+- `aggregateAngles` — summarizes angles across multiple frames (min, max, avg, hitRate)
+- `REF_RANGES` — reference angle ranges used for clinical flagging
 
-```typescript
-// src/hooks/useUser.ts
-import { useState, useEffect } from 'react';
-import { getUser } from '../api';
-import type { User } from '../types';
+### `reportGeneration` / `buildReportPrompt`
+Assembles the Claude prompt. Tested extensively in `reportGeneration.test.ts` covering:
+- Patient metadata formatting
+- Angle display-value selection
+- Movement-specific normative ranges
+- PROMs (patient-reported outcome measures)
+- ASI (asymmetry index)
+- Camera view notes
+- Footwear request
+- JSON schema for structured response parsing
 
-export function useUser(id: string) {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getUser(id)
-      .then(setUser)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [id]);
-
-  return { user, loading, error };
-}
-```
+### `getPhaseTimes`
+Calculates phase timestamps and phase maps for each movement type. Tested in `getPhaseTimes.test.ts`.
 
 ---
 
-### Step 5 — Build components bottom-up (`src/components/`)
+## Development conventions
 
-Start with the smallest leaf elements and work up to the page layout. Rules:
-
-- Each component lives in its own folder with a matching `.module.css` file
-- Props must be fully typed — no `any`, no untyped objects
-- Copy CSS from the original `<style>` blocks directly into `.module.css` files; rename classes to
-  camelCase as needed
-- Do not refactor logic while also migrating — migrate first, refactor later
-
-Component naming convention: `PascalCase` for both the folder and the `.tsx` file.
+- **Keep the README current** — if you add a pipeline step, change behaviour, or add a CLI flag, update `README.md` to reflect it before considering the task done.
+- **Keep the E2E runner current** — any change to pipeline logic (new step, new output field, changed aggregation) must be reflected in `src/runner/runner.ts` and `scripts/run-pipeline.ts`. The runner is the canonical end-to-end test; if it doesn't exercise a feature, that feature is untested.
 
 ---
 
-### Step 6 — Assemble `App.tsx`
+## Architecture notes
 
-Reconstruct the top-level layout using the components from Step 5 and hooks from Step 4. The
-visual output of `App.tsx` should be a pixel-faithful match to the original `index.html`.
-
----
-
-### Step 7 — Verify
-
-Run the dev server and do a side-by-side comparison with the original file:
-
-```bash
-npm run dev
-```
-
-Check every user interaction from the original file:
-- [ ] All UI sections render correctly
-- [ ] All API calls fire and data displays correctly
-- [ ] All stateful interactions work (clicks, inputs, toggles)
-- [ ] No TypeScript errors (`npx tsc --noEmit`)
-- [ ] No console errors
-
-Only after all checks pass should the original `index.html` be archived or deleted.
+- **Pure functions** — pipeline logic (`angleCalculation`, `getPhaseTimes`, `buildReportPrompt`) is kept free of side effects and UI concerns. Keep it this way — it's why unit tests are fast.
+- **Non-fatal secondary pipeline** — any failure in the secondary video path must not crash the primary pipeline. Always wrap secondary processing in try/catch and fall back gracefully.
+- **Primary view precedence** — when merging dual-plane angle data, primary view values always win on overlap. Do not change this without updating tests.
+- **MediaPipe is browser-only** — the WASM runtime cannot run in Node. Unit tests mock or avoid MediaPipe; only the E2E runner (Playwright + headless Chromium) exercises it.
+- **`_original_index.html`** — the original single-file prototype. Treat as read-only reference. Do not modify or re-integrate it.
 
 ---
 
-## Coding Conventions
+## Adding a new movement type
 
-- **No `any` types.** If a type is unknown, use `unknown` and narrow it explicitly.
-- **No inline styles** in `.tsx` files. All styles go in `.module.css` files.
-- **Prefer named exports** over default exports for components (exception: route-level pages).
-- **Env vars** must be prefixed with `VITE_` and documented in this file under "Environment Variables".
-- **Error boundaries**: wrap major sections in a React `ErrorBoundary` component.
-- Keep components under ~150 lines. If longer, split into sub-components.
-
----
-
-## Environment Variables
-
-Document every env var here as it's added:
-
-| Variable | Description | Example |
-|---|---|---|
-| `VITE_API_BASE_URL` | Base URL for all API requests | `https://api.example.com` |
-
-Create `.env.local` (gitignored) for real values. Create `.env.example` (committed) with
-placeholder values.
+1. Add phase timestamps to `PHASE_MAPS` in `src/data/phaseMaps.ts` and update `getPhaseTimes.test.ts`.
+2. Add phase selection logic (step 2) for the new type, following existing patterns.
+3. Determine which angle metrics apply (side / front / posterior) and verify `extractAngles` covers them.
+4. Add movement-specific normative ranges to `REF_RANGES` and `buildReportPrompt`.
+5. Add a test case to `test_data/` and run the E2E pipeline to validate end-to-end.
+6. Update `reportGeneration.test.ts` for any `buildReportPrompt` changes.
 
 ---
 
-## What NOT to Do
+## Claude API usage
 
-- Do not refactor or improve the logic while migrating — migrate first, improve in a follow-up PR
-- Do not use `any` as a temporary shortcut — define the type, even if approximate
-- Do not inline API base URLs or secrets
-- Do not skip the Step 1 audit — components built without it will miss edge cases
-- Do not delete `index.html` until Step 7 verification is complete
+The app calls the Anthropic API client-side using a user-supplied API key (entered in the UI). The key is never stored beyond the session.
+
+- **Model** — `claude-sonnet-4-6` (defined in `src/api/index.ts` as `ANALYSIS_MODEL`)
+- **Input** — structured text prompt (`buildReportPrompt`) + annotated JPEG frames as base64 images
+- **Output** — JSON-structured clinical report; parsed by `reportGeneration`
+- **Step 5 only** — the API is called once per analysis at the very end of the pipeline
+
+---
+
+## Common gotchas
+
+- MediaPipe WASM (~30 MB) is downloaded and cached on first E2E run — subsequent runs are fast.
+- The E2E runner starts both a Vite dev server (port 5174) and headless Chromium; make sure port 5174 is free (it will try the next available port if not).
+- `npm run build` runs `tsc` before Vite — fix type errors before attempting a production build.
+- Secondary video failures are intentionally swallowed; check `summary.json` to confirm whether dual-plane data was captured.
