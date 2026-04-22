@@ -14,7 +14,8 @@
  */
 
 import * as poseDetection from '@tensorflow-models/pose-detection';
-import '@tensorflow/tfjs';
+import * as tf from '@tensorflow/tfjs';
+import '@tensorflow/tfjs-backend-cpu';
 import type { ExtractedFrame, NormalizedLandmark, PhaseLabel } from '../types';
 import { PHASE_MAPS } from '../data/phaseMaps';
 
@@ -47,6 +48,15 @@ let _moveNetDetector: poseDetection.PoseDetector | null = null;
 export async function initMoveNet(): Promise<poseDetection.PoseDetector | null> {
   if (_moveNetDetector) return _moveNetDetector;
   try {
+    // Try GPU-accelerated backends; fall back to CPU in headless/server environments
+    let backendOk = false;
+    try { await tf.ready(); backendOk = true; } catch { /* GPU unavailable */ }
+    if (!backendOk) {
+      await tf.setBackend('cpu');
+      await tf.ready();
+    }
+    console.log('[MoveNet] Backend:', tf.getBackend());
+
     _moveNetDetector = await poseDetection.createDetector(
       poseDetection.SupportedModels.MoveNet,
       { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER, enableSmoothing: false },
@@ -628,8 +638,7 @@ export async function selectPhaseFrames(
 
   if (isGait) {
     if (!detector) {
-      // MoveNet unavailable: subsample to 16 frames and return — full MediaPipe will run on all
-      console.warn('[PhaseSelection] MoveNet unavailable for gait — using 16-frame subsample');
+      console.warn('[PhaseSelection] MoveNet unavailable — using 16-frame subsample');
       const step = Math.max(1, Math.floor(frames.length / 16));
       const fallback = frames.filter((_, i) => i % step === 0).slice(0, 16);
       onProgress?.(100, `Phase selection complete — ${fallback.length} frames (MoveNet unavailable)`);

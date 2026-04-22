@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { LEFSData, ODIData, NPRSData, PSFSItem } from '../types';
+import type { LEFSData, ODIData, NPRSData, PSFSItem, Assessment } from '../types';
 
 const LEFS_ITEMS = [
   'Any of your usual work, housework, or school activities',
@@ -117,6 +117,30 @@ export function usePROMs() {
     setLsiUninjured('');
   }
 
+  function load(a: Assessment) {
+    const p = a.proms;
+    if (!p) { reset(); return; }
+    if (p.nprs) setNprs(p.nprs);
+    if (p.psfs) {
+      // Pad to at least 3 slots
+      const slots = [...p.psfs];
+      while (slots.length < 3) slots.push({ activity: '', score: null });
+      setPsfs(slots);
+    }
+    if (p.lefsScores) {
+      const scores = [...p.lefsScores];
+      while (scores.length < LEFS_ITEMS.length) scores.push(null);
+      setLefsScores(scores.slice(0, LEFS_ITEMS.length));
+    }
+    if (p.odiScores) {
+      const scores = [...p.odiScores];
+      while (scores.length < ODI_ITEMS.length) scores.push(null);
+      setOdiScores(scores.slice(0, ODI_ITEMS.length));
+    }
+    if (p.lsiInjured   != null) setLsiInjured(p.lsiInjured);
+    if (p.lsiUninjured != null) setLsiUninjured(p.lsiUninjured);
+  }
+
   return {
     lefsScores, lefsTotal, setLefsScore,
     odiScores, odiScore, setOdiScore,
@@ -127,6 +151,6 @@ export function usePROMs() {
     lsi,
     getLEFSData, getODIData,
     patchNprs,
-    reset,
+    reset, load,
   };
 }

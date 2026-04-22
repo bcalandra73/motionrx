@@ -115,7 +115,7 @@ async function writeOutput(outDir: string, result: RunnerOutput): Promise<void> 
     await fs.writeFile(path.join(outDir, 'report.json'), JSON.stringify(report, null, 2));
   }
 
-  // frames/ — phase-selected frames as JPEG
+  // frames/ — phase-selected frames as JPEG (plain)
   const frames = result.steps.phaseSelection?.data?.frames ?? [];
   if (frames.length) {
     const framesDir = path.join(outDir, 'frames');
@@ -123,6 +123,18 @@ async function writeOutput(outDir: string, result: RunnerOutput): Promise<void> 
     for (const frame of frames) {
       const name = `${String(frame.index).padStart(2, '0')}_${frame.phase.id}.jpg`;
       await fs.writeFile(path.join(framesDir, name), Buffer.from(frame.imageData, 'base64'));
+    }
+  }
+
+  // frames_annotated/ — same frames with skeleton overlay
+  const annotatedFrames = result.steps.poseDetection?.data?.annotatedFrames ?? [];
+  if (annotatedFrames.length && frames.length) {
+    const annotDir = path.join(outDir, 'frames_annotated');
+    await fs.mkdir(annotDir, { recursive: true });
+    for (let i = 0; i < frames.length; i++) {
+      const frame = frames[i];
+      const name  = `${String(frame.index).padStart(2, '0')}_${frame.phase.id}.jpg`;
+      await fs.writeFile(path.join(annotDir, name), Buffer.from(annotatedFrames[i] ?? frame.imageData, 'base64'));
     }
   }
 }

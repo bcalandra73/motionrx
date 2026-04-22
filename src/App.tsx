@@ -17,7 +17,7 @@ import { useBranding } from './hooks/useBranding';
 import { useAutoSave } from './hooks/useAutoSave';
 import { useVideoAnalysis } from './hooks/useVideoAnalysis';
 import { usePROMs } from './hooks/usePROMs';
-import type { PatientFormData, JumpInvolvedLimb, JumpProtocol, JumpTimePostOp } from './types';
+import type { PatientFormData, JumpInvolvedLimb, JumpProtocol, JumpTimePostOp, Assessment } from './types';
 import { CAMERA_GUIDES } from './data/cameraGuides';
 import { extractFrames } from './pipeline/frameExtraction';
 import { selectPhaseFrames } from './pipeline/phaseSelection';
@@ -45,6 +45,16 @@ export default function App() {
 
   function toggleFocus(area: string) {
     setFocusAreas(prev => prev.includes(area) ? prev.filter(a => a !== area) : [...prev, area]);
+  }
+
+  function loadAssessment(a: Assessment) {
+    form.load(a);
+    running.load(a);
+    jump.load(a);
+    proms.load(a);
+    video.setPrimaryView(a.media.primary.cameraView);
+    if (a.media.secondary) video.setSecondaryView(a.media.secondary.cameraView);
+    setFocusAreas(a.focus);
   }
 
   async function handleAnalyze() {

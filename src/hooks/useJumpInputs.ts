@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { JumpInputs } from '../types';
+import type { JumpInputs, Assessment } from '../types';
 
 const defaultInputs: JumpInputs = {
   videoFps: 120,
@@ -19,5 +19,9 @@ export function useJumpInputs() {
     setInputs(defaultInputs);
   }
 
-  return { inputs, setField, reset };
+  function load(a: Assessment) {
+    setInputs(a.jump ?? defaultInputs);
+  }
+
+  return { inputs, setField, reset, load };
 }

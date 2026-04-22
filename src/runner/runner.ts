@@ -4,6 +4,7 @@
  * Each pipeline step is wrapped in a try/catch so partial results are always returned.
  */
 
+import { load as parseYaml } from 'js-yaml';
 import { extractFrames } from '../pipeline/frameExtraction';
 import { selectPhaseFrames } from '../pipeline/phaseSelection';
 import { initPoseLandmarker, detectPoseOnFrames } from '../pipeline/poseDetection';
@@ -15,6 +16,8 @@ import {
 import type { AngleStat } from '../pipeline/angleCalculation';
 import { buildReportPrompt } from '../pipeline/reportGeneration';
 import { generateReport } from '../api';
+import { assessmentFromYaml } from '../assessment';
+import type { Assessment } from '../types';
 import type { PoseLandmarker } from '@mediapipe/tasks-vision';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -50,7 +53,7 @@ export interface RunnerOutput {
   steps: {
     extraction:        StepResult<{ frameCount: number; frames: FrameData[] }>;
     phaseSelection:    StepResult<{ frameCount: number; phases: string[]; frames: FrameData[] }>;
-    poseDetection:     StepResult<{ detectedCount: number; totalCount: number; perFrameAngles: Record<string, number>[] }>;
+    poseDetection:     StepResult<{ detectedCount: number; totalCount: number; perFrameAngles: Record<string, number>[]; annotatedFrames: string[] }>;
     angleCalculation:  StepResult<{ aggregated: Record<string, AngleStat> }>;
     reportGeneration:  StepResult<{ prompt: string; report: unknown }> | null;
   };
@@ -79,13 +82,6 @@ function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; value: T }> {
   return fn().then(value => ({ ms: Math.round(performance.now() - t), value }));
 }
 
-function cameraViewFromAngle(angle: string | undefined): 'side' | 'front' | 'posterior' {
-  const a = angle?.toLowerCase() ?? '';
-  if (a.includes('front')) return 'front';
-  if (a.includes('post')) return 'posterior';
-  return 'side';
-}
-
 async function fetchVideoFile(dir: string, filename: string): Promise<File> {
   const res = await fetch(`/${dir}/${filename}`);
   if (!res.ok) throw new Error(`Could not fetch /${dir}/${filename} (${res.status})`);
@@ -93,68 +89,78 @@ async function fetchVideoFile(dir: string, filename: string): Promise<File> {
   return new File([blob], filename, { type: blob.type || 'video/quicktime' });
 }
 
-interface TestYaml {
-  patient_name:  string;
-  age:           number;
-  complaint:     string;
-  movement_type: string;
-  media: {
-    primary:    { file: string; angle?: string };
-    secondary?: { file: string; angle?: string };
-  };
-}
-
-async function fetchYaml(dir: string): Promise<TestYaml> {
+async function fetchAssessment(dir: string): Promise<Assessment> {
   const res = await fetch(`/${dir}/test.yaml`);
   if (!res.ok) throw new Error(`Could not fetch /${dir}/test.yaml (${res.status})`);
-  // Minimal YAML parser sufficient for the flat test.yaml structure
-  const text = await res.text();
-  return parseSimpleYaml(text) as TestYaml;
+  const raw = parseYaml(await res.text()) as Record<string, unknown>;
+  return assessmentFromYaml(raw);
 }
 
-// Lightweight YAML parser — handles the nested test.yaml structure without a library dep.
-// Supports string scalars, numbers, and two levels of indentation.
-function parseSimpleYaml(text: string): Record<string, unknown> {
-  const lines = text.split('\n');
-  const root: Record<string, unknown> = {};
-  let current: Record<string, unknown> = root;
-  let parent:  Record<string, unknown> = root;
-  let parentKey = '';
-  let depth = 0;
+const SKELETON_CONNECTIONS: [number, number][] = [
+  // torso
+  [11, 12], [11, 23], [12, 24], [23, 24],
+  // left arm
+  [11, 13], [13, 15],
+  // right arm
+  [12, 14], [14, 16],
+  // left leg
+  [23, 25], [25, 27], [27, 29], [27, 31],
+  // right leg
+  [24, 26], [26, 28], [28, 30], [28, 32],
+];
+const LEFT_IDX  = new Set([11, 13, 15, 23, 25, 27, 29, 31]);
+const RIGHT_IDX = new Set([12, 14, 16, 24, 26, 28, 30, 32]);
 
-  for (const raw of lines) {
-    if (!raw.trim() || raw.trim().startsWith('#')) continue;
-    const indent = raw.search(/\S/);
-    const line   = raw.trim();
-    const colon  = line.indexOf(':');
-    if (colon === -1) continue;
-    const key = line.slice(0, colon).trim();
-    const val = line.slice(colon + 1).trim();
+function jointColor(i: number): string {
+  if (LEFT_IDX.has(i))  return '#00FFFF';
+  if (RIGHT_IDX.has(i)) return '#FFFF00';
+  return '#FFFFFF';
+}
 
-    if (indent > depth) {
-      parent    = current;
-      parentKey = Object.keys(current)[Object.keys(current).length - 1];
-      current   = {} as Record<string, unknown>;
-      (parent as Record<string, unknown>)[parentKey] = current;
-    } else if (indent < depth) {
-      current = root;
-      parent  = root;
-    }
-    depth = indent;
+async function annotateFrame(
+  imageData: string,
+  landmarks: { x: number; y: number; z: number; visibility?: number }[],
+): Promise<string> {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width  = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(img, 0, 0);
 
-    if (val === '') {
-      // nested object will be filled on next iteration
-    } else if (val === 'true')  {
-      (current as Record<string, unknown>)[key] = true;
-    } else if (val === 'false') {
-      (current as Record<string, unknown>)[key] = false;
-    } else if (!isNaN(Number(val)) && val !== '') {
-      (current as Record<string, unknown>)[key] = Number(val);
-    } else {
-      (current as Record<string, unknown>)[key] = val.replace(/^['"]|['"]$/g, '');
-    }
-  }
-  return root;
+      const W = canvas.width;
+      const H = canvas.height;
+      const VIS = 0.3;
+      const lineW = Math.max(2, Math.round(W * 0.003));
+      const dotR  = Math.max(4, Math.round(W * 0.006));
+
+      ctx.lineWidth = lineW;
+      for (const [a, b] of SKELETON_CONNECTIONS) {
+        const lA = landmarks[a], lB = landmarks[b];
+        if (!lA || !lB) continue;
+        if ((lA.visibility ?? 1) < VIS || (lB.visibility ?? 1) < VIS) continue;
+        ctx.strokeStyle = jointColor(a);
+        ctx.beginPath();
+        ctx.moveTo(lA.x * W, lA.y * H);
+        ctx.lineTo(lB.x * W, lB.y * H);
+        ctx.stroke();
+      }
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        if (!lm || (lm.visibility ?? 1) < VIS) continue;
+        ctx.fillStyle = jointColor(i);
+        ctx.beginPath();
+        ctx.arc(lm.x * W, lm.y * H, dotR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      resolve(canvas.toDataURL('image/jpeg', 0.85).replace('data:image/jpeg;base64,', ''));
+    };
+    img.onerror = () => resolve(imageData);
+    img.src = `data:image/jpeg;base64,${imageData}`;
+  });
 }
 
 function toFrameData(frames: { index: number; timestamp: number; phase: { id: string; label: string; desc: string; fraction: number }; imageData: string }[]): FrameData[] {
@@ -172,17 +178,19 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
   const { dir, apiKey } = input;
 
   status(`[${dir}] Loading test config...`);
-  const yaml     = await fetchYaml(dir);
-  const cameraView = cameraViewFromAngle(yaml.media?.primary?.angle);
-
-  // Resolve movement type against PHASE_MAPS keys (same logic as testUtils)
-  const movementType = yaml.movement_type ?? 'Running';
+  const assessment  = await fetchAssessment(dir);
+  const movementType = assessment.patient.movementType || 'Running';
+  const cameraView   = assessment.media.primary.cameraView;
 
   const output: RunnerOutput = {
     dir,
     movementType,
     cameraView,
-    patient: { name: yaml.patient_name, age: yaml.age, complaint: yaml.complaint },
+    patient: {
+      name:      assessment.patient.name,
+      age:       assessment.patient.age,
+      complaint: assessment.patient.diagnosis,
+    },
     steps: {
       extraction:       { ok: false, ms: 0, data: null, error: null },
       phaseSelection:   { ok: false, ms: 0, data: null, error: null },
@@ -196,7 +204,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
 
   status(`[${dir}] Step 1 — extracting frames...`);
   try {
-    const videoFile = await fetchVideoFile(dir, yaml.media.primary.file);
+    const videoFile = await fetchVideoFile(dir, assessment.media.primary.file);
     const { ms, value: frames } = await timed(() => extractFrames(videoFile, movementType));
     output.steps.extraction = {
       ok: true, ms,
@@ -242,9 +250,17 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
           ),
         );
 
+        const annotatedFrames = await Promise.all(
+          poseResults.map((r, i) =>
+            r.poseLandmarks
+              ? annotateFrame(phaseFrames[i].imageData, r.poseLandmarks)
+              : Promise.resolve(phaseFrames[i].imageData),
+          ),
+        );
+
         output.steps.poseDetection = {
           ok: true, ms: ms3,
-          data: { detectedCount, totalCount: poseResults.length, perFrameAngles: allFrameAngles },
+          data: { detectedCount, totalCount: poseResults.length, perFrameAngles: allFrameAngles, annotatedFrames },
           error: null,
         };
         status(`[${dir}] Step 3 ✓ — ${detectedCount}/${poseResults.length} frames detected in ${ms3}ms`);
@@ -265,28 +281,26 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
           if (apiKey?.trim()) {
             status(`[${dir}] Step 5 — generating report...`);
             try {
-              const isRunning = /running|gait|walk/i.test(movementType);
-              const isJump    = /jump|landing/i.test(movementType);
               const prompt = buildReportPrompt({
                 patient: {
-                  patientName:   yaml.patient_name,
-                  patientAge:    String(yaml.age),
-                  diagnosis:     yaml.complaint,
+                  patientName:   assessment.patient.name,
+                  patientAge:    assessment.patient.age,
+                  diagnosis:     assessment.patient.diagnosis,
                   movementType,
-                  patientHeight: '',
-                  heightUnit:    'cm',
-                  injuredSide:   '',
-                  clinicalNotes: '',
+                  patientHeight: assessment.patient.height,
+                  heightUnit:    assessment.patient.heightUnit,
+                  injuredSide:   assessment.patient.injuredSide,
+                  clinicalNotes: assessment.patient.notes,
                 },
                 movementType,
                 cameraView,
-                hasDualView: false,
-                focusAreas:  [],
+                hasDualView:  !!assessment.media.secondary,
+                focusAreas:   assessment.focus,
                 aggregated,
-                proms:       {},
-                running:     isRunning ? { treadmillSpeed: '', speedUnit: 'mph', treadmillIncline: '', runningSurface: 'road', videoFps: 30, shoe: '', experience: '', includeFootwear: false } : undefined,
-                jump:        isJump    ? { videoFps: 30, involvedLimb: '', protocol: '', timePostOp: '' } : undefined,
-                frameCount:  phaseFrames.length,
+                proms:        assessment.proms ?? {},
+                running:      assessment.running,
+                jump:         assessment.jump,
+                frameCount:   phaseFrames.length,
               });
 
               const { ms: ms5, value: report } = await timed(() =>

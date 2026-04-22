@@ -355,3 +355,42 @@ export interface PROMs {
   psfs?: PSFSItem[];
   lsi?: number | null;
 }
+
+// ── Assessment ─────────────────────────────────────────────────────────────
+// Serialisable representation of all inputs for one clinical assessment.
+// Used to pre-populate the app from a test YAML, and later for save/load.
+
+export interface AssessmentProms {
+  nprs?:         NPRSData;
+  psfs?:         PSFSItem[];
+  lefsScores?:   (number | null)[];
+  odiScores?:    (number | null)[];
+  lsiInjured?:   string;
+  lsiUninjured?: string;
+}
+
+export interface AssessmentMedia {
+  file:       string;      // filename only — actual File object loaded separately
+  cameraView: CameraView;
+}
+
+export interface Assessment {
+  patient: {
+    name:         string;
+    age:          string;
+    diagnosis:    string;
+    movementType: MovementType;
+    height:       string;
+    heightUnit:   HeightUnit;
+    injuredSide:  InjuredSide;
+    notes:        string;
+  };
+  media: {
+    primary:    AssessmentMedia;
+    secondary?: AssessmentMedia;
+  };
+  focus:    string[];
+  running?: RunningInputs;
+  jump?:    JumpInputs;
+  proms?:   AssessmentProms;
+}
