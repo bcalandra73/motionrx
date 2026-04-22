@@ -20,8 +20,20 @@ Runs a coarse MoveNet scan on the extracted frames and applies movement-specific
 **3. Pose detection** (`src/pipeline/poseDetection.ts`)
 Runs MediaPipe PoseLandmarker Heavy on the 8 selected frames. Returns 33 normalised landmarks and 33 world landmarks (in metres) per frame. Includes a mild contrast/brightness pre-processing pass for underexposed footage.
 
-**4. Analysis & report** *(in progress)*
-Joint angles are calculated from the landmarks and passed to Claude AI along with patient metadata, PROMs scores, and clinician focus areas to generate a structured clinical report.
+**4. Angle calculation** (`src/pipeline/angleCalculation.ts`)
+Computes joint angles from the landmark data and aggregates them across frames:
+- *Side view* — knee flexion, hip flexion (thigh-from-vertical for running/gait; shoulder-hip-knee for everything else), trunk lean, ankle dorsiflexion (stance frames only; heel preferred over toe; Z-depth cross-check to reject non-sagittal frames).
+- *Front / posterior view* — pelvic drop, knee valgus (perpendicular offset method), hip adduction, pronation/RCSP (contact and midstance frames only).
+- `extractAngles()` returns a flat `Record<string, number>` for one frame; `aggregateAngles()` reduces all frames to `{ min, max, avg, count, hitRate, lowConfidence }` per metric, with phase-aware filters.
+- `REF_RANGES` provides physiological reference bands for each metric.
+
+**5. Report generation** (`src/pipeline/reportGeneration.ts` + `src/api/index.ts`)
+Builds a structured prompt from all available context and calls Claude AI (`claude-sonnet-4-6`) to generate the clinical report:
+- `buildReportPrompt()` assembles: patient metadata, measured angles (with movement-aware display-value selection), limb symmetry index, PROMs (NPRS, PSFS, LEFS, ODI, hop LSI), movement-specific reference norms, angle interpretation conventions, and optional running/jump context.
+- *Display-value selection* — running/gait knee flexion converts `180 − min_included` to peak swing flexion; landing knee/hip uses the same conversion; landing valgus/trunk uses `max` (worst-case); shoulder/elbow ROM uses `max`; everything else uses `avg`.
+- *Upper extremity* — lower-body metrics are suppressed from the prompt for shoulder/overhead movements.
+- *Footwear recommendation* — optionally requested (running/gait only) based on pronation and hip adduction data.
+- `generateReport()` sends the phase frames as base64 images and the prompt to the Anthropic API; the response is parsed into a structured `AnalysisReport` (score, findings, biomechanical analysis, clinical impressions, recommendations, patient education).
 
 ---
 
@@ -52,11 +64,14 @@ npm test           # run once
 npm run test:watch # watch mode
 ```
 
-These cover pure functions — phase time calculations, phase maps, signal utilities.
+These cover pure functions across three modules:
+- `getPhaseTimes.test.ts` — phase time calculations and phase maps
+- `angleCalculation.test.ts` — `mergeWorldLandmarks`, `extractAngles`, `aggregateAngles`, `REF_RANGES`
+- `reportGeneration.test.ts` — `buildReportPrompt`: patient metadata, angle display-value selection, movement-specific norms, PROMs, ASI, camera view notes, footwear request, JSON schema
 
-### Browser integration tests
+### End-to-end pipeline runner
 
-The browser tests run real video files through the full pipeline inside a Chromium tab. Video files are **not checked into git** — place them in `test_data/` alongside a `test.yaml` describing each case:
+Runs the full pipeline on real video files and saves all intermediate results to disk. Video files are **not checked into git** — place them in `test_data/` alongside a `test.yaml` describing each case:
 
 ```
 test_data/
@@ -85,14 +100,26 @@ media:
 ```
 
 ```bash
-npm run test:browser          # headless Chromium, one run
-npm run test:browser:watch    # headless, watch mode
-npm run test:browser:manual   # opens a visible browser — frames and skeleton overlays rendered in the page for visual inspection
+npm run pipeline                          # run all test cases
+npm run pipeline -- --test test_1         # run a single case
+npm run pipeline -- --key sk-ant-...      # include Claude report generation (step 5)
+npm run pipeline -- --out results/        # override output directory (default: test_output/)
 ```
 
-The manual mode renders each pipeline step visually: extracted frames, selected phase frames with labels, and pose detection results with green skeleton overlays drawn on canvas.
+Output is written to `test_output/{test_name}/`:
+```
+test_output/
+  test_1/
+    summary.json    ← timings, phase labels, aggregated angles, per-frame angles
+    prompt.txt      ← the full Claude prompt (always written)
+    report.json     ← Claude's structured report (only with --key)
+    frames/
+      00_contact.jpg
+      01_loading.jpg
+      ...
+```
 
-On first run the browser tests download the MediaPipe WASM + model (~30 MB) and cache it. Subsequent runs are fast.
+The script starts a headless Chromium via Playwright and a Vite dev server — same code path as the production app. On first run the MediaPipe WASM + model (~30 MB) is downloaded and cached; subsequent runs are fast.
 
 ### Type checking
 

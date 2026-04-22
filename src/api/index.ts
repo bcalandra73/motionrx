@@ -2,33 +2,33 @@ import type {
   AnalysisReport,
   AnthropicContent,
   AnthropicResponse,
-  AnnotatedFrame,
+  ExtractedFrame,
   Finding,
 } from '../types';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
-const ANALYSIS_MODEL = 'claude-sonnet-4-20250514';
+const ANALYSIS_MODEL = 'claude-sonnet-4-6';
 const ANALYSIS_MAX_TOKENS = 8192;
 
 export interface GenerateReportParams {
-  apiKey: string;
-  prompt: string;
-  frames: AnnotatedFrame[];
-  frames2: AnnotatedFrame[];
+  apiKey:   string;
+  prompt:   string;
+  frames:   ExtractedFrame[];
+  frames2?: ExtractedFrame[];
 }
 
 export async function generateReport(params: GenerateReportParams): Promise<AnalysisReport> {
-  const { apiKey, prompt, frames, frames2 } = params;
+  const { apiKey, prompt, frames, frames2 = [] } = params;
 
   const content: AnthropicContent[] = [
     ...frames.map(f => ({
       type: 'image' as const,
-      source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: f.base64 },
+      source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: f.imageData },
     })),
     ...frames2.map(f => ({
       type: 'image' as const,
-      source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: f.base64 },
+      source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: f.imageData },
     })),
     { type: 'text' as const, text: prompt },
   ];

@@ -22,6 +22,9 @@ import { CAMERA_GUIDES } from './data/cameraGuides';
 import { extractFrames } from './pipeline/frameExtraction';
 import { selectPhaseFrames } from './pipeline/phaseSelection';
 import { initPoseLandmarker, detectPoseOnFrames } from './pipeline/poseDetection';
+import { mergeWorldLandmarks, extractAngles, aggregateAngles } from './pipeline/angleCalculation';
+import { buildReportPrompt } from './pipeline/reportGeneration';
+import { generateReport } from './api';
 
 export default function App() {
   const form        = usePatientForm();
@@ -51,6 +54,8 @@ export default function App() {
     setApiError('');
 
     video.setStage('extracting', 'Extracting video frames...', 0);
+    const t0 = performance.now();
+    console.log('[Pipeline] Starting analysis —', form.form.movementType, video.primary.file.name);
     try {
       const frames = await extractFrames(
         video.primary.file,
@@ -59,29 +64,89 @@ export default function App() {
           onProgress: (pct, label) => video.setStage('extracting', label, pct),
         },
       );
+      console.log(`[Step 1 ✓] Extracted ${frames.length} frames in ${Math.round(performance.now() - t0)}ms`);
       video.updatePrimary({ extractedFrames: frames });
 
       // Step 2: phase selection — coarse scan → pick 8 canonical frames
       video.setStage('detecting', 'Analysing movement phases...', 0);
+      const t2 = performance.now();
+      console.log('[Step 2] Phase selection starting...');
       const phaseFrames = await selectPhaseFrames(frames, form.form.movementType, {
         cameraView: video.primary.cameraView as 'side' | 'front' | 'posterior' | undefined,
         onProgress: (pct, label) => video.setStage('detecting', label, pct),
       });
+      console.log(`[Step 2 ✓] Phase selection: ${phaseFrames.length} frames in ${Math.round(performance.now() - t2)}ms — phases: ${phaseFrames.map(f => f.phase.id).join(', ')}`);
       video.updatePrimary({ extractedFrames: phaseFrames });
 
       // Step 3: MediaPipe pose detection on the 8 selected frames
       video.setStage('detecting', 'Initialising pose model...', 0);
+      const t3 = performance.now();
+      console.log('[Step 3] Initialising PoseLandmarker...');
       const landmarker = await initPoseLandmarker();
+      console.log(`[Step 3] PoseLandmarker ready in ${Math.round(performance.now() - t3)}ms — detecting poses on ${phaseFrames.length} frames...`);
       const poseResults = await detectPoseOnFrames(landmarker, phaseFrames, {
         onProgress: (pct, label) => video.setStage('detecting', label, pct),
       });
+      const detectedCount = poseResults.filter(r => (r.poseLandmarks?.length ?? 0) > 0).length;
+      console.log(`[Step 3 ✓] Pose detection done in ${Math.round(performance.now() - t3)}ms — ${detectedCount}/${poseResults.length} frames had landmarks`);
       const landmarks = poseResults.map(r => r.poseLandmarks ?? []);
       video.updatePrimary({ landmarks });
 
-      // TODO: next step — landmark fusion & angle calculation
-      video.setStage('analyzing', 'Calculating joint angles...');
+      // Step 4: angle calculation
+      video.setStage('analyzing', 'Calculating joint angles...', 0);
+      const t4 = performance.now();
+      const cameraView = (video.primary.cameraView ?? 'side') as 'side' | 'front' | 'posterior';
+      const allFrameAngles = poseResults.map(r =>
+        extractAngles(
+          mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
+          cameraView,
+          form.form.movementType,
+        ),
+      );
+      const aggregated = aggregateAngles(allFrameAngles, phaseFrames.map(f => f.phase));
+      console.log(`[Step 4 ✓] Angles calculated in ${Math.round(performance.now() - t4)}ms —`, aggregated);
+
+      // Step 5: build prompt and call Claude for report generation
+      video.setStage('analyzing', 'Generating clinical report...', 50);
+      const t5 = performance.now();
+      console.log('[Step 5] Building prompt and calling Claude API...');
+      const isRunning = /running|gait|walk/i.test(form.form.movementType);
+      const isJump    = /jump|landing/i.test(form.form.movementType);
+      const prompt = buildReportPrompt({
+        patient:     form.form,
+        movementType: form.form.movementType,
+        cameraView,
+        hasDualView: video.secondary.file != null,
+        secondaryCameraView: video.secondary.cameraView as 'side' | 'front' | 'posterior',
+        focusAreas,
+        aggregated,
+        proms: {
+          nprs:       proms.nprs,
+          psfs:       proms.psfs,
+          lefsTotal:  proms.lefsTotal,
+          odiScore:   proms.odiScore,
+          lsi:        proms.lsi,
+        },
+        running: isRunning ? running.inputs : undefined,
+        jump:    isJump    ? jump.inputs    : undefined,
+        frameCount: phaseFrames.length,
+      });
+
+      console.log(`[Step 5] Prompt length: ${prompt.length} chars, sending ${phaseFrames.length} frames to Claude...`);
+      const report = await generateReport({
+        apiKey,
+        prompt,
+        frames:  phaseFrames,
+        frames2: video.secondary.file ? (video.secondary.extractedFrames ?? []) : [],
+      });
+      console.log(`[Step 5 ✓] Report received in ${Math.round(performance.now() - t5)}ms — score: ${report.score}, findings: ${report.findings?.length ?? 0}`);
+      console.log(`[Pipeline ✓] Total time: ${Math.round(performance.now() - t0)}ms`);
+
+      video.updateAnalysis({ stage: 'complete', report });
     } catch (err) {
-      video.setError(err instanceof Error ? err.message : 'Frame extraction failed');
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[Pipeline ✗] Error:', msg, err);
+      video.setError(msg);
     }
   }
 
