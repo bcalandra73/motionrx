@@ -7,7 +7,9 @@
 import { load as parseYaml } from 'js-yaml';
 import { extractFrames } from '../pipeline/frameExtraction';
 import { selectPhaseFrames } from '../pipeline/phaseSelection';
-import { initPoseLandmarker, detectPoseOnFrames } from '../pipeline/poseDetection';
+import { initPoseLandmarker, detectPoseOnFrames, buildMediaPipeDiagnostics } from '../pipeline/poseDetection';
+import type { MediaPipeDiagnostics } from '../pipeline/poseDetection';
+import type { MoveNetDiagnostics, GaitFSMDiagnostics } from '../pipeline/phaseSelection';
 import {
   mergeWorldLandmarks,
   extractAngles,
@@ -58,6 +60,18 @@ export interface RunnerOutput {
     angleCalculation:  StepResult<{ aggregated: Record<string, AngleStat> }>;
     secondaryPipeline: StepResult<{ frameCount: number; phases: string[]; frames: FrameData[]; aggregated: Record<string, AngleStat>; annotatedFrames: string[]; pairedFrames: string[] }> | null;
     reportGeneration:  StepResult<{ prompt: string; report: unknown }> | null;
+  };
+  diagnostics: {
+    primary: {
+      movenet:   MoveNetDiagnostics | null;
+      gaitFSM:   GaitFSMDiagnostics | null;
+      mediapipe: MediaPipeDiagnostics | null;
+    };
+    secondary: {
+      movenet:   MoveNetDiagnostics | null;
+      gaitFSM:   GaitFSMDiagnostics | null;
+      mediapipe: MediaPipeDiagnostics | null;
+    } | null;
   };
 }
 
@@ -271,6 +285,10 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
       secondaryPipeline: secondaryMeta ? { ok: false, ms: 0, data: null, error: null } : null,
       reportGeneration: null,
     },
+    diagnostics: {
+      primary:   { movenet: null, gaitFSM: null, mediapipe: null },
+      secondary: secondaryMeta ? { movenet: null, gaitFSM: null, mediapipe: null } : null,
+    },
   };
 
   // ── Step 1: Frame extraction ─────────────────────────────────────────────
@@ -290,9 +308,14 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
 
     status(`[${dir}] Step 2 — selecting phase frames...`);
     try {
-      const { ms: ms2, value: phaseFrames } = await timed(() =>
+      const { ms: ms2, value: phaseResult } = await timed(() =>
         selectPhaseFrames(frames, movementType, { cameraView }),
       );
+      const phaseFrames = phaseResult.frames;
+      if (phaseResult.diag) {
+        output.diagnostics.primary.movenet = phaseResult.diag.movenet;
+        output.diagnostics.primary.gaitFSM = phaseResult.diag.gaitFSM;
+      }
       output.steps.phaseSelection = {
         ok: true, ms: ms2,
         data: {
@@ -313,6 +336,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
           detectPoseOnFrames(landmarker, phaseFrames),
         );
         const detectedCount = poseResults.filter(r => (r.poseLandmarks?.length ?? 0) > 0).length;
+        output.diagnostics.primary.mediapipe = buildMediaPipeDiagnostics(poseResults, phaseFrames);
 
         // Pre-compute angles so we can include them in this step's output
         const allFrameAngles = poseResults.map(r =>
@@ -358,12 +382,19 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
             const t3b = performance.now();
             try {
               const videoFile2 = await fetchVideoFile(dir, secondaryMeta.file);
-              const rawFrames2  = await extractFrames(videoFile2, movementType);
-              const cameraView2 = (secondaryCameraView ?? 'front') as 'side' | 'front' | 'posterior';
-              const selected2   = await selectPhaseFrames(rawFrames2, movementType, { cameraView: cameraView2 });
-              phaseFrames2 = selected2;
+              const rawFrames2   = await extractFrames(videoFile2, movementType);
+              const cameraView2  = (secondaryCameraView ?? 'front') as 'side' | 'front' | 'posterior';
+              const phaseResult2 = await selectPhaseFrames(rawFrames2, movementType, { cameraView: cameraView2 });
+              phaseFrames2 = phaseResult2.frames;
+              if (phaseResult2.diag && output.diagnostics.secondary) {
+                output.diagnostics.secondary.movenet = phaseResult2.diag.movenet;
+                output.diagnostics.secondary.gaitFSM = phaseResult2.diag.gaitFSM;
+              }
 
               const poseResults2   = await detectPoseOnFrames(landmarker, phaseFrames2);
+              if (output.diagnostics.secondary) {
+                output.diagnostics.secondary.mediapipe = buildMediaPipeDiagnostics(poseResults2, phaseFrames2);
+              }
               const allAngles2     = poseResults2.map(r =>
                 extractAngles(
                   mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),

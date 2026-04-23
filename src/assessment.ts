@@ -19,6 +19,22 @@ import type {
   JumpProtocol,
   JumpTimePostOp,
 } from './types';
+import { PHASE_MAPS, DENSE_FRAME_MOVEMENTS } from './data/phaseMaps';
+
+// ── Movement type normalization ───────────────────────────────────────────────
+// YAML files may use any casing (e.g. "running", "Running", "RUNNING").
+// Normalize to the canonical key used in PHASE_MAPS / DENSE_FRAME_MOVEMENTS.
+const _allMovementKeys = [
+  ...Object.keys(PHASE_MAPS),
+  ...[...DENSE_FRAME_MOVEMENTS].filter(m => !PHASE_MAPS[m]),
+];
+
+function normalizeMovementType(raw: string): string {
+  if (!raw) return raw;
+  if (PHASE_MAPS[raw] || DENSE_FRAME_MOVEMENTS.has(raw)) return raw;
+  const lower = raw.toLowerCase();
+  return _allMovementKeys.find(k => k.toLowerCase() === lower) ?? raw;
+}
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -88,7 +104,7 @@ export function assessmentFromYaml(raw: YamlObject): Assessment {
     name:         str(patient.name),
     age:          str(patient.age),
     diagnosis:    str(patient.diagnosis),
-    movementType: str(patient.movement_type) as MovementType,
+    movementType: normalizeMovementType(str(patient.movement_type)) as MovementType,
     height:       str(patient.height),
     heightUnit:   (str(patient.height_unit, 'in') as HeightUnit) || 'in',
     injuredSide:  str(patient.injured_side) as InjuredSide,

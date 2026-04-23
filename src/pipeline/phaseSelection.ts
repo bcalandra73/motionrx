@@ -18,6 +18,7 @@ import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-cpu';
 import type { ExtractedFrame, NormalizedLandmark, PhaseLabel } from '../types';
 import { PHASE_MAPS } from '../data/phaseMaps';
+import { getPhaseTimes } from './frameExtraction';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,59 @@ type SparseLandmarks = (NormalizedLandmark | null)[];
 export interface SelectPhaseOptions {
   cameraView?: 'side' | 'front' | 'posterior';
   onProgress?: (pct: number, label: string) => void;
+}
+
+export interface MoveNetDiagnostics {
+  backend: string;
+  totalFrames: number;
+  detectedFrames: number;
+  perFrame: Array<{
+    frameIndex: number;
+    detected: boolean;
+    jointVisibility: {
+      lShoulder: number | null;
+      rShoulder: number | null;
+      lHip:      number | null;
+      rHip:      number | null;
+      lKnee:     number | null;
+      rKnee:     number | null;
+      lAnkle:    number | null;
+      rAnkle:    number | null;
+    };
+  }>;
+}
+
+export interface GaitFSMDiagnostics {
+  refLeg: 'L' | 'R';
+  lVisFrames: number;
+  rVisFrames: number;
+  lContactPeaks: number[];
+  rContactPeaks: number[];
+  ankleSignalWeak: boolean;
+  ankleWeight: number;
+  kneeWeight: number;
+  cycleStart: number;
+  cycleEnd: number;
+  icIsMin: boolean;
+  detectedEvents: Array<{
+    phaseId: string;
+    perFrameIndex: number;
+    proportion: number;
+  }>;
+  signals: {
+    proportions: number[];
+    lAnkY: (number | null)[];
+    rAnkY: (number | null)[];
+    lKnee: (number | null)[];
+    rKnee: (number | null)[];
+    lComp: (number | null)[];
+    rComp: (number | null)[];
+  };
+}
+
+export interface PhaseSelectionDiagnostics {
+  movenet: MoveNetDiagnostics | null;
+  gaitFSM: GaitFSMDiagnostics | null;
 }
 
 // ── MoveNet keypoint → MediaPipe landmark index map ───────────────────────────
@@ -204,34 +258,66 @@ export async function coarseScanWithMoveNet(
   detector: poseDetection.PoseDetector,
   frames: ExtractedFrame[],
   onProgress?: (pct: number, label: string) => void,
-): Promise<(SparseLandmarks | null)[]> {
-  const results: (SparseLandmarks | null)[] = [];
+): Promise<{ landmarks: (SparseLandmarks | null)[]; diag: MoveNetDiagnostics }> {
+  const rawResults: (SparseLandmarks | null)[] = [];
+  const perFrameDiag: MoveNetDiagnostics['perFrame'] = [];
 
+  // Decode all frames in parallel — image loading is pure async DOM work and
+  // doesn't compete with TF.js. This eliminates per-frame decode latency from
+  // the inference loop, which matters most on CPU where inference is slow.
+  onProgress?.(0, `Pre-loading ${frames.length} frames...`);
+  const imgs = await Promise.all(
+    frames.map(f => loadImage(f.imageData).catch(() => null)),
+  );
+
+  // Run inference sequentially — TF.js CPU backend is single-threaded.
   for (let i = 0; i < frames.length; i++) {
     onProgress?.(
       Math.round((i / frames.length) * 100),
       `Scanning for gait phases — frame ${i + 1} / ${frames.length}`,
     );
-    try {
-      const img = await loadImage(frames[i].imageData);
-      if (!img) { results.push(null); continue; }
-
-      const kps = await Promise.race([
-        runMoveNetOnImage(detector, img),
-        new Promise<null>(r => setTimeout(() => r(null), 3000)),
-      ]);
-      if (!kps) { results.push(null); continue; }
-
-      const mnNorm = moveNetToNormalized(kps, img.width, img.height);
-      const arr: SparseLandmarks = Array.from({ length: 33 }, (_, idx) => mnNorm[idx] ?? null);
-      results.push(arr);
-    } catch (e) {
-      console.warn('[CoarseScan] Frame', i, 'error:', e);
-      results.push(null);
+    let arr: SparseLandmarks | null = null;
+    let mnNorm: Record<number, NormalizedLandmark> = {};
+    const img = imgs[i];
+    if (img) {
+      try {
+        const kps = await Promise.race([
+          runMoveNetOnImage(detector, img),
+          new Promise<null>(r => setTimeout(() => r(null), 3000)),
+        ]);
+        if (kps) {
+          mnNorm = moveNetToNormalized(kps, img.width, img.height);
+          arr = Array.from({ length: 33 }, (_, idx) => mnNorm[idx] ?? null);
+        }
+      } catch (e) {
+        console.warn('[CoarseScan] Frame', i, 'error:', e);
+      }
     }
+    rawResults.push(arr);
+    perFrameDiag.push({
+      frameIndex: i,
+      detected: arr !== null,
+      jointVisibility: {
+        lShoulder: mnNorm[11]?.visibility ?? null,
+        rShoulder: mnNorm[12]?.visibility ?? null,
+        lHip:      mnNorm[23]?.visibility ?? null,
+        rHip:      mnNorm[24]?.visibility ?? null,
+        lKnee:     mnNorm[25]?.visibility ?? null,
+        rKnee:     mnNorm[26]?.visibility ?? null,
+        lAnkle:    mnNorm[27]?.visibility ?? null,
+        rAnkle:    mnNorm[28]?.visibility ?? null,
+      },
+    });
   }
 
-  return applyTemporalSmoothing(results);
+  const landmarks = applyTemporalSmoothing(rawResults);
+  const diag: MoveNetDiagnostics = {
+    backend: tf.getBackend(),
+    totalFrames: frames.length,
+    detectedFrames: rawResults.filter(r => r !== null).length,
+    perFrame: perFrameDiag,
+  };
+  return { landmarks, diag };
 }
 
 // ── GaitFSM — select 8 canonical phase frames from dense coarse scan ──────────
@@ -311,7 +397,7 @@ export function runGaitFSM(
   frames: ExtractedFrame[],
   proportions: number[],
   cameraView: 'side' | 'front' | 'posterior' = 'side',
-): ExtractedFrame[] {
+): { frames: ExtractedFrame[]; diag: GaitFSMDiagnostics } {
   const v = (lms: SparseLandmarks | null, n: number) =>
     lms?.[n] && (lms[n]!.visibility ?? 0) > 0.18 ? lms[n]! : null;
 
@@ -338,7 +424,22 @@ export function runGaitFSM(
     };
   }).filter(Boolean) as PerFrameData[];
 
-  if (perFrame.length < 4) return frames.slice(0, 8);
+  if (perFrame.length < 4) {
+    return {
+      frames: frames.slice(0, 8),
+      diag: {
+        refLeg: 'L' as const,
+        lVisFrames: 0, rVisFrames: 0,
+        lContactPeaks: [], rContactPeaks: [],
+        ankleSignalWeak: false,
+        ankleWeight: 0.55, kneeWeight: 0.45,
+        cycleStart: 0, cycleEnd: 0,
+        icIsMin: false,
+        detectedEvents: [],
+        signals: { proportions: [], lAnkY: [], rAnkY: [], lKnee: [], rKnee: [], lComp: [], rComp: [] },
+      },
+    };
+  }
   perFrame.sort((a, b) => a.t - b.t);
   const N = perFrame.length;
 
@@ -550,7 +651,34 @@ export function runGaitFSM(
     phaseOrder.indexOf(a.phase?.id ?? '') - phaseOrder.indexOf(b.phase?.id ?? ''),
   );
 
-  return dedupedFrames.slice(0, 8);
+  const diag: GaitFSMDiagnostics = {
+    refLeg: REF,
+    lVisFrames: lVis,
+    rVisFrames: rVis,
+    lContactPeaks: lContacts,
+    rContactPeaks: rContacts,
+    ankleSignalWeak: ankWeak,
+    ankleWeight: wA,
+    kneeWeight: wK,
+    cycleStart,
+    cycleEnd,
+    icIsMin,
+    detectedEvents: timeline.map(ev => ({
+      phaseId: ev.phaseId,
+      perFrameIndex: ev.i,
+      proportion: perFrame[ev.i]?.t ?? 0,
+    })),
+    signals: {
+      proportions: perFrame.map(f => f.t),
+      lAnkY: lAnkS,
+      rAnkY: rAnkS,
+      lKnee: lKneeS,
+      rKnee: rKneeS,
+      lComp,
+      rComp,
+    },
+  };
+  return { frames: dedupedFrames.slice(0, 8), diag };
 }
 
 // ── Smart phase relabeling for squats / deadlifts / landing ───────────────────
@@ -626,12 +754,28 @@ export async function selectPhaseFrames(
   frames: ExtractedFrame[],
   movementType: string,
   options: SelectPhaseOptions = {},
-): Promise<ExtractedFrame[]> {
+): Promise<{ frames: ExtractedFrame[]; diag: PhaseSelectionDiagnostics | null }> {
   const { cameraView = 'side', onProgress } = options;
   const isGait = /running|gait|walk/i.test(movementType);
   const needsRelabel = /squat|lunge|sit|deadlift|hinge|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movementType);
 
-  if (!isGait && !needsRelabel) return frames; // already phase-targeted, no scan needed
+  if (!isGait && !needsRelabel) {
+    // Map dense frames to phase-targeted frames by nearest timestamp proportion.
+    const { times, labels } = getPhaseTimes(movementType);
+    const used = new Set<number>();
+    const selected = labels.map((phaseLabel, idx) => {
+      let bestFi = -1, bestDist = Infinity;
+      frames.forEach((f, fi) => {
+        if (used.has(fi)) return;
+        const dist = Math.abs(f.phase.fraction - times[idx]);
+        if (dist < bestDist) { bestDist = dist; bestFi = fi; }
+      });
+      if (bestFi < 0) bestFi = 0;
+      used.add(bestFi);
+      return { ...frames[bestFi], phase: phaseLabel };
+    });
+    return { frames: selected, diag: null };
+  }
 
   onProgress?.(0, 'Initialising coarse scan model...');
   const detector = await initMoveNet();
@@ -640,30 +784,61 @@ export async function selectPhaseFrames(
     if (!detector) {
       console.warn('[PhaseSelection] MoveNet unavailable — using 16-frame subsample');
       const step = Math.max(1, Math.floor(frames.length / 16));
-      const fallback = frames.filter((_, i) => i % step === 0).slice(0, 16);
-      onProgress?.(100, `Phase selection complete — ${fallback.length} frames (MoveNet unavailable)`);
-      return fallback;
+      const fallbackFrames = frames.filter((_, i) => i % step === 0).slice(0, 16);
+      onProgress?.(100, `Phase selection complete — ${fallbackFrames.length} frames (MoveNet unavailable)`);
+      return { frames: fallbackFrames, diag: null };
     }
 
     const proportions = frames.map((_, i) => i / Math.max(1, frames.length - 1));
-    const coarse = await coarseScanWithMoveNet(detector, frames, (pct, label) => {
+    const { landmarks: coarse, diag: moveNetDiag } = await coarseScanWithMoveNet(detector, frames, (pct, label) => {
       onProgress?.(Math.round(pct * 0.9), label);
     });
     onProgress?.(90, 'Running GaitFSM frame selection...');
-    const selected = runGaitFSM(coarse, frames, proportions, cameraView);
+    const { frames: selected, diag: gaitDiag } = runGaitFSM(coarse, frames, proportions, cameraView);
     onProgress?.(100, `Selected ${selected.length} phase frames`);
-    return selected;
+    return { frames: selected, diag: { movenet: moveNetDiag, gaitFSM: gaitDiag } };
   }
 
   // Non-gait smart relabeling: coarse scan all 8 frames
-  const coarse = detector
-    ? await coarseScanWithMoveNet(detector, frames, (pct, label) => {
-        onProgress?.(Math.round(pct * 0.9), label);
-      })
-    : frames.map(() => null);
+  let moveNetDiag: MoveNetDiagnostics | null = null;
+  let coarse: (SparseLandmarks | null)[];
+  if (detector) {
+    const result = await coarseScanWithMoveNet(detector, frames, (pct, label) => {
+      onProgress?.(Math.round(pct * 0.9), label);
+    });
+    coarse = result.landmarks;
+    moveNetDiag = result.diag;
+  } else {
+    coarse = frames.map(() => null);
+  }
 
   onProgress?.(90, 'Detecting peak flexion / lockout frame...');
+
+  // Detect which dense frame is the true bottom / lockout.
   const relabeled = runSmartPhaseRelabeling(coarse, frames, movementType);
-  onProgress?.(100, 'Phase labels refined');
-  return relabeled;
+  const targetId = /deadlift|hinge/i.test(movementType) ? 'lockout' : 'bottom';
+  const detectedIdx = relabeled.findIndex(f => f.phase.id === targetId);
+  const keyFrame = detectedIdx >= 0 ? relabeled[detectedIdx] : null;
+
+  // Map all phase slots to nearest dense frames, forcing the detected frame
+  // into the key phase slot.
+  const { times, labels } = getPhaseTimes(movementType);
+  const used = new Set<number>();
+  if (detectedIdx >= 0) used.add(detectedIdx);
+
+  const selected = labels.map((phaseLabel, idx) => {
+    if (phaseLabel.id === targetId && keyFrame) return keyFrame;
+    let bestFi = -1, bestDist = Infinity;
+    frames.forEach((f, fi) => {
+      if (used.has(fi)) return;
+      const dist = Math.abs(f.phase.fraction - times[idx]);
+      if (dist < bestDist) { bestDist = dist; bestFi = fi; }
+    });
+    if (bestFi < 0) bestFi = 0;
+    used.add(bestFi);
+    return { ...frames[bestFi], phase: phaseLabel };
+  });
+
+  onProgress?.(100, `Selected ${selected.length} phase frames`);
+  return { frames: selected, diag: { movenet: moveNetDiag, gaitFSM: null } };
 }

@@ -14,6 +14,48 @@ export interface PoseFrameResult {
   worldLandmarks: WorldLandmark[] | null;
   source: 'landmarker' | 'none';
   frameIndex: number;
+  preprocessingLuma: number;        // -1 = timed out / error
+  preprocessingBrightOffset: number;
+  landmarkVisibility: number[] | null; // 33 values, null if not detected
+}
+
+export interface PreprocessResult {
+  processed: string;
+  luma: number;
+  brightOffset: number;
+}
+
+export interface MediaPipeDiagnostics {
+  delegate: 'GPU' | 'CPU' | 'unknown';
+  totalFrames: number;
+  detectedFrames: number;
+  perFrame: Array<{
+    frameIndex: number;
+    phaseId: string;
+    detected: boolean;
+    preprocessingLuma: number;
+    preprocessingBrightOffset: number;
+    landmarkVisibility: number[] | null;
+  }>;
+}
+
+export function buildMediaPipeDiagnostics(
+  results: PoseFrameResult[],
+  frames: Array<{ phase: { id: string } }>,
+): MediaPipeDiagnostics {
+  return {
+    delegate: _delegate,
+    totalFrames: results.length,
+    detectedFrames: results.filter(r => r.source === 'landmarker').length,
+    perFrame: results.map((r, i) => ({
+      frameIndex: r.frameIndex,
+      phaseId: frames[i]?.phase?.id ?? '',
+      detected: r.source === 'landmarker',
+      preprocessingLuma: r.preprocessingLuma,
+      preprocessingBrightOffset: r.preprocessingBrightOffset,
+      landmarkVisibility: r.landmarkVisibility,
+    })),
+  };
 }
 
 // ── MediaPipe init ─────────────────────────────────────────────────────────────
@@ -39,6 +81,11 @@ const LANDMARKER_OPTIONS = {
 
 // Singleton so we only initialise once per page load.
 let _landmarker: PoseLandmarker | null = null;
+let _delegate: 'GPU' | 'CPU' | 'unknown' = 'unknown';
+
+export function getMediaPipeDelegate(): 'GPU' | 'CPU' | 'unknown' {
+  return _delegate;
+}
 
 export async function initPoseLandmarker(): Promise<PoseLandmarker> {
   if (_landmarker) return _landmarker;
@@ -60,12 +107,14 @@ export async function initPoseLandmarker(): Promise<PoseLandmarker> {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
       ...LANDMARKER_OPTIONS,
     });
+    _delegate = 'GPU';
   } catch {
     console.warn('[PoseLandmarker] GPU delegate failed — using CPU');
     _landmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
       ...LANDMARKER_OPTIONS,
     });
+    _delegate = 'CPU';
   }
 
   return _landmarker;
@@ -81,10 +130,10 @@ export function setLandmarker(instance: PoseLandmarker) {
 // MediaPipe landmark confidence degrades in underexposed gym/clinic footage.
 // Only modifies frames where average luma < 90 (out of 255).
 
-export function preprocessFrame(imageBase64: string): Promise<string> {
+export function preprocessFrame(imageBase64: string): Promise<PreprocessResult> {
   return new Promise(resolve => {
     const img = new Image();
-    img.onerror = () => resolve(imageBase64);
+    img.onerror = () => resolve({ processed: imageBase64, luma: -1, brightOffset: 0 });
     img.onload = () => {
       const canvas = document.createElement('canvas');
       canvas.width = img.width;
@@ -107,11 +156,6 @@ export function preprocessFrame(imageBase64: string): Promise<string> {
       const contrastFactor = 1.12;
       const brightOffset   = needsBrighten ? Math.round((90 - lum) * 0.4) : 0;
 
-      if (contrastFactor === 1.0 && brightOffset === 0) {
-        resolve(imageBase64);
-        return;
-      }
-
       const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const d = imgData.data;
       const mid = 128;
@@ -121,7 +165,7 @@ export function preprocessFrame(imageBase64: string): Promise<string> {
         d[i + 2] = Math.min(255, Math.max(0, Math.round((d[i + 2] - mid) * contrastFactor + mid + brightOffset)));
       }
       ctx.putImageData(imgData, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg', 0.92).split(',')[1]);
+      resolve({ processed: canvas.toDataURL('image/jpeg', 0.92).split(',')[1], luma: lum, brightOffset });
     };
     img.src = `data:image/jpeg;base64,${imageBase64}`;
   });
@@ -150,10 +194,17 @@ export async function detectPoseOnFrame(
   landmarker: PoseLandmarker,
   imageBase64: string,
 ): Promise<Omit<PoseFrameResult, 'frameIndex'>> {
-  const processedB64 = await withTimeout(preprocessFrame(imageBase64), 2000, imageBase64);
-  const img = await loadImage(processedB64 !== imageBase64 ? processedB64 : imageBase64);
+  const { processed, luma, brightOffset } = await withTimeout(
+    preprocessFrame(imageBase64), 2000,
+    { processed: imageBase64, luma: -1, brightOffset: 0 },
+  );
+  const img = await loadImage(processed);
 
-  if (!img) return { poseLandmarks: null, worldLandmarks: null, source: 'none' };
+  if (!img) return {
+    poseLandmarks: null, worldLandmarks: null, source: 'none',
+    preprocessingLuma: luma, preprocessingBrightOffset: brightOffset,
+    landmarkVisibility: null,
+  };
 
   let rawResult = null;
   try {
@@ -163,14 +214,22 @@ export async function detectPoseOnFrame(
   }
 
   if (rawResult?.landmarks?.length) {
+    const landmarks = rawResult.landmarks[0] as NormalizedLandmark[];
     return {
-      poseLandmarks:  rawResult.landmarks[0] as NormalizedLandmark[],
+      poseLandmarks:  landmarks,
       worldLandmarks: (rawResult.worldLandmarks?.[0] ?? null) as WorldLandmark[] | null,
       source: 'landmarker',
+      preprocessingLuma: luma,
+      preprocessingBrightOffset: brightOffset,
+      landmarkVisibility: landmarks.map(lm => lm.visibility ?? 0),
     };
   }
 
-  return { poseLandmarks: null, worldLandmarks: null, source: 'none' };
+  return {
+    poseLandmarks: null, worldLandmarks: null, source: 'none',
+    preprocessingLuma: luma, preprocessingBrightOffset: brightOffset,
+    landmarkVisibility: null,
+  };
 }
 
 // ── All-frames entry point ────────────────────────────────────────────────────

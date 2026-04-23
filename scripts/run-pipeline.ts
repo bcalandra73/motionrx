@@ -110,6 +110,12 @@ async function writeOutput(outDir: string, result: RunnerOutput): Promise<void> 
   };
   await fs.writeFile(path.join(outDir, 'summary.json'), JSON.stringify(summary, null, 2));
 
+  // diagnostics.json — per-model performance data
+  await fs.writeFile(
+    path.join(outDir, 'diagnostics.json'),
+    JSON.stringify(result.diagnostics, null, 2),
+  );
+
   // prompt.txt
   const prompt = result.steps.reportGeneration?.data?.prompt;
   if (prompt) {
