@@ -5,7 +5,7 @@
  */
 
 import { load as parseYaml } from 'js-yaml';
-import { extractFramesSequential } from '../pipeline/frameExtraction';
+import { extractFramesSequential, extractFramesAtTimestamps } from '../pipeline/frameExtraction';
 import { selectPhaseFrames, isPhaseSelectionAdequate } from '../pipeline/phaseSelection';
 import { initPoseLandmarker, detectPoseOnFrames, buildMediaPipeDiagnostics } from '../pipeline/poseDetection';
 import type { MediaPipeDiagnostics } from '../pipeline/poseDetection';
@@ -414,21 +414,12 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
               const videoFile2 = await fetchVideoFile(dir, secondaryMeta.file);
               const cameraView2  = (secondaryCameraView ?? 'front') as 'side' | 'front' | 'posterior';
 
-              let rawFrames2: import('../types').ExtractedFrame[] = [];
-              let phaseResult2: Awaited<ReturnType<typeof selectPhaseFrames>> | null = null;
-              for (let attempt2 = 0; attempt2 < 3; attempt2++) {
-                const startFrac2 = 0.05 + attempt2 * 0.2;
-                rawFrames2 = await extractFramesSequential(videoFile2, movementType, { startFraction: startFrac2 });
-                const candidate2 = await selectPhaseFrames(rawFrames2, movementType, { cameraView: cameraView2 });
-                phaseResult2 = candidate2;
-                if (isPhaseSelectionAdequate(candidate2, movementType)) break;
-              }
-
-              phaseFrames2 = phaseResult2!.frames;
-              if (phaseResult2!.diag && output.diagnostics.secondary) {
-                output.diagnostics.secondary.movenet = phaseResult2!.diag.movenet;
-                output.diagnostics.secondary.gaitFSM = phaseResult2!.diag.gaitFSM;
-              }
+              // Capture secondary frames at the same timestamps as the primary
+              // so both videos show the same phase moments.
+              phaseFrames2 = await extractFramesAtTimestamps(
+                videoFile2,
+                phaseFrames.map(f => ({ timestamp: f.timestamp, phase: f.phase, index: f.index })),
+              );
 
               const poseResults2   = await detectPoseOnFrames(landmarker, phaseFrames2);
               if (output.diagnostics.secondary) {
@@ -446,7 +437,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
               const annotated2 = await Promise.all(
                 poseResults2.map((r, i) =>
                   r.poseLandmarks
-                    ? annotateFrame(phaseFrames2[i].imageData, r.poseLandmarks, `frame: ${phaseFrames2[i].index + 1}/${rawFrames2.length}`)
+                    ? annotateFrame(phaseFrames2[i].imageData, r.poseLandmarks, `frame: ${phaseFrames2[i].index + 1}/${frames.length}`)
                     : Promise.resolve(phaseFrames2[i].imageData),
                 ),
               );

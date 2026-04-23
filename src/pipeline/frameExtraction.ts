@@ -300,6 +300,35 @@ export async function extractFramesSequential(
   }
 }
 
+// Captures one frame per entry at the given timestamps, reusing the phase labels
+// and indices from the primary video so secondary frames stay aligned.
+export async function extractFramesAtTimestamps(
+  file: File,
+  targets: Array<{ timestamp: number; phase: import('../types').PhaseLabel; index: number }>,
+  options: { onProgress?: (percent: number, label: string) => void } = {},
+): Promise<import('../types').ExtractedFrame[]> {
+  const { onProgress } = options;
+  const vid = await createVideoElement(file);
+  try {
+    const dur = vid.duration;
+    if (!dur || !isFinite(dur)) throw new Error('Could not determine video duration.');
+
+    const frames: import('../types').ExtractedFrame[] = [];
+    for (let i = 0; i < targets.length; i++) {
+      const { timestamp, phase, index } = targets[i];
+      const t = Math.min(timestamp, dur * 0.97);
+      onProgress?.(Math.round((i / targets.length) * 100), `Extracting frame ${i + 1} of ${targets.length}`);
+      const imageData = await captureFrameAtTime(vid, t);
+      frames.push({ imageData: imageData ?? '', phase, timestamp: t, index });
+    }
+
+    onProgress?.(100, `Extracted ${frames.length} frames`);
+    return frames;
+  } finally {
+    cleanupVideoElement(vid);
+  }
+}
+
 // Legacy uniform sampler — still used by the UI analysis hooks.
 export async function extractFrames(
   file: File,
