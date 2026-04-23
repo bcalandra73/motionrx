@@ -5,8 +5,8 @@
  */
 
 import { load as parseYaml } from 'js-yaml';
-import { extractFrames } from '../pipeline/frameExtraction';
-import { selectPhaseFrames } from '../pipeline/phaseSelection';
+import { extractFramesSequential } from '../pipeline/frameExtraction';
+import { selectPhaseFrames, isPhaseSelectionAdequate } from '../pipeline/phaseSelection';
 import { initPoseLandmarker, detectPoseOnFrames, buildMediaPipeDiagnostics } from '../pipeline/poseDetection';
 import type { MediaPipeDiagnostics } from '../pipeline/poseDetection';
 import type { MoveNetDiagnostics, GaitFSMDiagnostics } from '../pipeline/phaseSelection';
@@ -136,6 +136,7 @@ function jointColor(i: number): string {
 async function annotateFrame(
   imageData: string,
   landmarks: { x: number; y: number; z: number; visibility?: number }[],
+  frameLabel?: string,
 ): Promise<string> {
   return new Promise(resolve => {
     const img = new Image();
@@ -170,6 +171,19 @@ async function annotateFrame(
         ctx.beginPath();
         ctx.arc(lm.x * W, lm.y * H, dotR, 0, Math.PI * 2);
         ctx.fill();
+      }
+
+      if (frameLabel) {
+        const fontSize = Math.max(12, Math.round(H * 0.025));
+        const pad = 6;
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        const textW = ctx.measureText(frameLabel).width;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(8, 8, textW + pad * 2, fontSize + pad * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.textBaseline = 'top';
+        ctx.textAlign = 'left';
+        ctx.fillText(frameLabel, 8 + pad, 8 + pad);
       }
 
       resolve(canvas.toDataURL('image/jpeg', 0.85).replace('data:image/jpeg;base64,', ''));
@@ -291,33 +305,49 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
     },
   };
 
-  // ── Step 1: Frame extraction ─────────────────────────────────────────────
+  // ── Steps 1 + 2: Frame extraction + phase selection (with retry) ─────────
 
   status(`[${dir}] Step 1 — extracting frames...`);
   try {
     const videoFile = await fetchVideoFile(dir, assessment.media.primary.file);
-    const { ms, value: frames } = await timed(() => extractFrames(videoFile, movementType));
+
+    let frames: import('../types').ExtractedFrame[] = [];
+    let phaseResult: Awaited<ReturnType<typeof selectPhaseFrames>> | null = null;
+    let extractionMs = 0, phaseMs = 0;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const startFrac = 0.05 + attempt * 0.2;
+      const t1 = performance.now();
+      frames = await extractFramesSequential(videoFile, movementType, { startFraction: startFrac });
+      extractionMs = Math.round(performance.now() - t1);
+      status(`[${dir}] Step 1 ✓ — ${frames.length} frames in ${extractionMs}ms (offset ${Math.round(startFrac * 100)}%)`);
+
+      status(`[${dir}] Step 2 — selecting phase frames...`);
+      const t2 = performance.now();
+      const candidate = await selectPhaseFrames(frames, movementType, { cameraView });
+      phaseMs = Math.round(performance.now() - t2);
+      phaseResult = candidate;
+
+      if (isPhaseSelectionAdequate(candidate, movementType)) break;
+      status(`[${dir}] Attempt ${attempt + 1} insufficient quality, trying next window...`);
+    }
+
     output.steps.extraction = {
-      ok: true, ms,
+      ok: true, ms: extractionMs,
       data: { frameCount: frames.length, frames: toFrameData(frames) },
       error: null,
     };
-    status(`[${dir}] Step 1 ✓ — ${frames.length} frames in ${ms}ms`);
 
-    // ── Step 2: Phase selection ────────────────────────────────────────────
+    // ── Step 2 result ──────────────────────────────────────────────────────
 
-    status(`[${dir}] Step 2 — selecting phase frames...`);
     try {
-      const { ms: ms2, value: phaseResult } = await timed(() =>
-        selectPhaseFrames(frames, movementType, { cameraView }),
-      );
-      const phaseFrames = phaseResult.frames;
-      if (phaseResult.diag) {
-        output.diagnostics.primary.movenet = phaseResult.diag.movenet;
-        output.diagnostics.primary.gaitFSM = phaseResult.diag.gaitFSM;
+      const phaseFrames = phaseResult!.frames;
+      if (phaseResult!.diag) {
+        output.diagnostics.primary.movenet = phaseResult!.diag.movenet;
+        output.diagnostics.primary.gaitFSM = phaseResult!.diag.gaitFSM;
       }
       output.steps.phaseSelection = {
-        ok: true, ms: ms2,
+        ok: true, ms: phaseMs,
         data: {
           frameCount: phaseFrames.length,
           phases:     phaseFrames.map(f => f.phase.id),
@@ -325,7 +355,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
         },
         error: null,
       };
-      status(`[${dir}] Step 2 ✓ — ${phaseFrames.length} phase frames in ${ms2}ms`);
+      status(`[${dir}] Step 2 ✓ — ${phaseFrames.length} phase frames in ${phaseMs}ms`);
 
       // ── Step 3: Pose detection ───────────────────────────────────────────
 
@@ -350,7 +380,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
         const annotatedFrames = await Promise.all(
           poseResults.map((r, i) =>
             r.poseLandmarks
-              ? annotateFrame(phaseFrames[i].imageData, r.poseLandmarks)
+              ? annotateFrame(phaseFrames[i].imageData, r.poseLandmarks, `frame: ${phaseFrames[i].index + 1}/${frames.length}`)
               : Promise.resolve(phaseFrames[i].imageData),
           ),
         );
@@ -382,13 +412,22 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
             const t3b = performance.now();
             try {
               const videoFile2 = await fetchVideoFile(dir, secondaryMeta.file);
-              const rawFrames2   = await extractFrames(videoFile2, movementType);
               const cameraView2  = (secondaryCameraView ?? 'front') as 'side' | 'front' | 'posterior';
-              const phaseResult2 = await selectPhaseFrames(rawFrames2, movementType, { cameraView: cameraView2 });
-              phaseFrames2 = phaseResult2.frames;
-              if (phaseResult2.diag && output.diagnostics.secondary) {
-                output.diagnostics.secondary.movenet = phaseResult2.diag.movenet;
-                output.diagnostics.secondary.gaitFSM = phaseResult2.diag.gaitFSM;
+
+              let rawFrames2: import('../types').ExtractedFrame[] = [];
+              let phaseResult2: Awaited<ReturnType<typeof selectPhaseFrames>> | null = null;
+              for (let attempt2 = 0; attempt2 < 3; attempt2++) {
+                const startFrac2 = 0.05 + attempt2 * 0.2;
+                rawFrames2 = await extractFramesSequential(videoFile2, movementType, { startFraction: startFrac2 });
+                const candidate2 = await selectPhaseFrames(rawFrames2, movementType, { cameraView: cameraView2 });
+                phaseResult2 = candidate2;
+                if (isPhaseSelectionAdequate(candidate2, movementType)) break;
+              }
+
+              phaseFrames2 = phaseResult2!.frames;
+              if (phaseResult2!.diag && output.diagnostics.secondary) {
+                output.diagnostics.secondary.movenet = phaseResult2!.diag.movenet;
+                output.diagnostics.secondary.gaitFSM = phaseResult2!.diag.gaitFSM;
               }
 
               const poseResults2   = await detectPoseOnFrames(landmarker, phaseFrames2);
@@ -407,7 +446,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
               const annotated2 = await Promise.all(
                 poseResults2.map((r, i) =>
                   r.poseLandmarks
-                    ? annotateFrame(phaseFrames2[i].imageData, r.poseLandmarks)
+                    ? annotateFrame(phaseFrames2[i].imageData, r.poseLandmarks, `frame: ${phaseFrames2[i].index + 1}/${rawFrames2.length}`)
                     : Promise.resolve(phaseFrames2[i].imageData),
                 ),
               );

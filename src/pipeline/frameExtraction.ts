@@ -246,7 +246,61 @@ export interface ExtractFramesOptions {
   onProgress?: (percent: number, label: string) => void;
 }
 
-// Main entry point. Returns an array of ExtractedFrames with base64 JPEG image data.
+export interface ExtractSequentialOptions {
+  startFraction?: number;
+  onProgress?: (percent: number, label: string) => void;
+}
+
+function sequentialCaptureParams(movementType: string): { fps: number; windowSeconds: number } {
+  if (/running|gait|walk/i.test(movementType)) return { fps: 20, windowSeconds: 2 };
+  if (/squat|lunge|deadlift|hinge|drop.?jump|countermovement.?jump|single.?leg.?landing|tuck.?jump/i.test(movementType)) return { fps: 12, windowSeconds: 5 };
+  return { fps: 8, windowSeconds: 3 };
+}
+
+export async function extractFramesSequential(
+  file: File,
+  movementType: string,
+  options: ExtractSequentialOptions = {},
+): Promise<ExtractedFrame[]> {
+  const { onProgress, startFraction = 0.05 } = options;
+  const vid = await createVideoElement(file);
+  try {
+    const dur = vid.duration;
+    if (!dur || !isFinite(dur)) throw new Error('Could not determine video duration.');
+
+    const { fps, windowSeconds } = sequentialCaptureParams(movementType);
+    const interval = 1 / fps;
+    const startTime = startFraction * dur;
+    const endTime = Math.min(startTime + windowSeconds, dur * 0.95);
+
+    const captureTimes: number[] = [];
+    for (let t = startTime; t <= endTime; t += interval) {
+      captureTimes.push(t);
+    }
+
+    const frames: ExtractedFrame[] = [];
+    for (let i = 0; i < captureTimes.length; i++) {
+      const t = captureTimes[i];
+      onProgress?.(Math.round((i / captureTimes.length) * 100), `Extracting frame ${i + 1} of ${captureTimes.length}`);
+      const imageData = await captureFrameAtTime(vid, t);
+      if (imageData) {
+        frames.push({
+          imageData,
+          phase: { id: 'dense', label: `Frame ${frames.length + 1}`, desc: '', fraction: t / dur },
+          timestamp: t,
+          index: frames.length,
+        });
+      }
+    }
+
+    onProgress?.(100, `Extracted ${frames.length} frames`);
+    return frames;
+  } finally {
+    cleanupVideoElement(vid);
+  }
+}
+
+// Legacy uniform sampler — still used by the UI analysis hooks.
 export async function extractFrames(
   file: File,
   movementType: string,

@@ -11,9 +11,9 @@ media:
   primary:
     file: side.mov
     camera_view: side
-  secondary:
-    file: post.mov
-    camera_view: posterior
+  # secondary:
+  #   file: post.mov
+  #   camera_view: posterior
 
 focus: []
 

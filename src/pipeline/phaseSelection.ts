@@ -597,6 +597,7 @@ export function runGaitFSM(
   const cycleFrameN = cycleEnd - cycleStart + 1;
   const usedFisGal = new Set<number>();
   const dedupedFrames: ExtractedFrame[] = [];
+  let minLi = 0; // enforce forward-only frame selection across phases
 
   for (let pi = 0; pi < runningPhases.length && dedupedFrames.length < 8; pi++) {
     const ph = runningPhases[pi];
@@ -615,14 +616,17 @@ export function runGaitFSM(
       idealLi = cycleStart + Math.round(((ph.time + (nextPh?.time ?? 1.0)) / 2) * cycleFrameN);
     }
 
+    // Clamp search floor to minLi so frames never go backwards.
+    const effectiveFMin = Math.max(fMin, minLi);
+
     let candidates = perFrame
       .map((fd, li) => ({ fd, li }))
-      .filter(({ fd, li }) => li >= fMin && li <= fMax && !usedFisGal.has(fd.fi));
+      .filter(({ fd, li }) => li >= effectiveFMin && li <= fMax && !usedFisGal.has(fd.fi));
 
     if (!candidates.length) {
       const nearest = perFrame
         .map((fd, li) => ({ fd, li, dist: Math.abs(li - idealLi) }))
-        .filter(c => !usedFisGal.has(c.fd.fi))
+        .filter(c => c.li >= effectiveFMin && !usedFisGal.has(c.fd.fi))
         .sort((a, b) => a.dist - b.dist)[0];
       if (!nearest) continue;
       candidates = [nearest];
@@ -643,6 +647,7 @@ export function runGaitFSM(
     };
 
     usedFisGal.add(best.fd.fi);
+    minLi = best.li + 1;
     dedupedFrames.push({ ...frames[best.fd.fi], phase: phLabel });
   }
 
@@ -799,7 +804,7 @@ export async function selectPhaseFrames(
     return { frames: selected, diag: { movenet: moveNetDiag, gaitFSM: gaitDiag } };
   }
 
-  // Non-gait smart relabeling: coarse scan all 8 frames
+  // Non-gait smart relabeling: coarse scan all frames
   let moveNetDiag: MoveNetDiagnostics | null = null;
   let coarse: (SparseLandmarks | null)[];
   if (detector) {
@@ -841,4 +846,16 @@ export async function selectPhaseFrames(
 
   onProgress?.(100, `Selected ${selected.length} phase frames`);
   return { frames: selected, diag: { movenet: moveNetDiag, gaitFSM: null } };
+}
+
+export function isPhaseSelectionAdequate(
+  result: { frames: ExtractedFrame[]; diag: PhaseSelectionDiagnostics | null },
+  movementType: string,
+): boolean {
+  if (result.frames.length < 6) return false;
+  if (/running|gait|walk/i.test(movementType) && result.diag?.gaitFSM) {
+    const { lContactPeaks, rContactPeaks, detectedEvents } = result.diag.gaitFSM;
+    return lContactPeaks.length + rContactPeaks.length >= 2 && detectedEvents.length >= 5;
+  }
+  return true;
 }
