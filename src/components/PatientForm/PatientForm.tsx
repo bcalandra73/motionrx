@@ -1,3 +1,4 @@
+import { Card } from '../Card/Card';
 import type { PatientFormData, MovementType, InjuredSide, HeightUnit } from '../../types';
 
 interface Props {
@@ -15,11 +16,7 @@ export function PatientForm({ form, onChange }: Props) {
   })();
 
   return (
-    <div className="card no-mb">
-      <div className="card-header">
-        <div className="card-header-icon">👤</div>
-        <div><h2>Patient Information</h2><p>Demographics and clinical context</p></div>
-      </div>
+    <Card icon="👤" title="Patient Information" subtitle="Demographics and clinical context" className="no-mb">
       <div className="form-grid">
         <div className="form-group">
           <label className="form-label">Patient Name</label>
@@ -101,6 +98,6 @@ export function PatientForm({ form, onChange }: Props) {
             value={form.clinicalNotes} onChange={e => onChange('clinicalNotes', e.target.value)} />
         </div>
       </div>
-    </div>
+    </Card>
   );
 }

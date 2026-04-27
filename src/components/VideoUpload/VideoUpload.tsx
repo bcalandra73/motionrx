@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { Card } from '../Card/Card';
 import type { CameraView } from '../../types';
 
 interface UploadSlotProps {
@@ -142,12 +143,7 @@ export function VideoUpload({
   const dualActive = !!secondaryFile;
 
   return (
-    <div className="card no-mb">
-      <div className="card-header">
-        <div className="card-header-icon">🎬</div>
-        <div><h2>Media Upload</h2><p>Upload one video or add a second angle for dual-plane analysis</p></div>
-      </div>
-
+    <Card icon="🎬" title="Media Upload" subtitle="Upload one video or add a second angle for dual-plane analysis" className="no-mb">
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
         <UploadSlot label="Primary View" required
           file={primaryFile} cameraView={primaryView}
@@ -171,9 +167,10 @@ export function VideoUpload({
       </button>
 
       <div style={{ marginTop: 8 }}>
-        <div className="card-header" style={{ marginBottom: 14, paddingBottom: 14, borderBottom: '1px solid var(--border)' }}>
-          <div className="card-header-icon">🎯</div>
-          <div><h2>Analysis Focus Areas</h2><p>Select all that apply</p></div>
+        <hr style={{ margin: '4px 0 12px', border: 'none', borderTop: '1px solid var(--border)' }} />
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: '.82rem', fontWeight: 600, color: 'var(--navy)' }}>Analysis Focus Areas</div>
+          <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginTop: 2 }}>Select all that apply</div>
         </div>
         <div className="focus-grid">
           {FOCUS_OPTIONS.map(opt => {
@@ -188,6 +185,6 @@ export function VideoUpload({
           })}
         </div>
       </div>
-    </div>
+    </Card>
   );
 }

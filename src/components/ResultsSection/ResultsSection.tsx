@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { AnalysisReport, Branding, PatientFormData, AnnotatedFrame } from '../../types';
 
 interface Props {
@@ -22,6 +23,73 @@ function dotClass(priority: string) {
   if (priority === 'high') return 'dot-high';
   if (priority === 'positive') return 'dot-low';
   return 'dot-med';
+}
+
+function FrameSlideshow({ frames, frames2 }: { frames: AnnotatedFrame[]; frames2: AnnotatedFrame[] }) {
+  const [idx, setIdx] = useState(0);
+  const total = frames.length;
+  if (!total) return null;
+
+  const hasDual = frames2.length > 0;
+  const frame  = frames[Math.min(idx, total - 1)];
+  const frame2 = frames2[Math.min(idx, frames2.length - 1)];
+
+  const prev = () => setIdx(i => Math.max(0, i - 1));
+  const next = () => setIdx(i => Math.min(total - 1, i + 1));
+
+  const btnStyle: React.CSSProperties = {
+    background: 'none', border: '1px solid var(--border)', borderRadius: 8,
+    color: 'var(--ink)', fontSize: '1.4rem', width: 40, height: 40,
+    cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    flexShrink: 0, opacity: 1,
+  };
+  const btnDisabled: React.CSSProperties = { ...btnStyle, opacity: 0.25, cursor: 'default' };
+
+  return (
+    <div style={{ margin: '20px 0', background: 'var(--navy-light)', borderRadius: 12, padding: '16px 20px', border: '1px solid var(--border)' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <span style={{ fontWeight: 600, fontSize: '.9rem', color: 'var(--ink)' }}>{frame.phaseId ?? `Frame ${idx + 1}`}</span>
+        <span style={{ fontSize: '.78rem', color: 'var(--muted)' }}>{idx + 1} / {total}</span>
+      </div>
+
+      {/* Image row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button style={idx === 0 ? btnDisabled : btnStyle} onClick={prev} disabled={idx === 0}>‹</button>
+        <div style={{ flex: 1, display: 'flex', gap: 8, justifyContent: 'center' }}>
+          <img
+            src={`data:image/jpeg;base64,${frame.base64}`}
+            alt={frame.phaseId ?? `Frame ${idx + 1}`}
+            style={{ flex: hasDual ? 1 : 'unset', maxWidth: hasDual ? '50%' : '100%', maxHeight: 380, objectFit: 'contain', borderRadius: 8, display: 'block' }}
+          />
+          {hasDual && frame2 && (
+            <img
+              src={`data:image/jpeg;base64,${frame2.base64}`}
+              alt={`${frame2.phaseId ?? `Frame ${idx + 1}`} (secondary)`}
+              style={{ flex: 1, maxWidth: '50%', maxHeight: 380, objectFit: 'contain', borderRadius: 8, display: 'block' }}
+            />
+          )}
+        </div>
+        <button style={idx === total - 1 ? btnDisabled : btnStyle} onClick={next} disabled={idx === total - 1}>›</button>
+      </div>
+
+      {/* Dot indicators */}
+      <div style={{ display: 'flex', justifyContent: 'center', gap: 6, marginTop: 14 }}>
+        {frames.map((f, i) => (
+          <button
+            key={i}
+            title={f.phaseId ?? `Frame ${i + 1}`}
+            onClick={() => setIdx(i)}
+            style={{
+              width: 8, height: 8, borderRadius: '50%', border: 'none', padding: 0,
+              cursor: 'pointer', transition: 'background 0.15s',
+              background: i === idx ? 'var(--teal)' : 'var(--border)',
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function narrativeHtml(text: string) {
@@ -65,20 +133,9 @@ export function ResultsSection({ report, patient, branding, annotatedFrames, ann
         </div>
       )}
 
-      {/* Frame gallery */}
+      {/* Frame slideshow */}
       {annotatedFrames.length > 0 && (
-        <div className={`frames-gallery${hasDual ? ' dual-view' : ''}`}>
-          {annotatedFrames.map((frame, i) => (
-            <div key={i} className="frame-card">
-              <div className="frame-card-img">
-                <img src={`data:image/jpeg;base64,${frame.base64}`} alt={`Frame ${i + 1}`} style={{ width: '100%', display: 'block' }} />
-                <div className="frame-label">
-                  <span>{frame.phaseId ?? `Frame ${i + 1}`}</span>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
+        <FrameSlideshow frames={annotatedFrames} frames2={annotatedFrames2} />
       )}
 
       {/* Main report grid */}

@@ -1,3 +1,4 @@
+import { Card } from '../Card/Card';
 import type { Branding } from '../../types';
 
 interface Props {
@@ -7,11 +8,7 @@ interface Props {
 
 export function BrandingCard({ branding, onChange }: Props) {
   return (
-    <div className="card" style={{ marginBottom: 16 }}>
-      <div className="card-header" style={{ marginBottom: 14, paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
-        <div className="card-header-icon">🏥</div>
-        <div><h2>Practice Branding</h2><p>Appears on all generated PDF reports — saved in your browser</p></div>
-      </div>
+    <Card icon="🏥" title="Practice Branding" subtitle="Appears on all generated PDF reports — saved in your browser" optional style={{ marginBottom: 16 }}>
       <div className="form-grid">
         <div className="form-group">
           <label className="form-label">Practice Name</label>
@@ -34,6 +31,6 @@ export function BrandingCard({ branding, onChange }: Props) {
             value={branding.contact} onChange={e => onChange('contact', e.target.value)} />
         </div>
       </div>
-    </div>
+    </Card>
   );
 }

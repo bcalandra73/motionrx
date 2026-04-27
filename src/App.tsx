@@ -1,6 +1,8 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
+import { load as parseYaml } from 'js-yaml';
 import './index.css';
 
+import { Card } from './components/Card/Card';
 import { AppHeader } from './components/AppHeader/AppHeader';
 import { AutoSaveBanner } from './components/AutoSaveBanner/AutoSaveBanner';
 import { PatientForm } from './components/PatientForm/PatientForm';
@@ -9,6 +11,7 @@ import { VideoUpload } from './components/VideoUpload/VideoUpload';
 import { LoadingState } from './components/LoadingState/LoadingState';
 import { ResultsSection } from './components/ResultsSection/ResultsSection';
 import { PROMs } from './components/PROMs/PROMs';
+import { TapeMarkerCard } from './components/TapeMarkerCard/TapeMarkerCard';
 
 import { usePatientForm } from './hooks/usePatientForm';
 import { useRunningInputs } from './hooks/useRunningInputs';
@@ -17,10 +20,12 @@ import { useBranding } from './hooks/useBranding';
 import { useAutoSave } from './hooks/useAutoSave';
 import { useVideoAnalysis } from './hooks/useVideoAnalysis';
 import { usePROMs } from './hooks/usePROMs';
-import type { PatientFormData, JumpInvolvedLimb, JumpProtocol, JumpTimePostOp, Assessment } from './types';
+import type { PatientFormData, JumpInvolvedLimb, JumpProtocol, JumpTimePostOp, Assessment, ExtractedFrame } from './types';
+import { assessmentFromYaml } from './assessment';
 import { CAMERA_GUIDES } from './data/cameraGuides';
-import { extractFrames } from './pipeline/frameExtraction';
-import { selectPhaseFrames } from './pipeline/phaseSelection';
+import { extractFramesSequential, extractFramesAtTimestamps } from './pipeline/frameExtraction';
+import { annotateFrame } from './pipeline/frameAnnotation';
+import { selectPhaseFrames, isPhaseSelectionAdequate } from './pipeline/phaseSelection';
 import { initPoseLandmarker, detectPoseOnFrames } from './pipeline/poseDetection';
 import { mergeWorldLandmarks, extractAngles, aggregateAngles } from './pipeline/angleCalculation';
 import { buildReportPrompt } from './pipeline/reportGeneration';
@@ -39,6 +44,7 @@ export default function App() {
   const [focusAreas, setFocusAreas]             = useState<string[]>([]);
   const [guideOpen, setGuideOpen]               = useState(false);
   const [enableLandmarkReview, setLandmarkReview] = useState(false);
+  const caseInputRef = useRef<HTMLInputElement>(null);
 
   const isAnalyzing = ['extracting', 'detecting', 'analyzing'].includes(video.analysis.stage);
   const hasResults  = video.analysis.stage === 'complete' && video.analysis.report != null;
@@ -63,32 +69,45 @@ export default function App() {
     if (!apiKey.trim()) { setApiError('Please enter your Anthropic API key.'); return; }
     setApiError('');
 
+    const movementType = form.form.movementType;
+    const cameraView = (video.primary.cameraView ?? 'side') as 'side' | 'front' | 'posterior';
+
     video.setStage('extracting', 'Extracting video frames...', 0);
     const t0 = performance.now();
-    console.log('[Pipeline] Starting analysis —', form.form.movementType, video.primary.file.name);
-    try {
-      const frames = await extractFrames(
-        video.primary.file,
-        form.form.movementType,
-        {
-          onProgress: (pct, label) => video.setStage('extracting', label, pct),
-        },
-      );
-      console.log(`[Step 1 ✓] Extracted ${frames.length} frames in ${Math.round(performance.now() - t0)}ms`);
-      video.updatePrimary({ extractedFrames: frames });
+    console.log('[Pipeline] Starting analysis —', movementType, video.primary.file.name);
 
-      // Step 2: phase selection — coarse scan → pick 8 canonical frames
-      video.setStage('detecting', 'Analysing movement phases...', 0);
-      const t2 = performance.now();
-      console.log('[Step 2] Phase selection starting...');
-      const phaseFrames = await selectPhaseFrames(frames, form.form.movementType, {
-        cameraView: video.primary.cameraView as 'side' | 'front' | 'posterior' | undefined,
-        onProgress: (pct, label) => video.setStage('detecting', label, pct),
-      });
-      console.log(`[Step 2 ✓] Phase selection: ${phaseFrames.length} frames in ${Math.round(performance.now() - t2)}ms — phases: ${phaseFrames.map(f => f.phase.id).join(', ')}`);
+    try {
+      // Steps 1 + 2: sequential extraction + phase selection with retry (mirrors runner logic)
+      let frames: ExtractedFrame[] = [];
+      let phaseFrames: ExtractedFrame[] = [];
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const startFrac = 0.05 + attempt * 0.2;
+        const t1 = performance.now();
+        frames = await extractFramesSequential(video.primary.file, movementType, {
+          startFraction: startFrac,
+          onProgress: (pct, label) => video.setStage('extracting', label, pct),
+        });
+        console.log(`[Step 1 ✓] Extracted ${frames.length} frames in ${Math.round(performance.now() - t1)}ms (offset ${Math.round(startFrac * 100)}%)`);
+        video.updatePrimary({ extractedFrames: frames });
+
+        video.setStage('detecting', 'Analysing movement phases...', 0);
+        const t2 = performance.now();
+        const candidate = await selectPhaseFrames(frames, movementType, {
+          cameraView,
+          onProgress: (pct, label) => video.setStage('detecting', label, pct),
+        });
+        console.log(`[Step 2] Attempt ${attempt + 1}: ${candidate.frames.length} frames in ${Math.round(performance.now() - t2)}ms`);
+        phaseFrames = candidate.frames;
+
+        if (isPhaseSelectionAdequate(candidate, movementType)) break;
+        console.log(`[Step 2] Attempt ${attempt + 1} insufficient quality, trying next window...`);
+      }
+
+      console.log(`[Step 2 ✓] ${phaseFrames.length} phase frames — phases: ${phaseFrames.map(f => f.phase.id).join(', ')}`);
       video.updatePrimary({ extractedFrames: phaseFrames });
 
-      // Step 3: MediaPipe pose detection on the 8 selected frames
+      // Step 3: MediaPipe pose detection on selected frames
       video.setStage('detecting', 'Initialising pose model...', 0);
       const t3 = performance.now();
       console.log('[Step 3] Initialising PoseLandmarker...');
@@ -99,55 +118,78 @@ export default function App() {
       });
       const detectedCount = poseResults.filter(r => (r.poseLandmarks?.length ?? 0) > 0).length;
       console.log(`[Step 3 ✓] Pose detection done in ${Math.round(performance.now() - t3)}ms — ${detectedCount}/${poseResults.length} frames had landmarks`);
-      const landmarks = poseResults.map(r => r.poseLandmarks ?? []);
-      video.updatePrimary({ landmarks });
+      const annotatedBase64 = await Promise.all(
+        phaseFrames.map((f, i) => {
+          const lms = poseResults[i]?.poseLandmarks;
+          return lms?.length ? annotateFrame(f.imageData, lms) : Promise.resolve(f.imageData);
+        }),
+      );
+      video.updatePrimary({
+        landmarks: poseResults.map(r => r.poseLandmarks ?? []),
+        annotatedFrames: phaseFrames.map((f, i) => ({
+          base64:    annotatedBase64[i],
+          landmarks: poseResults[i]?.poseLandmarks ?? null,
+          timestamp: f.timestamp,
+          index:     f.index,
+          phaseId:   f.phase.label,
+        })),
+      });
 
       // Step 4: angle calculation
       video.setStage('analyzing', 'Calculating joint angles...', 0);
       const t4 = performance.now();
-      const cameraView = (video.primary.cameraView ?? 'side') as 'side' | 'front' | 'posterior';
       const allFrameAngles = poseResults.map(r =>
         extractAngles(
           mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
           cameraView,
-          form.form.movementType,
+          movementType,
         ),
       );
       const aggregated = aggregateAngles(allFrameAngles, phaseFrames.map(f => f.phase));
       console.log(`[Step 4 ✓] Angles calculated in ${Math.round(performance.now() - t4)}ms —`, aggregated);
 
-      // Step 3b: Secondary video pipeline (non-fatal — failure falls back to single-view)
-      let phaseFrames2: typeof phaseFrames = [];
-      let aggregated2: typeof aggregated   = {};
+      // Step 3b: Secondary pipeline — capture at primary timestamps so both videos stay in sync
+      let phaseFrames2: ExtractedFrame[] = [];
+      let aggregated2: typeof aggregated = {};
       if (video.secondary.file) {
         video.setStage('detecting', 'Extracting second camera angle...', 0);
         const t3b = performance.now();
-        console.log('[Step 3b] Processing secondary video —', video.secondary.cameraView);
+        const cameraView2 = (video.secondary.cameraView ?? 'front') as 'side' | 'front' | 'posterior';
+        console.log('[Step 3b] Processing secondary video —', cameraView2);
         try {
-          const rawFrames2 = await extractFrames(
+          phaseFrames2 = await extractFramesAtTimestamps(
             video.secondary.file,
-            form.form.movementType,
-            { onProgress: (pct, label) => video.setStage('detecting', label, pct * 0.3) },
+            phaseFrames.map(f => ({ timestamp: f.timestamp, phase: f.phase, index: f.index })),
+            { onProgress: (pct, label) => video.setStage('detecting', label, pct) },
           );
-          const selected2 = await selectPhaseFrames(rawFrames2, form.form.movementType, {
-            cameraView: video.secondary.cameraView as 'side' | 'front' | 'posterior',
-            onProgress: (pct, label) => video.setStage('detecting', label, 30 + pct * 0.3),
-          });
-          phaseFrames2 = selected2;
           video.updateSecondary({ extractedFrames: phaseFrames2 });
 
           const poseResults2 = await detectPoseOnFrames(landmarker, phaseFrames2, {
-            onProgress: (pct, label) => video.setStage('detecting', label, 60 + pct * 0.4),
+            onProgress: (pct, label) => video.setStage('detecting', label, pct),
           });
-          const cameraView2 = (video.secondary.cameraView ?? 'front') as 'side' | 'front' | 'posterior';
           const allFrameAngles2 = poseResults2.map(r =>
             extractAngles(
               mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
               cameraView2,
-              form.form.movementType,
+              movementType,
             ),
           );
           aggregated2 = aggregateAngles(allFrameAngles2, phaseFrames2.map(f => f.phase));
+          const annotatedBase64_2 = await Promise.all(
+            phaseFrames2.map((f, i) => {
+              const lms = poseResults2[i]?.poseLandmarks;
+              return lms?.length ? annotateFrame(f.imageData, lms) : Promise.resolve(f.imageData);
+            }),
+          );
+          video.updateSecondary({
+            annotatedFrames: phaseFrames2.map((f, i) => ({
+              base64:    annotatedBase64_2[i],
+              landmarks: poseResults2[i]?.poseLandmarks ?? null,
+              timestamp: f.timestamp,
+              index:     f.index,
+              phaseId:   f.phase.label,
+            })),
+          });
           console.log(`[Step 3b ✓] Secondary pipeline done in ${Math.round(performance.now() - t3b)}ms —`, aggregated2);
         } catch (err2) {
           console.warn('[Step 3b] Secondary pipeline failed (non-critical):', err2);
@@ -160,12 +202,12 @@ export default function App() {
       video.setStage('analyzing', 'Generating clinical report...', 50);
       const t5 = performance.now();
       console.log('[Step 5] Building prompt and calling Claude API...');
-      const isRunning = /running|gait|walk/i.test(form.form.movementType);
-      const isJump    = /jump|landing/i.test(form.form.movementType);
+      const isRunning = /running|gait|walk/i.test(movementType);
+      const isJump    = /jump|landing/i.test(movementType);
       const hasDualView = phaseFrames2.length > 0;
       const prompt = buildReportPrompt({
         patient:     form.form,
-        movementType: form.form.movementType,
+        movementType,
         cameraView,
         hasDualView,
         secondaryCameraView: video.secondary.cameraView as 'side' | 'front' | 'posterior',
@@ -203,6 +245,43 @@ export default function App() {
     }
   }
 
+  async function handleLoadCase(files: FileList) {
+    const all = Array.from(files);
+    const yamlFile = all.find(f => /\.(yaml|yml)$/i.test(f.name));
+    if (!yamlFile) { setApiError('No YAML file found in the selection.'); return; }
+
+    try {
+      const raw = parseYaml(await yamlFile.text()) as Record<string, unknown>;
+      const assessment = assessmentFromYaml(raw);
+      loadAssessment(assessment);
+
+      const byName = new Map(all.map(f => [f.name, f]));
+
+      const primaryFile = byName.get(assessment.media.primary.file);
+      if (primaryFile) video.setPrimaryFile(primaryFile);
+
+      const secondaryMeta = assessment.media.secondary;
+      const secondaryFile = secondaryMeta ? byName.get(secondaryMeta.file) : undefined;
+      if (secondaryFile) {
+        video.setSecondaryFile(secondaryFile);
+        video.setShowSecondary(true);
+      }
+
+      const missing: string[] = [];
+      if (!primaryFile) missing.push(assessment.media.primary.file);
+      if (secondaryMeta && !secondaryFile) missing.push(secondaryMeta.file);
+      setApiError(missing.length
+        ? `Case loaded — please also upload: ${missing.join(', ')}`
+        : '',
+      );
+    } catch (e) {
+      setApiError(`Could not parse case file: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      // Reset so the same file can be re-selected if needed
+      if (caseInputRef.current) caseInputRef.current.value = '';
+    }
+  }
+
   function handleRestore() {
     if (!autoSave.pending) return;
     form.restore({
@@ -215,7 +294,7 @@ export default function App() {
 
   return (
     <>
-      <AppHeader />
+      <AppHeader onLoadCase={() => caseInputRef.current?.click()} />
 
       <div className="container">
         {autoSave.bannerVisible && autoSave.pending && (
@@ -225,6 +304,14 @@ export default function App() {
         {/* INPUT SECTION */}
         {!hasResults && !isAnalyzing && (
           <div id="inputSection">
+            <input
+              ref={caseInputRef}
+              type="file"
+              multiple
+              accept=".yaml,.yml,video/*"
+              style={{ display: 'none' }}
+              onChange={e => { if (e.target.files?.length) handleLoadCase(e.target.files); }}
+            />
             <div className="page-header">
               <h1>New Motion Assessment</h1>
               <p>Upload a video or image — MediaPipe will track joints and measure angles, then Claude AI generates your clinical report.</p>
@@ -250,11 +337,7 @@ export default function App() {
             <div>
                 {/* Running inputs */}
                 {form.isRunning && (
-                  <div className="card no-mb" id="runningInputsCard" style={{ marginTop: 12 }}>
-                    <div className="card-header">
-                      <div className="card-header-icon">🏃</div>
-                      <div><h2>Running Parameters</h2><p>Unlocks stride length, GCT, and context-aware norms</p></div>
-                    </div>
+                  <Card icon="🏃" title="Running Parameters" subtitle="Unlocks stride length, GCT, and context-aware norms" className="no-mb" style={{ marginTop: 12 }}>
                     <div className="form-grid">
                       <div className="form-group">
                         <label className="form-label">Treadmill Speed <span style={{ fontWeight: 400, color: 'var(--muted)' }}>(unlocks stride length)</span></label>
@@ -334,16 +417,12 @@ export default function App() {
                         <span style={{ fontWeight: 400, color: 'var(--muted)', display: 'block', fontSize: '.72rem', marginTop: 1 }}>Based on pronation, foot strike, and hip adduction data — adds a shoe category suggestion to the clinical report</span>
                       </label>
                     </div>
-                  </div>
+                  </Card>
                 )}
 
                 {/* Jump / Landing inputs */}
                 {form.isJump && (
-                  <div className="card no-mb" id="jumpInputsCard" style={{ marginTop: 12 }}>
-                    <div className="card-header">
-                      <div className="card-header-icon">🦘</div>
-                      <div><h2>Jump / Landing Parameters</h2><p>Unlocks ACL risk scoring, bilateral LSI, and landing phase detection</p></div>
-                    </div>
+                  <Card icon="🦘" title="Jump / Landing Parameters" subtitle="Unlocks ACL risk scoring, bilateral LSI, and landing phase detection" className="no-mb" style={{ marginTop: 12 }}>
                     <div className="form-grid">
                       <div className="form-group">
                         <label className="form-label">Video Frame Rate <span style={{ fontWeight: 400, color: 'var(--muted)' }}>(120fps+ strongly recommended)</span></label>
@@ -400,18 +479,11 @@ export default function App() {
                       Older phones: use a slow-mo app (Slow Motion Video FX, or SloPro).
                       Export and upload the original file — do not screen-record.
                     </div>
-                  </div>
+                  </Card>
                 )}
 
                 {/* Tape Markers */}
-                {form.showTapeMarkers && (
-                  <div className="card no-mb" id="tapeMarkersCard" style={{ marginTop: 12 }}>
-                    <div className="card-header" style={{ marginBottom: 0 }}>
-                      <div className="card-header-icon">🎯</div>
-                      <div><h2>Tape Marker Configuration</h2><p>Color tape on bony landmarks overrides MediaPipe estimates with pixel-precise positions</p></div>
-                    </div>
-                  </div>
-                )}
+                {form.showTapeMarkers && <TapeMarkerCard />}
             </div>
 
             {/* PROMs */}
@@ -428,14 +500,7 @@ export default function App() {
             <BrandingCard branding={branding.branding} onChange={branding.setField} />
 
             {/* API key card */}
-            <div className="card" style={{ marginBottom: 16, borderColor: '#f0c040', background: '#fffdf0' }}>
-              <div className="card-header" style={{ marginBottom: 14, paddingBottom: 12, borderBottom: '1px solid #f0e0a0' }}>
-                <div className="card-header-icon" style={{ background: '#fff8e0' }}>🔑</div>
-                <div>
-                  <h2 style={{ color: '#92600a' }}>Anthropic API Key</h2>
-                  <p>Required to run AI analysis — never stored or sent anywhere except Anthropic</p>
-                </div>
-              </div>
+            <Card icon="🔑" title="Anthropic API Key" subtitle="Required to run AI analysis — never stored or sent anywhere except Anthropic" style={{ marginBottom: 16, borderColor: '#f0c040', background: '#fffdf0' }}>
               <div className="form-group">
                 <label className="form-label">API Key</label>
                 <input type="password" placeholder="sk-ant-..." autoComplete="off" style={{ fontFamily: 'monospace' }}
@@ -445,7 +510,7 @@ export default function App() {
                 🔒 Your key is used only for this request and is never saved. Get your key at{' '}
                 <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: '#92600a' }}>console.anthropic.com</a>
               </p>
-            </div>
+            </Card>
 
             <div className="error-box" id="errorBox" style={apiError ? { display: 'block' } : undefined}>
               {apiError}
