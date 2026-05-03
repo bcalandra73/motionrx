@@ -374,6 +374,12 @@ export interface AssessmentMedia {
   cameraView: CameraView;
 }
 
+export interface AssessmentCapture {
+  startSecs:    number;
+  durationSecs: number;
+  targetFps:    number;
+}
+
 export interface Assessment {
   patient: {
     name:         string;
@@ -389,8 +395,9 @@ export interface Assessment {
     primary:    AssessmentMedia;
     secondary?: AssessmentMedia;
   };
-  focus:    string[];
-  running?: RunningInputs;
-  jump?:    JumpInputs;
-  proms?:   AssessmentProms;
+  focus:     string[];
+  capture?:  AssessmentCapture;
+  running?:  RunningInputs;
+  jump?:     JumpInputs;
+  proms?:    AssessmentProms;
 }

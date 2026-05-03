@@ -120,6 +120,12 @@ interface Props {
   onGuide: () => void;
   focusAreas: string[];
   onFocusToggle: (area: string) => void;
+  startSecs: number;
+  durationSecs: number;
+  targetFps: number;
+  onStartSecs: (v: number) => void;
+  onDurationSecs: (v: number) => void;
+  onTargetFps: (v: number) => void;
 }
 
 const FOCUS_OPTIONS = [
@@ -139,6 +145,7 @@ export function VideoUpload({
   primaryProgress, primaryStatusText, secondaryProgress, secondaryStatusText,
   onPrimaryFile, onPrimaryView, onSecondaryFile, onSecondaryView,
   onGuide, focusAreas, onFocusToggle,
+  startSecs, durationSecs, targetFps, onStartSecs, onDurationSecs, onTargetFps,
 }: Props) {
   const dualActive = !!secondaryFile;
 
@@ -183,6 +190,34 @@ export function VideoUpload({
               </label>
             );
           })}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <hr style={{ margin: '4px 0 12px', border: 'none', borderTop: '1px solid var(--border)' }} />
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: '.82rem', fontWeight: 600, color: 'var(--navy)' }}>Capture Settings</div>
+          <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginTop: 2 }}>Select the portion of the video to analyse</div>
+        </div>
+        <div className="form-grid">
+          <div className="form-group">
+            <label className="form-label">Start time (s)</label>
+            <input type="number" min={0} step={1} placeholder="0"
+              value={startSecs}
+              onChange={e => onStartSecs(Math.max(0, Number(e.target.value)))} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Duration (s)</label>
+            <input type="number" min={1} max={60} step={1} placeholder="2"
+              value={durationSecs}
+              onChange={e => onDurationSecs(Math.max(1, Number(e.target.value)))} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Capture rate (fps)</label>
+            <input type="number" min={1} max={60} step={1} placeholder="30"
+              value={targetFps}
+              onChange={e => onTargetFps(Math.max(1, Math.min(60, Number(e.target.value))))} />
+          </div>
         </div>
       </div>
     </Card>

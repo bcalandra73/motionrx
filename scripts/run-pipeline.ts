@@ -2,10 +2,12 @@
  * End-to-end pipeline runner.
  *
  * Usage:
- *   npm run pipeline                        # run all test_data/test_* cases
- *   npm run pipeline -- --test test_1       # run a single case
- *   npm run pipeline -- --key sk-ant-...    # include Claude report generation
- *   npm run pipeline -- --out results/      # override output directory
+ *   npm run pipeline                  # run all test_data/test_* cases
+ *   npm run pipeline -- --test test_1 # run a single case
+ *
+ * All run parameters come from each test's test.yaml.
+ * Set ANTHROPIC_API_KEY in the environment to enable report generation.
+ * Output is written to test_output/<test_name>/.
  */
 
 import { chromium } from 'playwright';
@@ -30,11 +32,7 @@ function parseArgs() {
       i++;
     }
   }
-  return {
-    test: args.test ?? null,
-    key:  args.key  ?? process.env.ANTHROPIC_API_KEY ?? null,
-    out:  args.out  ?? path.join(ROOT, 'test_output'),
-  };
+  return { test: args.test ?? null };
 }
 
 // ── Test dir discovery ────────────────────────────────────────────────────────
@@ -75,119 +73,76 @@ async function findTestDirs(filter: string | null): Promise<string[]> {
 async function writeOutput(outDir: string, result: RunnerOutput): Promise<void> {
   await fs.mkdir(outDir, { recursive: true });
 
-  const sec = result.steps.secondaryPipeline;
+  const view1 = result.cameraView ?? 'primary';
+  const view2 = result.secondaryCameraView ?? 'secondary';
 
-  // summary.json — everything except frame imageData (keep JSON small)
+  // frames_annotated/ — all frames with wireframe overlay + frame counter
+  if (result.allAnnotatedFrames.length) {
+    const annotDir = path.join(outDir, 'frames_annotated');
+    await fs.mkdir(annotDir, { recursive: true });
+    const total = result.allAnnotatedFrames.length;
+    for (let i = 0; i < total; i++) {
+      const name = `${String(i + 1).padStart(3, '0')}_of_${total}_${view1}.jpg`;
+      await fs.writeFile(path.join(annotDir, name), Buffer.from(result.allAnnotatedFrames[i], 'base64'));
+    }
+  }
+
+  // phases/ — one annotated frame per detected phase
+  if (result.phaseFrames.length && result.annotatedFrames.length) {
+    const phasesDir = path.join(outDir, 'phases');
+    await fs.mkdir(phasesDir, { recursive: true });
+    for (let i = 0; i < result.phaseFrames.length; i++) {
+      const f    = result.phaseFrames[i];
+      const b64  = result.annotatedFrames[i];
+      if (!b64) continue;
+      const name = `${String(i + 1).padStart(2, '0')}_${f.phase.id}_${view1}.jpg`;
+      await fs.writeFile(path.join(phasesDir, name), Buffer.from(b64, 'base64'));
+    }
+  }
+
+  // frames_paired/ — primary + secondary composited side by side
+  if (result.secondary?.pairedFrames.length) {
+    const pairedDir = path.join(outDir, 'frames_paired');
+    await fs.mkdir(pairedDir, { recursive: true });
+    for (let i = 0; i < result.secondary.pairedFrames.length; i++) {
+      const phaseId = result.phaseFrames[i]?.phase?.id ?? String(i);
+      const name    = `${String(i).padStart(2, '0')}_${phaseId}.jpg`;
+      await fs.writeFile(path.join(pairedDir, name), Buffer.from(result.secondary.pairedFrames[i], 'base64'));
+    }
+  }
+
+  // summary.json
   const summary = {
     dir:                 result.dir,
     movementType:        result.movementType,
     cameraView:          result.cameraView,
     secondaryCameraView: result.secondaryCameraView ?? null,
     patient:             result.patient,
-    steps: {
-      extraction: result.steps.extraction
-        ? { ok: result.steps.extraction.ok, ms: result.steps.extraction.ms, frameCount: result.steps.extraction.data?.frameCount ?? null, error: result.steps.extraction.error }
-        : null,
-      phaseSelection: result.steps.phaseSelection
-        ? { ok: result.steps.phaseSelection.ok, ms: result.steps.phaseSelection.ms, frameCount: result.steps.phaseSelection.data?.frameCount ?? null, phases: result.steps.phaseSelection.data?.phases ?? null, error: result.steps.phaseSelection.error }
-        : null,
-      poseDetection: result.steps.poseDetection
-        ? { ok: result.steps.poseDetection.ok, ms: result.steps.poseDetection.ms, detectedCount: result.steps.poseDetection.data?.detectedCount ?? null, totalCount: result.steps.poseDetection.data?.totalCount ?? null, error: result.steps.poseDetection.error }
-        : null,
-      angleCalculation: result.steps.angleCalculation
-        ? { ok: result.steps.angleCalculation.ok, ms: result.steps.angleCalculation.ms, error: result.steps.angleCalculation.error }
-        : null,
-      secondaryPipeline: sec
-        ? { ok: sec.ok, ms: sec.ms, frameCount: sec.data?.frameCount ?? null, phases: sec.data?.phases ?? null, error: sec.error }
-        : null,
-      reportGeneration: result.steps.reportGeneration
-        ? { ok: result.steps.reportGeneration.ok, ms: result.steps.reportGeneration.ms, error: result.steps.reportGeneration.error }
-        : null,
-    },
-    aggregated:           result.steps.angleCalculation?.data?.aggregated ?? null,
-    aggregated2:          sec?.data?.aggregated ?? null,
-    perFrameAngles:       result.steps.poseDetection?.data?.perFrameAngles ?? null,
+    frames:              result.allAnnotatedFrames.length,
+    phaseFrames:         result.phaseFrames.map(({ imageData: _i, ...f }) => f),
+    aggregated:          result.aggregated,
+    secondary:           result.secondary
+      ? { phaseFrames: result.secondary.phaseFrames.map(({ imageData: _i, ...f }) => f), aggregated: result.secondary.aggregated }
+      : null,
   };
   await fs.writeFile(path.join(outDir, 'summary.json'), JSON.stringify(summary, null, 2));
 
-  // diagnostics.json — per-model performance data
-  await fs.writeFile(
-    path.join(outDir, 'diagnostics.json'),
-    JSON.stringify(result.diagnostics, null, 2),
-  );
-
-  // prompt.txt
-  const prompt = result.steps.reportGeneration?.data?.prompt;
-  if (prompt) {
-    await fs.writeFile(path.join(outDir, 'prompt.txt'), prompt as string);
-  }
-
-  // report.json
-  const report = result.steps.reportGeneration?.data?.report;
-  if (report) {
-    await fs.writeFile(path.join(outDir, 'report.json'), JSON.stringify(report, null, 2));
-  }
-
-  const view1      = result.cameraView ?? 'primary';
-  const view2      = result.secondaryCameraView ?? 'secondary';
-  const frames1    = result.steps.phaseSelection?.data?.frames ?? [];
-  const frames2    = sec?.data?.frames ?? [];
-  const annotated1 = result.steps.poseDetection?.data?.annotatedFrames ?? [];
-  const annotated2 = sec?.data?.annotatedFrames ?? [];
-  const paired     = sec?.data?.pairedFrames ?? [];
-
-  // frames/ — raw phase-selected frames, both views
-  if (frames1.length || frames2.length) {
-    const framesDir = path.join(outDir, 'frames');
-    await fs.mkdir(framesDir, { recursive: true });
-    for (let i = 0; i < frames1.length; i++) {
-      const name = `${String(i).padStart(2, '0')}_${frames1[i].phase.id}_${view1}.jpg`;
-      await fs.writeFile(path.join(framesDir, name), Buffer.from(frames1[i].imageData, 'base64'));
-    }
-    for (let i = 0; i < frames2.length; i++) {
-      const name = `${String(i).padStart(2, '0')}_${frames2[i].phase.id}_${view2}.jpg`;
-      await fs.writeFile(path.join(framesDir, name), Buffer.from(frames2[i].imageData, 'base64'));
-    }
-  }
-
-  // frames_annotated/ — skeleton-overlay frames, both views
-  if (annotated1.length || annotated2.length) {
-    const annotDir = path.join(outDir, 'frames_annotated');
-    await fs.mkdir(annotDir, { recursive: true });
-    for (let i = 0; i < frames1.length; i++) {
-      const name = `${String(i).padStart(2, '0')}_${frames1[i].phase.id}_${view1}.jpg`;
-      await fs.writeFile(path.join(annotDir, name), Buffer.from(annotated1[i] ?? frames1[i].imageData, 'base64'));
-    }
-    for (let i = 0; i < frames2.length; i++) {
-      const name = `${String(i).padStart(2, '0')}_${frames2[i].phase.id}_${view2}.jpg`;
-      await fs.writeFile(path.join(annotDir, name), Buffer.from(annotated2[i] ?? frames2[i].imageData, 'base64'));
-    }
-  }
-
-  // frames_paired/ — primary + secondary side by side, keyed by primary phase
-  if (paired.length) {
-    const pairedDir = path.join(outDir, 'frames_paired');
-    await fs.mkdir(pairedDir, { recursive: true });
-    for (let i = 0; i < paired.length; i++) {
-      const phaseId = frames1[i]?.phase?.id ?? String(i);
-      const name    = `${String(i).padStart(2, '0')}_${phaseId}.jpg`;
-      await fs.writeFile(path.join(pairedDir, name), Buffer.from(paired[i], 'base64'));
-    }
-  }
+  if (result.gif)    await fs.writeFile(path.join(outDir, 'animation.gif'), Buffer.from(result.gif, 'base64'));
+  if (result.prompt) await fs.writeFile(path.join(outDir, 'prompt.txt'),    result.prompt);
+  if (result.report) await fs.writeFile(path.join(outDir, 'report.json'),   JSON.stringify(result.report, null, 2));
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const { test, key, out } = parseArgs();
+  const { test } = parseArgs();
+  const key = process.env.ANTHROPIC_API_KEY ?? null;
+  const out = path.join(ROOT, 'test_output');
 
   const testDirs = await findTestDirs(test);
   console.log(`[runner] Found ${testDirs.length} test case(s): ${testDirs.map(d => path.basename(d)).join(', ')}`);
-  if (key) {
-    console.log('[runner] API key provided — report generation enabled');
-  } else {
-    console.log('[runner] No API key — skipping step 5 (pass --key or set ANTHROPIC_API_KEY)');
-  }
+  if (key) console.log('[runner] API key provided — report generation enabled');
+  else      console.log('[runner] No API key — skipping report (pass --key or set ANTHROPIC_API_KEY)');
 
   // Start Vite dev server — publicDir set to test_data/ so videos are fetchable at /{dir}/file
   console.log('[runner] Starting Vite dev server...');
@@ -195,21 +150,16 @@ async function main() {
     root:      ROOT,
     publicDir: path.join(ROOT, 'test_data'),
     plugins:   [react()],
-    resolve: {
-      alias: {
-        '@mediapipe/pose': path.resolve(ROOT, 'src/stubs/mediapipe-pose-stub.ts'),
-      },
-    },
     server: {
-      port: 5174,
+      port:       5174,
       strictPort: false,
       fs: { allow: [ROOT, path.join(ROOT, 'test_data')] },
     },
     logLevel: 'warn',
   });
   await server.listen();
-  const port  = (server.httpServer?.address() as { port: number })?.port ?? 5174;
-  const base  = `http://localhost:${port}`;
+  const port = (server.httpServer?.address() as { port: number })?.port ?? 5174;
+  const base = `http://localhost:${port}`;
   console.log(`[runner] Vite server running at ${base}`);
 
   // Launch headless Chromium
@@ -217,26 +167,20 @@ async function main() {
   const context = await browser.newContext();
   const page    = await context.newPage();
 
-  // Forward browser console to Node stdout
-  page.on('console', msg => {
-    const type = msg.type();
-    const text = msg.text();
-    if (type === 'error') console.error(`  [browser] ${text}`);
-    else console.log(`  [browser] ${text}`);
-  });
+  page.on('console',   msg => console.log(`  [browser] ${msg.text()}`));
   page.on('pageerror', err => console.error(`  [browser error] ${err.message}`));
 
-  // Navigate to runner page and wait for it to be ready
   console.log('[runner] Loading pipeline runner page...');
   await page.goto(`${base}/src/runner/index.html`);
-  await page.waitForFunction(() => typeof (window as unknown as Record<string, unknown>).runPipeline === 'function', { timeout: 60_000 });
+  await page.waitForFunction(
+    () => typeof (window as unknown as Record<string, unknown>).runPipeline === 'function',
+    { timeout: 60_000 },
+  );
   console.log('[runner] Runner ready.\n');
 
-  // Run each test case
   for (const dir of testDirs) {
     const name   = path.basename(dir);
     const outDir = path.join(out, name);
-
     console.log(`─── ${name} ───────────────────────────────`);
     const t = Date.now();
 
@@ -251,31 +195,28 @@ async function main() {
       continue;
     }
 
+    if (result.error) {
+      console.error(`  ✗ ${result.error}`);
+      continue;
+    }
+
     await writeOutput(outDir, result);
 
-    // Print step summary
-    const s = result.steps;
-    const line = (label: string, step: { ok: boolean; ms: number; error: string | null } | null) => {
-      if (!step) return `  ${label}: skipped`;
-      if (step.ok) return `  ${label}: ✓ (${step.ms}ms)`;
-      return `  ${label}: ✗ — ${step.error}`;
-    };
-    console.log(line('1. Extraction',        s.extraction));
-    console.log(line('2. Phase selection',   s.phaseSelection));
-    console.log(line('3. Pose detection',    s.poseDetection));
-    console.log(line('4. Angle calc',        s.angleCalculation));
-    if (s.secondaryPipeline) console.log(line('3b. Secondary view', s.secondaryPipeline));
-    console.log(line('5. Report',            s.reportGeneration));
+    console.log(`  Frames extracted : ${result.allAnnotatedFrames.length}`);
+    console.log(`  Phase frames     : ${result.phaseFrames.map(f => f.phase.id).join(', ')}`);
+    if (result.secondary) {
+      console.log(`  Secondary frames : ${result.secondary.phaseFrames.map(f => f.phase.id).join(', ')}`);
+    }
 
-    const angles = result.steps.angleCalculation?.data?.aggregated;
-    if (angles && Object.keys(angles).length) {
+    if (Object.keys(result.aggregated).length) {
       console.log('  Angles:');
-      for (const [k, v] of Object.entries(angles)) {
+      for (const [k, v] of Object.entries(result.aggregated as Record<string, { avg: number; min: number; max: number; hitRate: number; lowConfidence?: boolean }>)) {
         console.log(`    ${k}: avg=${v.avg}° min=${v.min}° max=${v.max}° (${v.hitRate}% hit rate${v.lowConfidence ? ' ⚠ low confidence' : ''})`);
       }
     }
 
-    console.log(`  Total: ${Date.now() - t}ms  →  output written to ${outDir}\n`);
+    if (result.report) console.log('  Report: report.json');
+    console.log(`  Total: ${Date.now() - t}ms  →  ${outDir}\n`);
   }
 
   await browser.close();

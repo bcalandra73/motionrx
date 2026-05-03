@@ -1,16 +1,13 @@
 import type { ExtractedFrame, PhaseLabel } from "../types";
-import {
-  PHASE_MAPS,
-  LANDING_MOVEMENTS,
-  DENSE_FRAME_MOVEMENTS,
-} from "../data/phaseMaps";
+import { PHASE_MAPS, LANDING_MOVEMENTS } from "../data/phaseMaps";
+
+// ── Phase time calculation (used by non-gait phase selection) ─────────────────
 
 export interface PhaseTimeResult {
-  times: number[]; // proportional (0–1) positions within the video
+  times: number[];
   labels: PhaseLabel[];
 }
 
-// Pure function — no DOM, no side-effects. Fully unit testable.
 export function getPhaseTimes(movementType: string): PhaseTimeResult {
   let phases = PHASE_MAPS[movementType] ?? null;
 
@@ -104,7 +101,6 @@ export function getPhaseTimes(movementType: string): PhaseTimeResult {
     });
   }
 
-  // Clamp to [0.02, 0.97] and deduplicate times within 3%
   const clamped = expanded.map((t) => Math.max(0.02, Math.min(0.97, t)));
   const deduped: number[] = [];
   const dedupedLabels: Array<{ id: string; label: string; desc: string }> = [];
@@ -146,12 +142,36 @@ export function getPhaseTimes(movementType: string): PhaseTimeResult {
       desc: l.desc,
       fraction: times[i],
     }));
-
   return { times, labels };
 }
 
-// Seeks the video to `timeSeconds` and resolves with a base64 JPEG string,
-// or null if the seek times out or the canvas is empty.
+// ── Video element helpers ─────────────────────────────────────────────────────
+
+async function createVideoElement(file: File): Promise<HTMLVideoElement> {
+  const url = URL.createObjectURL(file);
+  const vid = document.createElement("video");
+  vid.src = url;
+  vid.muted = true;
+  vid.playsInline = true;
+  vid.style.cssText =
+    "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none";
+  document.body.appendChild(vid);
+  await new Promise<void>((resolve, reject) => {
+    vid.onloadedmetadata = () => resolve();
+    vid.onerror = () => reject(new Error("Video failed to load"));
+    vid.load();
+  });
+  (vid as HTMLVideoElement & { _objectUrl?: string })._objectUrl = url;
+  return vid;
+}
+
+function cleanupVideoElement(vid: HTMLVideoElement) {
+  const url = (vid as HTMLVideoElement & { _objectUrl?: string })._objectUrl;
+  if (url) URL.revokeObjectURL(url);
+  vid.src = "";
+  vid.remove();
+}
+
 export function captureFrameAtTime(
   videoEl: HTMLVideoElement,
   timeSeconds: number,
@@ -169,13 +189,30 @@ export function captureFrameAtTime(
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve(captureFrameFromVideo(videoEl));
+      try {
+        const w = videoEl.videoWidth || 640;
+        const h = videoEl.videoHeight || 480;
+        if (!w || !h) {
+          resolve(null);
+          return;
+        }
+        const scale = Math.min(1, 800 / Math.max(w, h));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(w * scale);
+        canvas.height = Math.round(h * scale);
+        canvas
+          .getContext("2d")!
+          .drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+        const b64 = canvas.toDataURL("image/jpeg", 0.82).split(",")[1];
+        resolve(b64 && b64.length > 300 ? b64 : null);
+      } catch {
+        resolve(null);
+      }
     };
 
     const onSeeked = () => {
       if (done) return;
       videoEl.removeEventListener("seeked", onSeeked);
-      // Double rAF ensures the new frame is painted before we draw to canvas
       requestAnimationFrame(() => requestAnimationFrame(doCapture));
     };
 
@@ -192,150 +229,25 @@ export function captureFrameAtTime(
   });
 }
 
-// Draws the current video frame to an offscreen canvas and returns a base64 JPEG.
-function captureFrameFromVideo(videoEl: HTMLVideoElement): string | null {
-  try {
-    const w = videoEl.videoWidth || 640;
-    const h = videoEl.videoHeight || 480;
-    if (!w || !h) return null;
-    const scale = Math.min(1, 800 / Math.max(w, h));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(w * scale);
-    canvas.height = Math.round(h * scale);
-    canvas
-      .getContext("2d")!
-      .drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-    const b64 = canvas.toDataURL("image/jpeg", 0.82).split(",")[1];
-    return b64 && b64.length > 300 ? b64 : null;
-  } catch {
-    return null;
-  }
-}
-
-// Creates a temporary, hidden <video> element from a File, loads the file,
-// waits for metadata, then tears down the element when the caller's promise resolves.
-async function createVideoElement(file: File): Promise<HTMLVideoElement> {
-  const url = URL.createObjectURL(file);
-  const vid = document.createElement("video");
-  vid.src = url;
-  vid.muted = true;
-  vid.playsInline = true;
-  vid.style.cssText =
-    "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none";
-  document.body.appendChild(vid);
-
-  await new Promise<void>((resolve, reject) => {
-    vid.onloadedmetadata = () => resolve();
-    vid.onerror = () => reject(new Error("Video failed to load"));
-    vid.load();
-  });
-
-  // Store the object URL on the element so we can revoke it later
-  (vid as HTMLVideoElement & { _objectUrl?: string })._objectUrl = url;
-  return vid;
-}
-
-function cleanupVideoElement(vid: HTMLVideoElement) {
-  const url = (vid as HTMLVideoElement & { _objectUrl?: string })._objectUrl;
-  if (url) URL.revokeObjectURL(url);
-  vid.src = "";
-  vid.remove();
-}
-
-export interface ExtractFramesOptions {
-  onProgress?: (percent: number, label: string) => void;
-}
+// ── Frame extraction ──────────────────────────────────────────────────────────
 
 export interface ExtractSequentialOptions {
-  startFraction?: number;
+  startSecs?: number;
+  durationSecs?: number;
+  targetFps?: number;
   onProgress?: (percent: number, label: string) => void;
-}
-
-function sequentialCaptureParams(movementType: string): { fps: number; windowSeconds: number } {
-  if (/running|gait|walk/i.test(movementType)) return { fps: 20, windowSeconds: 2 };
-  if (/squat|lunge|deadlift|hinge|drop.?jump|countermovement.?jump|single.?leg.?landing|tuck.?jump/i.test(movementType)) return { fps: 12, windowSeconds: 5 };
-  return { fps: 8, windowSeconds: 3 };
 }
 
 export async function extractFramesSequential(
   file: File,
-  movementType: string,
   options: ExtractSequentialOptions = {},
 ): Promise<ExtractedFrame[]> {
-  const { onProgress, startFraction = 0.05 } = options;
-  const vid = await createVideoElement(file);
-  try {
-    const dur = vid.duration;
-    if (!dur || !isFinite(dur)) throw new Error('Could not determine video duration.');
-
-    const { fps, windowSeconds } = sequentialCaptureParams(movementType);
-    const interval = 1 / fps;
-    const startTime = startFraction * dur;
-    const endTime = Math.min(startTime + windowSeconds, dur * 0.95);
-
-    const captureTimes: number[] = [];
-    for (let t = startTime; t <= endTime; t += interval) {
-      captureTimes.push(t);
-    }
-
-    const frames: ExtractedFrame[] = [];
-    for (let i = 0; i < captureTimes.length; i++) {
-      const t = captureTimes[i];
-      onProgress?.(Math.round((i / captureTimes.length) * 100), `Extracting frame ${i + 1} of ${captureTimes.length}`);
-      const imageData = await captureFrameAtTime(vid, t);
-      if (imageData) {
-        frames.push({
-          imageData,
-          phase: { id: 'dense', label: `Frame ${frames.length + 1}`, desc: '', fraction: t / dur },
-          timestamp: t,
-          index: frames.length,
-        });
-      }
-    }
-
-    onProgress?.(100, `Extracted ${frames.length} frames`);
-    return frames;
-  } finally {
-    cleanupVideoElement(vid);
-  }
-}
-
-// Captures one frame per entry at the given timestamps, reusing the phase labels
-// and indices from the primary video so secondary frames stay aligned.
-export async function extractFramesAtTimestamps(
-  file: File,
-  targets: Array<{ timestamp: number; phase: import('../types').PhaseLabel; index: number }>,
-  options: { onProgress?: (percent: number, label: string) => void } = {},
-): Promise<import('../types').ExtractedFrame[]> {
-  const { onProgress } = options;
-  const vid = await createVideoElement(file);
-  try {
-    const dur = vid.duration;
-    if (!dur || !isFinite(dur)) throw new Error('Could not determine video duration.');
-
-    const frames: import('../types').ExtractedFrame[] = [];
-    for (let i = 0; i < targets.length; i++) {
-      const { timestamp, phase, index } = targets[i];
-      const t = Math.min(timestamp, dur * 0.97);
-      onProgress?.(Math.round((i / targets.length) * 100), `Extracting frame ${i + 1} of ${targets.length}`);
-      const imageData = await captureFrameAtTime(vid, t);
-      frames.push({ imageData: imageData ?? '', phase, timestamp: t, index });
-    }
-
-    onProgress?.(100, `Extracted ${frames.length} frames`);
-    return frames;
-  } finally {
-    cleanupVideoElement(vid);
-  }
-}
-
-// Legacy uniform sampler — still used by the UI analysis hooks.
-export async function extractFrames(
-  file: File,
-  movementType: string,
-  options: ExtractFramesOptions = {},
-): Promise<ExtractedFrame[]> {
-  const { onProgress } = options;
+  const {
+    startSecs = 0,
+    durationSecs = 2,
+    targetFps = 30,
+    onProgress,
+  } = options;
   const vid = await createVideoElement(file);
 
   try {
@@ -343,43 +255,73 @@ export async function extractFrames(
     if (!dur || !isFinite(dur))
       throw new Error("Could not determine video duration.");
 
-    // Step 1 extracts a uniform dense sample — no phase mapping yet.
-    // Step 2 (phaseSelection) selects the final subset and assigns phase labels.
-    const denseCount = movementType === "Running" ? 128
-      : DENSE_FRAME_MOVEMENTS.has(movementType) ? 64
-      : 16;
+    const start = Math.min(startSecs, dur);
+    const end = Math.min(start + durationSecs, dur);
+    const interval = 1 / targetFps;
 
-    const captureTimes = Array.from(
-      { length: denseCount },
-      (_, i) => 0.03 + (i / (denseCount - 1)) * 0.94,
-    );
-    const captureLabels: PhaseLabel[] = captureTimes.map((t, i) => ({
-      id: "dense",
-      label: `Frame ${i + 1}`,
-      desc: "",
-      fraction: t,
-    }));
+    const captureTimes: number[] = [];
+    for (let t = start; t <= end; t += interval) captureTimes.push(t);
 
     const frames: ExtractedFrame[] = [];
-
+    let lastPrefix = '';
     for (let i = 0; i < captureTimes.length; i++) {
-      const t = captureTimes[i] * dur;
-      const label = captureLabels[i];
-
+      const t = captureTimes[i];
       onProgress?.(
         Math.round((i / captureTimes.length) * 100),
         `Extracting frame ${i + 1} of ${captureTimes.length}`,
       );
-
       const imageData = await captureFrameAtTime(vid, t);
-      if (imageData) {
-        frames.push({
-          imageData,
-          phase: label,
-          timestamp: t,
-          index: frames.length,
-        });
-      }
+      if (!imageData) continue;
+      // Skip if seek landed on the same decoded video frame as the previous capture.
+      // Sample from the middle of the data to avoid the identical JPEG header at the start.
+      const mid = Math.floor(imageData.length / 2);
+      const sample = imageData.slice(mid, mid + 256);
+      if (sample === lastPrefix) continue;
+      lastPrefix = sample;
+      frames.push({
+        imageData,
+        phase: {
+          id: "dense",
+          label: `Frame ${frames.length + 1}`,
+          desc: "",
+          fraction: t / dur,
+        },
+        timestamp: t,
+        index: frames.length,
+      });
+    }
+
+    onProgress?.(100, `Extracted ${frames.length} frames`);
+    return frames;
+  } finally {
+    cleanupVideoElement(vid);
+  }
+}
+
+// Extracts one frame per entry at the given timestamps, reusing phase labels
+// from the primary video so secondary frames stay aligned.
+export async function extractFramesAtTimestamps(
+  file: File,
+  targets: Array<{ timestamp: number; phase: PhaseLabel; index: number }>,
+  options: { onProgress?: (percent: number, label: string) => void } = {},
+): Promise<ExtractedFrame[]> {
+  const { onProgress } = options;
+  const vid = await createVideoElement(file);
+  try {
+    const dur = vid.duration;
+    if (!dur || !isFinite(dur))
+      throw new Error("Could not determine video duration.");
+
+    const frames: ExtractedFrame[] = [];
+    for (let i = 0; i < targets.length; i++) {
+      const { timestamp, phase, index } = targets[i];
+      const t = Math.min(timestamp, dur * 0.97);
+      onProgress?.(
+        Math.round((i / targets.length) * 100),
+        `Extracting frame ${i + 1} of ${targets.length}`,
+      );
+      const imageData = await captureFrameAtTime(vid, t);
+      frames.push({ imageData: imageData ?? "", phase, timestamp: t, index });
     }
 
     onProgress?.(100, `Extracted ${frames.length} frames`);

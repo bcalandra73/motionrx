@@ -7,6 +7,7 @@ interface Props {
   branding: Branding;
   annotatedFrames: AnnotatedFrame[];
   annotatedFrames2: AnnotatedFrame[];
+  gifData?: string | null;
   onNewAssessment: () => void;
   onSaveSession: () => void;
   onExportPdf: () => void;
@@ -96,7 +97,7 @@ function narrativeHtml(text: string) {
   return text.split('\n').filter(l => l.trim()).map(l => `<p>${l}</p>`).join('');
 }
 
-export function ResultsSection({ report, patient, branding, annotatedFrames, annotatedFrames2, onNewAssessment, onSaveSession, onExportPdf, onCompare }: Props) {
+export function ResultsSection({ report, patient, branding, annotatedFrames, annotatedFrames2, gifData, onNewAssessment, onSaveSession, onExportPdf, onCompare }: Props) {
   const now = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   const subtitle = [patient.patientName, patient.patientAge ? `Age ${patient.patientAge}` : '', patient.movementType, now].filter(Boolean).join(' · ');
   const practiceLabel = branding.practice || 'MotionRx';
@@ -133,9 +134,25 @@ export function ResultsSection({ report, patient, branding, annotatedFrames, ann
         </div>
       )}
 
-      {/* Frame slideshow */}
-      {annotatedFrames.length > 0 && (
-        <FrameSlideshow frames={annotatedFrames} frames2={annotatedFrames2} />
+      {/* Movement animation + frame slideshow */}
+      {(gifData || annotatedFrames.length > 0) && (
+        <div style={{ margin: '20px 0', display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          {gifData && (
+            <div style={{ flex: '0 0 auto', background: 'var(--navy-light)', borderRadius: 12, padding: '16px 20px', border: '1px solid var(--border)', minWidth: 200 }}>
+              <div style={{ fontWeight: 600, fontSize: '.82rem', color: 'var(--ink)', marginBottom: 10 }}>Movement Animation</div>
+              <img
+                src={`data:image/gif;base64,${gifData}`}
+                alt="Movement animation"
+                style={{ display: 'block', maxWidth: 320, maxHeight: 340, objectFit: 'contain', borderRadius: 8 }}
+              />
+            </div>
+          )}
+          {annotatedFrames.length > 0 && (
+            <div style={{ flex: 1, minWidth: 280 }}>
+              <FrameSlideshow frames={annotatedFrames} frames2={annotatedFrames2} />
+            </div>
+          )}
+        </div>
       )}
 
       {/* Main report grid */}

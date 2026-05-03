@@ -23,6 +23,7 @@ export interface VideoSlot {
   extractedFrames: ExtractedFrame[];
   annotatedFrames: AnnotatedFrame[];
   landmarks: NormalizedLandmark[][];
+  gifData: string | null;
   barTrackingFrames: ExtractedFrame[];
   rawBarPoints: Array<{ x: number; y: number; confidence: number; t: number }>;
 }
@@ -33,6 +34,7 @@ const defaultSlot = (view: CameraView): VideoSlot => ({
   extractedFrames: [],
   annotatedFrames: [],
   landmarks: [],
+  gifData: null,
   barTrackingFrames: [],
   rawBarPoints: [],
 });

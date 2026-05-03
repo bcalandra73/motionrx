@@ -20,14 +20,12 @@ import { useBranding } from './hooks/useBranding';
 import { useAutoSave } from './hooks/useAutoSave';
 import { useVideoAnalysis } from './hooks/useVideoAnalysis';
 import { usePROMs } from './hooks/usePROMs';
-import type { PatientFormData, JumpInvolvedLimb, JumpProtocol, JumpTimePostOp, Assessment, ExtractedFrame } from './types';
+import type { PatientFormData, JumpInvolvedLimb, JumpProtocol, JumpTimePostOp, Assessment } from './types';
 import { assessmentFromYaml } from './assessment';
 import { CAMERA_GUIDES } from './data/cameraGuides';
-import { extractFramesSequential, extractFramesAtTimestamps } from './pipeline/frameExtraction';
-import { annotateFrame } from './pipeline/frameAnnotation';
-import { selectPhaseFrames, isPhaseSelectionAdequate } from './pipeline/phaseSelection';
-import { initPoseLandmarker, detectPoseOnFrames } from './pipeline/poseDetection';
-import { mergeWorldLandmarks, extractAngles, aggregateAngles } from './pipeline/angleCalculation';
+import { extractFramesSequential } from './pipeline/frameExtraction';
+import { initPoseLandmarker } from './pipeline/poseDetection';
+import { runPrimaryAnalysis, runSecondaryAnalysis } from './pipeline/runAnalysis';
 import { buildReportPrompt } from './pipeline/reportGeneration';
 import { generateReport } from './api';
 
@@ -44,6 +42,9 @@ export default function App() {
   const [focusAreas, setFocusAreas]             = useState<string[]>([]);
   const [guideOpen, setGuideOpen]               = useState(false);
   const [enableLandmarkReview, setLandmarkReview] = useState(false);
+  const [startSecs, setStartSecs]               = useState(0);
+  const [durationSecs, setDurationSecs]         = useState(2);
+  const [targetFps, setTargetFps]               = useState(30);
   const caseInputRef = useRef<HTMLInputElement>(null);
 
   const isAnalyzing = ['extracting', 'detecting', 'analyzing'].includes(video.analysis.stage);
@@ -61,6 +62,11 @@ export default function App() {
     video.setPrimaryView(a.media.primary.cameraView);
     if (a.media.secondary) video.setSecondaryView(a.media.secondary.cameraView);
     setFocusAreas(a.focus);
+    if (a.capture) {
+      setStartSecs(a.capture.startSecs);
+      setDurationSecs(a.capture.durationSecs);
+      setTargetFps(a.capture.targetFps);
+    }
   }
 
   async function handleAnalyze() {
@@ -77,124 +83,68 @@ export default function App() {
     console.log('[Pipeline] Starting analysis —', movementType, video.primary.file.name);
 
     try {
-      // Steps 1 + 2: sequential extraction + phase selection with retry (mirrors runner logic)
-      let frames: ExtractedFrame[] = [];
-      let phaseFrames: ExtractedFrame[] = [];
+      // Step 1: Extract frames across the user-specified window
+      const t1 = performance.now();
+      const frames = await extractFramesSequential(video.primary.file, {
+        startSecs,
+        durationSecs,
+        targetFps,
+        onProgress: (pct, label) => video.setStage('extracting', label, pct),
+      });
+      console.log(`[Step 1 ✓] Extracted ${frames.length} frames in ${Math.round(performance.now() - t1)}ms`);
+      video.updatePrimary({ extractedFrames: frames });
 
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const startFrac = 0.05 + attempt * 0.2;
-        const t1 = performance.now();
-        frames = await extractFramesSequential(video.primary.file, movementType, {
-          startFraction: startFrac,
-          onProgress: (pct, label) => video.setStage('extracting', label, pct),
-        });
-        console.log(`[Step 1 ✓] Extracted ${frames.length} frames in ${Math.round(performance.now() - t1)}ms (offset ${Math.round(startFrac * 100)}%)`);
-        video.updatePrimary({ extractedFrames: frames });
-
-        video.setStage('detecting', 'Analysing movement phases...', 0);
-        const t2 = performance.now();
-        const candidate = await selectPhaseFrames(frames, movementType, {
-          cameraView,
-          onProgress: (pct, label) => video.setStage('detecting', label, pct),
-        });
-        console.log(`[Step 2] Attempt ${attempt + 1}: ${candidate.frames.length} frames in ${Math.round(performance.now() - t2)}ms`);
-        phaseFrames = candidate.frames;
-
-        if (isPhaseSelectionAdequate(candidate, movementType)) break;
-        console.log(`[Step 2] Attempt ${attempt + 1} insufficient quality, trying next window...`);
-      }
-
-      console.log(`[Step 2 ✓] ${phaseFrames.length} phase frames — phases: ${phaseFrames.map(f => f.phase.id).join(', ')}`);
-      video.updatePrimary({ extractedFrames: phaseFrames });
-
-      // Step 3: MediaPipe pose detection on selected frames
+      // Steps 2–4: MediaPipe on all frames, phase selection, annotation, angle calculation
       video.setStage('detecting', 'Initialising pose model...', 0);
-      const t3 = performance.now();
-      console.log('[Step 3] Initialising PoseLandmarker...');
+      const t2 = performance.now();
       const landmarker = await initPoseLandmarker();
-      console.log(`[Step 3] PoseLandmarker ready in ${Math.round(performance.now() - t3)}ms — detecting poses on ${phaseFrames.length} frames...`);
-      const poseResults = await detectPoseOnFrames(landmarker, phaseFrames, {
+      const primary = await runPrimaryAnalysis(frames, landmarker, {
+        movementType,
+        cameraView,
         onProgress: (pct, label) => video.setStage('detecting', label, pct),
       });
-      const detectedCount = poseResults.filter(r => (r.poseLandmarks?.length ?? 0) > 0).length;
-      console.log(`[Step 3 ✓] Pose detection done in ${Math.round(performance.now() - t3)}ms — ${detectedCount}/${poseResults.length} frames had landmarks`);
-      const annotatedBase64 = await Promise.all(
-        phaseFrames.map((f, i) => {
-          const lms = poseResults[i]?.poseLandmarks;
-          return lms?.length ? annotateFrame(f.imageData, lms) : Promise.resolve(f.imageData);
-        }),
-      );
+      console.log(`[Steps 2–4 ✓] ${Math.round(performance.now() - t2)}ms — ${primary.phaseFrames.length} phase frames: ${primary.phaseFrames.map(f => f.phase.id).join(', ')}`);
+
       video.updatePrimary({
-        landmarks: poseResults.map(r => r.poseLandmarks ?? []),
-        annotatedFrames: phaseFrames.map((f, i) => ({
-          base64:    annotatedBase64[i],
-          landmarks: poseResults[i]?.poseLandmarks ?? null,
+        extractedFrames: primary.phaseFrames,
+        landmarks: primary.poseResults.map(r => r.poseLandmarks ?? []),
+        gifData: primary.gifData,
+        annotatedFrames: primary.phaseFrames.map((f, i) => ({
+          base64:    primary.annotatedFrames[i],
+          landmarks: primary.poseResults[i]?.poseLandmarks ?? null,
           timestamp: f.timestamp,
           index:     f.index,
           phaseId:   f.phase.label,
         })),
       });
 
-      // Step 4: angle calculation
-      video.setStage('analyzing', 'Calculating joint angles...', 0);
-      const t4 = performance.now();
-      const allFrameAngles = poseResults.map(r =>
-        extractAngles(
-          mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
-          cameraView,
-          movementType,
-        ),
-      );
-      const aggregated = aggregateAngles(allFrameAngles, phaseFrames.map(f => f.phase));
-      console.log(`[Step 4 ✓] Angles calculated in ${Math.round(performance.now() - t4)}ms —`, aggregated);
-
       // Step 3b: Secondary pipeline — capture at primary timestamps so both videos stay in sync
-      let phaseFrames2: ExtractedFrame[] = [];
-      let aggregated2: typeof aggregated = {};
+      let secondary = null;
       if (video.secondary.file) {
         video.setStage('detecting', 'Extracting second camera angle...', 0);
-        const t3b = performance.now();
         const cameraView2 = (video.secondary.cameraView ?? 'front') as 'side' | 'front' | 'posterior';
         console.log('[Step 3b] Processing secondary video —', cameraView2);
         try {
-          phaseFrames2 = await extractFramesAtTimestamps(
-            video.secondary.file,
-            phaseFrames.map(f => ({ timestamp: f.timestamp, phase: f.phase, index: f.index })),
-            { onProgress: (pct, label) => video.setStage('detecting', label, pct) },
-          );
-          video.updateSecondary({ extractedFrames: phaseFrames2 });
-
-          const poseResults2 = await detectPoseOnFrames(landmarker, phaseFrames2, {
+          const t3b = performance.now();
+          secondary = await runSecondaryAnalysis(video.secondary.file, landmarker, primary.phaseFrames, {
+            movementType,
+            cameraView: cameraView2,
             onProgress: (pct, label) => video.setStage('detecting', label, pct),
           });
-          const allFrameAngles2 = poseResults2.map(r =>
-            extractAngles(
-              mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
-              cameraView2,
-              movementType,
-            ),
-          );
-          aggregated2 = aggregateAngles(allFrameAngles2, phaseFrames2.map(f => f.phase));
-          const annotatedBase64_2 = await Promise.all(
-            phaseFrames2.map((f, i) => {
-              const lms = poseResults2[i]?.poseLandmarks;
-              return lms?.length ? annotateFrame(f.imageData, lms) : Promise.resolve(f.imageData);
-            }),
-          );
           video.updateSecondary({
-            annotatedFrames: phaseFrames2.map((f, i) => ({
-              base64:    annotatedBase64_2[i],
-              landmarks: poseResults2[i]?.poseLandmarks ?? null,
+            extractedFrames: secondary.phaseFrames,
+            annotatedFrames: secondary.phaseFrames.map((f, i) => ({
+              base64:    secondary!.annotatedFrames[i],
+              landmarks: secondary!.poseResults[i]?.poseLandmarks ?? null,
               timestamp: f.timestamp,
               index:     f.index,
               phaseId:   f.phase.label,
             })),
           });
-          console.log(`[Step 3b ✓] Secondary pipeline done in ${Math.round(performance.now() - t3b)}ms —`, aggregated2);
+          console.log(`[Step 3b ✓] Secondary pipeline done in ${Math.round(performance.now() - t3b)}ms`);
         } catch (err2) {
           console.warn('[Step 3b] Secondary pipeline failed (non-critical):', err2);
-          phaseFrames2 = [];
-          aggregated2  = {};
+          secondary = null;
         }
       }
 
@@ -204,7 +154,7 @@ export default function App() {
       console.log('[Step 5] Building prompt and calling Claude API...');
       const isRunning = /running|gait|walk/i.test(movementType);
       const isJump    = /jump|landing/i.test(movementType);
-      const hasDualView = phaseFrames2.length > 0;
+      const hasDualView = (secondary?.phaseFrames.length ?? 0) > 0;
       const prompt = buildReportPrompt({
         patient:     form.form,
         movementType,
@@ -212,8 +162,8 @@ export default function App() {
         hasDualView,
         secondaryCameraView: video.secondary.cameraView as 'side' | 'front' | 'posterior',
         focusAreas,
-        aggregated,
-        aggregated2: hasDualView ? aggregated2 : undefined,
+        aggregated:  primary.aggregated,
+        aggregated2: hasDualView ? secondary!.aggregated : undefined,
         proms: {
           nprs:       proms.nprs,
           psfs:       proms.psfs,
@@ -223,16 +173,16 @@ export default function App() {
         },
         running: isRunning ? running.inputs : undefined,
         jump:    isJump    ? jump.inputs    : undefined,
-        frameCount:  phaseFrames.length,
-        frameCount2: hasDualView ? phaseFrames2.length : undefined,
+        frameCount:  primary.phaseFrames.length,
+        frameCount2: hasDualView ? secondary!.phaseFrames.length : undefined,
       });
 
-      console.log(`[Step 5] Prompt length: ${prompt.length} chars, sending ${phaseFrames.length} primary + ${phaseFrames2.length} secondary frames to Claude...`);
+      console.log(`[Step 5] Prompt length: ${prompt.length} chars, sending ${primary.phaseFrames.length} primary + ${secondary?.phaseFrames.length ?? 0} secondary frames to Claude...`);
       const report = await generateReport({
         apiKey,
         prompt,
-        frames:  phaseFrames,
-        frames2: phaseFrames2,
+        frames:  primary.phaseFrames,
+        frames2: secondary?.phaseFrames ?? [],
       });
       console.log(`[Step 5 ✓] Report received in ${Math.round(performance.now() - t5)}ms — score: ${report.score}, findings: ${report.findings?.length ?? 0}`);
       console.log(`[Pipeline ✓] Total time: ${Math.round(performance.now() - t0)}ms`);
@@ -330,6 +280,8 @@ export default function App() {
                 onSecondaryFile={video.setSecondaryFile} onSecondaryView={video.setSecondaryView}
                 onGuide={() => setGuideOpen(true)}
                 focusAreas={focusAreas} onFocusToggle={toggleFocus}
+                startSecs={startSecs} durationSecs={durationSecs} targetFps={targetFps}
+                onStartSecs={setStartSecs} onDurationSecs={setDurationSecs} onTargetFps={setTargetFps}
               />
             </div>
 
@@ -553,6 +505,7 @@ export default function App() {
             branding={branding.branding}
             annotatedFrames={video.primary.annotatedFrames}
             annotatedFrames2={video.secondary.annotatedFrames}
+            gifData={video.primary.gifData}
             onNewAssessment={video.reset}
             onSaveSession={() => {/* TODO */}}
             onExportPdf={() => {/* TODO */}}

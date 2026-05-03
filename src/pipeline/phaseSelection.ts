@@ -1,22 +1,5 @@
-/**
- * Phase selection — the step between frame extraction and MediaPipe pose detection.
- *
- * For running/gait:
- *   1. Coarse scan all dense frames with MoveNet (~8 ms/frame)
- *   2. GaitFSM finds stride events → selects 8 canonical phase frames
- *   3. MediaPipe Heavy then runs only on those 8 frames (not 64-128)
- *
- * For squats/deadlifts/landing:
- *   1. Quick scan the 8 extracted frames (MoveNet or MediaPipe)
- *   2. Smart relabeling: find true bottom/lockout by composite knee+hip score
- *
- * For everything else: pass through (frames already phase-targeted).
- */
-
-import * as poseDetection from '@tensorflow-models/pose-detection';
-import * as tf from '@tensorflow/tfjs';
-import '@tensorflow/tfjs-backend-cpu';
 import type { ExtractedFrame, NormalizedLandmark, PhaseLabel } from '../types';
+import type { PoseFrameResult } from './poseDetection';
 import { PHASE_MAPS } from '../data/phaseMaps';
 import { getPhaseTimes } from './frameExtraction';
 
@@ -27,26 +10,6 @@ type SparseLandmarks = (NormalizedLandmark | null)[];
 export interface SelectPhaseOptions {
   cameraView?: 'side' | 'front' | 'posterior';
   onProgress?: (pct: number, label: string) => void;
-}
-
-export interface MoveNetDiagnostics {
-  backend: string;
-  totalFrames: number;
-  detectedFrames: number;
-  perFrame: Array<{
-    frameIndex: number;
-    detected: boolean;
-    jointVisibility: {
-      lShoulder: number | null;
-      rShoulder: number | null;
-      lHip:      number | null;
-      rHip:      number | null;
-      lKnee:     number | null;
-      rKnee:     number | null;
-      lAnkle:    number | null;
-      rAnkle:    number | null;
-    };
-  }>;
 }
 
 export interface GaitFSMDiagnostics {
@@ -61,11 +24,7 @@ export interface GaitFSMDiagnostics {
   cycleStart: number;
   cycleEnd: number;
   icIsMin: boolean;
-  detectedEvents: Array<{
-    phaseId: string;
-    perFrameIndex: number;
-    proportion: number;
-  }>;
+  detectedEvents: Array<{ phaseId: string; perFrameIndex: number; proportion: number }>;
   signals: {
     proportions: number[];
     lAnkY: (number | null)[];
@@ -78,76 +37,7 @@ export interface GaitFSMDiagnostics {
 }
 
 export interface PhaseSelectionDiagnostics {
-  movenet: MoveNetDiagnostics | null;
   gaitFSM: GaitFSMDiagnostics | null;
-}
-
-// ── MoveNet keypoint → MediaPipe landmark index map ───────────────────────────
-// MoveNet: 0=nose, 5-6=shoulders, 7-8=elbows, 9-10=wrists,
-//          11-12=hips, 13-14=knees, 15-16=ankles
-const MOVENET_TO_MP: Record<number, number> = {
-  0: 0,
-  5: 11, 6: 12,
-  7: 13, 8: 14,
-  9: 15, 10: 16,
-  11: 23, 12: 24,
-  13: 25, 14: 26,
-  15: 27, 16: 28,
-};
-
-// ── MoveNet init ──────────────────────────────────────────────────────────────
-
-let _moveNetDetector: poseDetection.PoseDetector | null = null;
-
-export async function initMoveNet(): Promise<poseDetection.PoseDetector | null> {
-  if (_moveNetDetector) return _moveNetDetector;
-  try {
-    // Try GPU-accelerated backends; fall back to CPU in headless/server environments
-    let backendOk = false;
-    try { await tf.ready(); backendOk = true; } catch { /* GPU unavailable */ }
-    if (!backendOk) {
-      await tf.setBackend('cpu');
-      await tf.ready();
-    }
-    console.log('[MoveNet] Backend:', tf.getBackend());
-
-    _moveNetDetector = await poseDetection.createDetector(
-      poseDetection.SupportedModels.MoveNet,
-      { modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER, enableSmoothing: false },
-    );
-    return _moveNetDetector;
-  } catch (e) {
-    console.warn('[MoveNet] Init failed (non-critical):', e);
-    return null;
-  }
-}
-
-async function runMoveNetOnImage(
-  detector: poseDetection.PoseDetector,
-  img: HTMLImageElement,
-): Promise<poseDetection.Keypoint[] | null> {
-  try {
-    const poses = await detector.estimatePoses(img);
-    if (!poses?.length) return null;
-    return poses.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0].keypoints;
-  } catch {
-    return null;
-  }
-}
-
-function moveNetToNormalized(
-  keypoints: poseDetection.Keypoint[],
-  imgW: number,
-  imgH: number,
-): Record<number, NormalizedLandmark> {
-  const out: Record<number, NormalizedLandmark> = {};
-  keypoints.forEach((kp, i) => {
-    const mpIdx = MOVENET_TO_MP[i];
-    if (mpIdx !== undefined) {
-      out[mpIdx] = { x: kp.x / imgW, y: kp.y / imgH, z: 0, visibility: kp.score ?? 0 };
-    }
-  });
-  return out;
 }
 
 // ── Signal utilities ──────────────────────────────────────────────────────────
@@ -214,14 +104,13 @@ function applyTemporalSmoothing(allLandmarks: (SparseLandmarks | null)[]): (Spar
   const DT = 1.0 / 10;
   const MIN_CUTOFF = 1.5, BETA = 0.5, D_CUTOFF = 1.0;
 
-  const smoothed: (SparseLandmarks | null)[] = allLandmarks.map(lms => {
-    if (!lms) return null;
-    return lms.map(lm => lm ? { ...lm } : null);
-  });
+  const smoothed: (SparseLandmarks | null)[] = allLandmarks.map(lms =>
+    lms ? lms.map(lm => lm ? { ...lm } : null) : null,
+  );
 
   for (let li = 0; li < 33; li++) {
-    const xs = allLandmarks.map(f => f?.[li]?.x ?? null);
-    const ys = allLandmarks.map(f => f?.[li]?.y ?? null);
+    const xs  = allLandmarks.map(f => f?.[li]?.x ?? null);
+    const ys  = allLandmarks.map(f => f?.[li]?.y ?? null);
     const vis = allLandmarks.map(f => f?.[li]?.visibility ?? 0);
     if (xs.filter(v => v != null).length < 3) continue;
 
@@ -240,97 +129,6 @@ function applyTemporalSmoothing(allLandmarks: (SparseLandmarks | null)[]): (Spar
     }
   }
   return smoothed;
-}
-
-// ── Coarse scan ───────────────────────────────────────────────────────────────
-
-async function loadImage(base64: string): Promise<HTMLImageElement | null> {
-  return new Promise(resolve => {
-    const img = new Image();
-    const timer = setTimeout(() => resolve(null), 2000);
-    img.onload  = () => { clearTimeout(timer); resolve(img); };
-    img.onerror = () => { clearTimeout(timer); resolve(null); };
-    img.src = `data:image/jpeg;base64,${base64}`;
-  });
-}
-
-export async function coarseScanWithMoveNet(
-  detector: poseDetection.PoseDetector,
-  frames: ExtractedFrame[],
-  onProgress?: (pct: number, label: string) => void,
-): Promise<{ landmarks: (SparseLandmarks | null)[]; diag: MoveNetDiagnostics }> {
-  const rawResults: (SparseLandmarks | null)[] = [];
-  const perFrameDiag: MoveNetDiagnostics['perFrame'] = [];
-
-  // Decode all frames in parallel — image loading is pure async DOM work and
-  // doesn't compete with TF.js. This eliminates per-frame decode latency from
-  // the inference loop, which matters most on CPU where inference is slow.
-  onProgress?.(0, `Pre-loading ${frames.length} frames...`);
-  const imgs = await Promise.all(
-    frames.map(f => loadImage(f.imageData).catch(() => null)),
-  );
-
-  // Run inference sequentially — TF.js CPU backend is single-threaded.
-  for (let i = 0; i < frames.length; i++) {
-    onProgress?.(
-      Math.round((i / frames.length) * 100),
-      `Scanning for gait phases — frame ${i + 1} / ${frames.length}`,
-    );
-    let arr: SparseLandmarks | null = null;
-    let mnNorm: Record<number, NormalizedLandmark> = {};
-    const img = imgs[i];
-    if (img) {
-      try {
-        const kps = await Promise.race([
-          runMoveNetOnImage(detector, img),
-          new Promise<null>(r => setTimeout(() => r(null), 3000)),
-        ]);
-        if (kps) {
-          mnNorm = moveNetToNormalized(kps, img.width, img.height);
-          arr = Array.from({ length: 33 }, (_, idx) => mnNorm[idx] ?? null);
-        }
-      } catch (e) {
-        console.warn('[CoarseScan] Frame', i, 'error:', e);
-      }
-    }
-    rawResults.push(arr);
-    perFrameDiag.push({
-      frameIndex: i,
-      detected: arr !== null,
-      jointVisibility: {
-        lShoulder: mnNorm[11]?.visibility ?? null,
-        rShoulder: mnNorm[12]?.visibility ?? null,
-        lHip:      mnNorm[23]?.visibility ?? null,
-        rHip:      mnNorm[24]?.visibility ?? null,
-        lKnee:     mnNorm[25]?.visibility ?? null,
-        rKnee:     mnNorm[26]?.visibility ?? null,
-        lAnkle:    mnNorm[27]?.visibility ?? null,
-        rAnkle:    mnNorm[28]?.visibility ?? null,
-      },
-    });
-  }
-
-  const landmarks = applyTemporalSmoothing(rawResults);
-  const diag: MoveNetDiagnostics = {
-    backend: tf.getBackend(),
-    totalFrames: frames.length,
-    detectedFrames: rawResults.filter(r => r !== null).length,
-    perFrame: perFrameDiag,
-  };
-  return { landmarks, diag };
-}
-
-// ── GaitFSM — select 8 canonical phase frames from dense coarse scan ──────────
-
-interface PerFrameData {
-  fi: number;
-  t: number;
-  lAnkY: number | null; rAnkY: number | null;
-  lAnkX: number | null; rAnkX: number | null;
-  noseX: number | null;
-  lKnee: number | null; rKnee: number | null;
-  lHip:  number | null; rHip:  number | null;
-  hipMidX: number | null; hipMidY: number | null;
 }
 
 function smooth5(arr: (number | null)[]): (number | null)[] {
@@ -392,6 +190,18 @@ function argMaxR(arr: (number | null)[], from: number, to: number): number {
   return bi;
 }
 
+// ── GaitFSM ───────────────────────────────────────────────────────────────────
+
+interface PerFrameData {
+  fi: number; t: number;
+  lAnkY: number | null; rAnkY: number | null;
+  lAnkX: number | null; rAnkX: number | null;
+  noseX: number | null;
+  lKnee: number | null; rKnee: number | null;
+  lHip:  number | null; rHip:  number | null;
+  hipMidX: number | null; hipMidY: number | null;
+}
+
 export function runGaitFSM(
   coarseLandmarks: (SparseLandmarks | null)[],
   frames: ExtractedFrame[],
@@ -401,7 +211,6 @@ export function runGaitFSM(
   const v = (lms: SparseLandmarks | null, n: number) =>
     lms?.[n] && (lms[n]!.visibility ?? 0) > 0.18 ? lms[n]! : null;
 
-  // a) Per-frame kinematics
   const perFrame: PerFrameData[] = coarseLandmarks.map((lms, fi) => {
     if (!lms) return null as unknown as PerFrameData;
     const lH = v(lms, 23), lK = v(lms, 25), lA = v(lms, 27);
@@ -428,13 +237,10 @@ export function runGaitFSM(
     return {
       frames: frames.slice(0, 8),
       diag: {
-        refLeg: 'L' as const,
-        lVisFrames: 0, rVisFrames: 0,
+        refLeg: 'L', lVisFrames: 0, rVisFrames: 0,
         lContactPeaks: [], rContactPeaks: [],
-        ankleSignalWeak: false,
-        ankleWeight: 0.55, kneeWeight: 0.45,
-        cycleStart: 0, cycleEnd: 0,
-        icIsMin: false,
+        ankleSignalWeak: false, ankleWeight: 0.55, kneeWeight: 0.45,
+        cycleStart: 0, cycleEnd: 0, icIsMin: false,
         detectedEvents: [],
         signals: { proportions: [], lAnkY: [], rAnkY: [], lKnee: [], rKnee: [], lComp: [], rComp: [] },
       },
@@ -443,7 +249,6 @@ export function runGaitFSM(
   perFrame.sort((a, b) => a.t - b.t);
   const N = perFrame.length;
 
-  // b) Smooth signals
   const lAnkS  = smooth5(perFrame.map(f => f.lAnkY));
   const rAnkS  = smooth5(perFrame.map(f => f.rAnkY));
   const lKneeS = smooth5(perFrame.map(f => f.lKnee));
@@ -451,7 +256,6 @@ export function runGaitFSM(
   const lHipS  = smooth5(perFrame.map(f => f.lHip));
   const rHipS  = smooth5(perFrame.map(f => f.rHip));
 
-  // c) Composite contact signal
   const lAnkRange = (() => { const v2 = lAnkS.filter(x => x != null) as number[]; return v2.length > 1 ? Math.max(...v2) - Math.min(...v2) : 0; })();
   const rAnkRange = (() => { const v2 = rAnkS.filter(x => x != null) as number[]; return v2.length > 1 ? Math.max(...v2) - Math.min(...v2) : 0; })();
   const ankWeak = (lAnkRange + rAnkRange) / 2 < 0.04;
@@ -474,7 +278,6 @@ export function runGaitFSM(
   })();
   const minProm = Math.max(0.08, compRange * 0.15);
 
-  // d) REF leg — pick whichever has more contact events
   const lContacts = localMaxima(lComp, minProm);
   const rContacts = localMaxima(rComp, minProm);
   const lVis = lAnkS.filter(v => v != null).length;
@@ -490,7 +293,6 @@ export function runGaitFSM(
   const refC     = REF === 'L' ? lContacts : rContacts;
   const oppC     = REF === 'L' ? rContacts : lContacts;
 
-  // e) Facing direction (nose relative to hip midpoint)
   const noseDisps = perFrame.map(f => {
     const nx = f.noseX, hx = f.hipMidX;
     return nx != null && hx != null ? nx - hx : null;
@@ -505,9 +307,8 @@ export function runGaitFSM(
     return icIsMin ? -(ax - f.hipMidX) : (ax - f.hipMidX);
   }));
 
-  // f) Stride cycle bounds
   let cycleStart: number, cycleEnd: number;
-  if (refC.length >= 2) { cycleStart = refC[0]; cycleEnd = refC[1]; }
+  if (refC.length >= 2)     { cycleStart = refC[0]; cycleEnd = refC[1]; }
   else if (refC.length === 1) {
     cycleStart = Math.max(0, refC[0] - 1);
     cycleEnd   = Math.min(N - 1, refC[0] + Math.round(N * 0.7));
@@ -515,9 +316,7 @@ export function runGaitFSM(
   const cycleLen = Math.max(2, cycleEnd - cycleStart);
   const r0 = cycleStart;
 
-  // g) Detect phase events within cycle
   const refLoadingIdx = r0;
-
   const icSt = Math.max(0, r0 - Math.round(cycleLen * 0.18));
   const icEd = Math.max(icSt + 1, r0 - Math.round(cycleLen * 0.01));
   let refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.08));
@@ -576,7 +375,6 @@ export function runGaitFSM(
     ? argMinR(oppHipS, oppLswSt, oppLswEd)
     : Math.min(N - 1, r0 + Math.round(cycleLen * 0.78));
 
-  // h) Build timeline with detected events
   const timeline: Array<{ i: number; phaseId: string }> = [
     { i: refContactIdx,  phaseId: 'contact' },
     { i: refLoadingIdx,  phaseId: 'loading' },
@@ -588,7 +386,6 @@ export function runGaitFSM(
     { i: oppToeoffIdx,   phaseId: 'lateswing' },
   ];
 
-  // i) Select 8 gallery frames — one per canonical phase window
   const runningPhases = PHASE_MAPS['Running'] ?? [];
   const phaseOrder = runningPhases.map(p => p.id);
   const eventIndexMap: Record<string, number> = {};
@@ -597,7 +394,7 @@ export function runGaitFSM(
   const cycleFrameN = cycleEnd - cycleStart + 1;
   const usedFisGal = new Set<number>();
   const dedupedFrames: ExtractedFrame[] = [];
-  let minLi = 0; // enforce forward-only frame selection across phases
+  let minLi = 0;
 
   for (let pi = 0; pi < runningPhases.length && dedupedFrames.length < 8; pi++) {
     const ph = runningPhases[pi];
@@ -616,7 +413,6 @@ export function runGaitFSM(
       idealLi = cycleStart + Math.round(((ph.time + (nextPh?.time ?? 1.0)) / 2) * cycleFrameN);
     }
 
-    // Clamp search floor to minLi so frames never go backwards.
     const effectiveFMin = Math.max(fMin, minLi);
 
     let candidates = perFrame
@@ -651,23 +447,16 @@ export function runGaitFSM(
     dedupedFrames.push({ ...frames[best.fd.fi], phase: phLabel });
   }
 
-  // Sort by canonical phase order
   dedupedFrames.sort((a, b) =>
     phaseOrder.indexOf(a.phase?.id ?? '') - phaseOrder.indexOf(b.phase?.id ?? ''),
   );
 
   const diag: GaitFSMDiagnostics = {
     refLeg: REF,
-    lVisFrames: lVis,
-    rVisFrames: rVis,
-    lContactPeaks: lContacts,
-    rContactPeaks: rContacts,
-    ankleSignalWeak: ankWeak,
-    ankleWeight: wA,
-    kneeWeight: wK,
-    cycleStart,
-    cycleEnd,
-    icIsMin,
+    lVisFrames: lVis, rVisFrames: rVis,
+    lContactPeaks: lContacts, rContactPeaks: rContacts,
+    ankleSignalWeak: ankWeak, ankleWeight: wA, kneeWeight: wK,
+    cycleStart, cycleEnd, icIsMin,
     detectedEvents: timeline.map(ev => ({
       phaseId: ev.phaseId,
       perFrameIndex: ev.i,
@@ -675,12 +464,9 @@ export function runGaitFSM(
     })),
     signals: {
       proportions: perFrame.map(f => f.t),
-      lAnkY: lAnkS,
-      rAnkY: rAnkS,
-      lKnee: lKneeS,
-      rKnee: rKneeS,
-      lComp,
-      rComp,
+      lAnkY: lAnkS, rAnkY: rAnkS,
+      lKnee: lKneeS, rKnee: rKneeS,
+      lComp, rComp,
     },
   };
   return { frames: dedupedFrames.slice(0, 8), diag };
@@ -696,7 +482,6 @@ export function runSmartPhaseRelabeling(
   const isFlexion = /squat|lunge|sit/i.test(movementType);
   const isHinge   = /deadlift|hinge/i.test(movementType);
   const isLanding = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movementType);
-
   if (!isFlexion && !isHinge && !isLanding) return frames;
 
   const v = (lms: SparseLandmarks | null, n: number) =>
@@ -729,10 +514,7 @@ export function runSmartPhaseRelabeling(
   });
 
   let bestIdx = -1, bestVal = -Infinity;
-  scores.forEach(({ i, score }) => {
-    if (score != null && score > bestVal) { bestVal = score; bestIdx = i; }
-  });
-
+  scores.forEach(({ i, score }) => { if (score != null && score > bestVal) { bestVal = score; bestIdx = i; } });
   if (bestIdx < 0) return frames;
 
   const result = frames.map(f => ({ ...f }));
@@ -746,10 +528,9 @@ export function runSmartPhaseRelabeling(
   } else if (canonIdx === -1) {
     result[bestIdx] = {
       ...result[bestIdx],
-      phase: { id: targetId, label: isHinge ? 'Lockout' : 'Peak Flexion', desc: `Detected via pose score`, fraction: result[bestIdx].phase.fraction },
+      phase: { id: targetId, label: isHinge ? 'Lockout' : 'Peak Flexion', desc: 'Detected via pose score', fraction: result[bestIdx].phase.fraction },
     };
   }
-
   return result;
 }
 
@@ -757,15 +538,22 @@ export function runSmartPhaseRelabeling(
 
 export async function selectPhaseFrames(
   frames: ExtractedFrame[],
+  poseResults: PoseFrameResult[],
   movementType: string,
   options: SelectPhaseOptions = {},
 ): Promise<{ frames: ExtractedFrame[]; diag: PhaseSelectionDiagnostics | null }> {
   const { cameraView = 'side', onProgress } = options;
-  const isGait = /running|gait|walk/i.test(movementType);
+  const isGait      = /running|gait|walk/i.test(movementType);
   const needsRelabel = /squat|lunge|sit|deadlift|hinge|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movementType);
 
+  // Convert MediaPipe results to the sparse landmark format GaitFSM expects.
+  // Landmarks are already in MediaPipe 33-point format — no index remapping needed.
+  const sparseLandmarks: (SparseLandmarks | null)[] = poseResults.map(r =>
+    r.poseLandmarks ? r.poseLandmarks.map(lm => ({ ...lm })) : null,
+  );
+  const smoothed = applyTemporalSmoothing(sparseLandmarks);
+
   if (!isGait && !needsRelabel) {
-    // Map dense frames to phase-targeted frames by nearest timestamp proportion.
     const { times, labels } = getPhaseTimes(movementType);
     const used = new Set<number>();
     const selected = labels.map((phaseLabel, idx) => {
@@ -782,51 +570,21 @@ export async function selectPhaseFrames(
     return { frames: selected, diag: null };
   }
 
-  onProgress?.(0, 'Initialising coarse scan model...');
-  const detector = await initMoveNet();
-
   if (isGait) {
-    if (!detector) {
-      console.warn('[PhaseSelection] MoveNet unavailable — using 16-frame subsample');
-      const step = Math.max(1, Math.floor(frames.length / 16));
-      const fallbackFrames = frames.filter((_, i) => i % step === 0).slice(0, 16);
-      onProgress?.(100, `Phase selection complete — ${fallbackFrames.length} frames (MoveNet unavailable)`);
-      return { frames: fallbackFrames, diag: null };
-    }
-
+    onProgress?.(0, 'Selecting gait phase frames...');
     const proportions = frames.map((_, i) => i / Math.max(1, frames.length - 1));
-    const { landmarks: coarse, diag: moveNetDiag } = await coarseScanWithMoveNet(detector, frames, (pct, label) => {
-      onProgress?.(Math.round(pct * 0.9), label);
-    });
-    onProgress?.(90, 'Running GaitFSM frame selection...');
-    const { frames: selected, diag: gaitDiag } = runGaitFSM(coarse, frames, proportions, cameraView);
+    const { frames: selected, diag: gaitDiag } = runGaitFSM(smoothed, frames, proportions, cameraView);
     onProgress?.(100, `Selected ${selected.length} phase frames`);
-    return { frames: selected, diag: { movenet: moveNetDiag, gaitFSM: gaitDiag } };
+    return { frames: selected, diag: { gaitFSM: gaitDiag } };
   }
 
-  // Non-gait smart relabeling: coarse scan all frames
-  let moveNetDiag: MoveNetDiagnostics | null = null;
-  let coarse: (SparseLandmarks | null)[];
-  if (detector) {
-    const result = await coarseScanWithMoveNet(detector, frames, (pct, label) => {
-      onProgress?.(Math.round(pct * 0.9), label);
-    });
-    coarse = result.landmarks;
-    moveNetDiag = result.diag;
-  } else {
-    coarse = frames.map(() => null);
-  }
-
-  onProgress?.(90, 'Detecting peak flexion / lockout frame...');
-
-  // Detect which dense frame is the true bottom / lockout.
-  const relabeled = runSmartPhaseRelabeling(coarse, frames, movementType);
+  // Non-gait smart relabeling
+  onProgress?.(0, 'Detecting peak flexion / lockout frame...');
+  const relabeled = runSmartPhaseRelabeling(smoothed, frames, movementType);
   const targetId = /deadlift|hinge/i.test(movementType) ? 'lockout' : 'bottom';
   const detectedIdx = relabeled.findIndex(f => f.phase.id === targetId);
   const keyFrame = detectedIdx >= 0 ? relabeled[detectedIdx] : null;
 
-  // Map all phase slots to nearest dense frames, forcing the detected frame
-  // into the key phase slot.
   const { times, labels } = getPhaseTimes(movementType);
   const used = new Set<number>();
   if (detectedIdx >= 0) used.add(detectedIdx);
@@ -845,7 +603,7 @@ export async function selectPhaseFrames(
   });
 
   onProgress?.(100, `Selected ${selected.length} phase frames`);
-  return { frames: selected, diag: { movenet: moveNetDiag, gaitFSM: null } };
+  return { frames: selected, diag: null };
 }
 
 export function isPhaseSelectionAdequate(

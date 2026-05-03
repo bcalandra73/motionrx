@@ -7,6 +7,7 @@
 
 import type {
   Assessment,
+  AssessmentCapture,
   MovementType,
   CameraView,
   HeightUnit,
@@ -125,6 +126,16 @@ export function assessmentFromYaml(raw: YamlObject): Assessment {
 
   // ── focus areas ───────────────────────────────────────────────────────────
   base.focus = arr(raw.focus).map(v => str(v as YamlValue)).filter(Boolean);
+
+  // ── capture settings ──────────────────────────────────────────────────────
+  if (media.capture != null) {
+    const c = obj(media.capture);
+    base.capture = {
+      startSecs:    num(c.start,    0),
+      durationSecs: num(c.duration, 2),
+      targetFps:    num(c.fps,      5),
+    } satisfies AssessmentCapture;
+  }
 
   // ── running ───────────────────────────────────────────────────────────────
   if (raw.running != null) {

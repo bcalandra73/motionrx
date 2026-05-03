@@ -21,7 +21,7 @@ export function LoadingState({ stage, label }: Props) {
     <div id="loadingState" style={{ display: 'block', padding: '60px 24px', textAlign: 'center' }}>
       <div className="spinner" />
       <div className="loading-title">Generating Assessment Report</div>
-      <div className="loading-sub">MoveNet selects key phase frames, MediaPipe measures joint angles, then Claude AI generates your clinical report</div>
+      <div className="loading-sub">MediaPipe detects poses on every frame, GaitFSM selects key phase frames, then Claude AI generates your clinical report</div>
       <div className="step-list">
         {STEPS.map((step, i) => {
           const stepIdx = STAGE_ORDER.indexOf(step.id);

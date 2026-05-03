@@ -1,118 +1,89 @@
 /**
  * Browser-side pipeline runner.
- * Exposes window.runPipeline(input) which the Playwright script calls via page.evaluate().
- * Each pipeline step is wrapped in a try/catch so partial results are always returned.
+ * Exposes window.runPipeline(input) which Playwright calls via page.evaluate().
  */
 
-import { load as parseYaml } from 'js-yaml';
-import { extractFramesSequential, extractFramesAtTimestamps } from '../pipeline/frameExtraction';
-import { selectPhaseFrames, isPhaseSelectionAdequate } from '../pipeline/phaseSelection';
-import { initPoseLandmarker, detectPoseOnFrames, buildMediaPipeDiagnostics } from '../pipeline/poseDetection';
-import type { MediaPipeDiagnostics } from '../pipeline/poseDetection';
-import type { MoveNetDiagnostics, GaitFSMDiagnostics } from '../pipeline/phaseSelection';
+import { load as parseYaml } from "js-yaml";
+import { extractFramesSequential } from "../pipeline/frameExtraction";
+import { initPoseLandmarker } from "../pipeline/poseDetection";
 import {
-  mergeWorldLandmarks,
-  extractAngles,
-  aggregateAngles,
-} from '../pipeline/angleCalculation';
-import type { AngleStat } from '../pipeline/angleCalculation';
-import { annotateFrame } from '../pipeline/frameAnnotation';
-import { buildReportPrompt } from '../pipeline/reportGeneration';
-import { generateReport } from '../api';
-import { assessmentFromYaml } from '../assessment';
-import type { Assessment } from '../types';
-import type { PoseLandmarker } from '@mediapipe/tasks-vision';
+  runPrimaryAnalysis,
+  runSecondaryAnalysis,
+} from "../pipeline/runAnalysis";
+import type {
+  PrimaryAnalysisResult,
+  SecondaryAnalysisResult,
+} from "../pipeline/runAnalysis";
+import { buildReportPrompt } from "../pipeline/reportGeneration";
+import { generateReport } from "../api";
+import { assessmentFromYaml } from "../assessment";
+import type { Assessment, ExtractedFrame } from "../types";
+import type { PoseLandmarker } from "@mediapipe/tasks-vision";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface RunnerInput {
-  dir:        string;   // e.g. "test_1" — fetched from /test_data via publicDir
-  apiKey?:    string;   // optional; step 5 skipped if absent
-}
-
-interface StepResult<T> {
-  ok:    boolean;
-  ms:    number;
-  data:  T | null;
-  error: string | null;
-}
-
-interface FrameData {
-  index:     number;
-  timestamp: number;
-  phase:     { id: string; label: string; desc: string; fraction: number };
-  imageData: string; // base64 JPEG
+  dir: string;
+  apiKey?: string;
+  startSecs?: number;
+  durationSecs?: number;
+  targetFps?: number;
 }
 
 export interface RunnerOutput {
-  dir:               string;
-  movementType:      string;
-  cameraView:        string;
+  dir: string;
+  movementType: string;
+  cameraView: string;
   secondaryCameraView?: string;
-  patient: {
-    name:      string;
-    age:       number | string;
-    complaint: string;
-  };
-  steps: {
-    extraction:        StepResult<{ frameCount: number; frames: FrameData[] }>;
-    phaseSelection:    StepResult<{ frameCount: number; phases: string[]; frames: FrameData[] }>;
-    poseDetection:     StepResult<{ detectedCount: number; totalCount: number; perFrameAngles: Record<string, number>[]; annotatedFrames: string[] }>;
-    angleCalculation:  StepResult<{ aggregated: Record<string, AngleStat> }>;
-    secondaryPipeline: StepResult<{ frameCount: number; phases: string[]; frames: FrameData[]; aggregated: Record<string, AngleStat>; annotatedFrames: string[]; pairedFrames: string[] }> | null;
-    reportGeneration:  StepResult<{ prompt: string; report: unknown }> | null;
-  };
-  diagnostics: {
-    primary: {
-      movenet:   MoveNetDiagnostics | null;
-      gaitFSM:   GaitFSMDiagnostics | null;
-      mediapipe: MediaPipeDiagnostics | null;
-    };
-    secondary: {
-      movenet:   MoveNetDiagnostics | null;
-      gaitFSM:   GaitFSMDiagnostics | null;
-      mediapipe: MediaPipeDiagnostics | null;
-    } | null;
-  };
+  patient: { name: string; age: number | string; complaint: string };
+  phaseFrames: FrameData[];
+  annotatedFrames: string[];       // phase-selected (for report)
+  allAnnotatedFrames: string[];    // every frame with wireframe + counter
+  gif: string | null;
+  aggregated: Record<string, unknown>;
+  secondary: SecondaryOutput | null;
+  report: unknown | null;
+  prompt: string | null;
+  error: string | null;
 }
 
-// ── Landmarker singleton ──────────────────────────────────────────────────────
-// Persists across runPipeline() calls so subsequent test cases skip init.
+interface SecondaryOutput {
+  phaseFrames: FrameData[];
+  annotatedFrames: string[];
+  pairedFrames: string[];
+  aggregated: Record<string, unknown>;
+}
 
-let _landmarker: PoseLandmarker | null = null;
-
-async function getLandmarker(): Promise<PoseLandmarker> {
-  if (!_landmarker) _landmarker = await initPoseLandmarker();
-  return _landmarker;
+interface FrameData {
+  index: number;
+  timestamp: number;
+  phase: { id: string; label: string };
+  imageData: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function status(msg: string) {
-  const el = document.getElementById('status');
+  const el = document.getElementById("status");
   if (el) el.textContent = msg;
-  console.log('[Runner]', msg);
-}
-
-function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; value: T }> {
-  const t = performance.now();
-  return fn().then(value => ({ ms: Math.round(performance.now() - t), value }));
+  console.log("[Runner]", msg);
 }
 
 async function fetchVideoFile(dir: string, filename: string): Promise<File> {
   const res = await fetch(`/${dir}/${filename}`);
-  if (!res.ok) throw new Error(`Could not fetch /${dir}/${filename} (${res.status})`);
+  if (!res.ok)
+    throw new Error(`Could not fetch /${dir}/${filename} (${res.status})`);
   const blob = await res.blob();
-  return new File([blob], filename, { type: blob.type || 'video/quicktime' });
+  return new File([blob], filename, { type: blob.type || "video/quicktime" });
 }
 
 async function fetchAssessment(dir: string): Promise<Assessment> {
   const res = await fetch(`/${dir}/test.yaml`);
-  if (!res.ok) throw new Error(`Could not fetch /${dir}/test.yaml (${res.status})`);
+  if (!res.ok)
+    throw new Error(`Could not fetch /${dir}/test.yaml (${res.status})`);
   const raw = parseYaml(await res.text()) as Record<string, unknown>;
   return assessmentFromYaml(raw);
 }
-
 
 async function compositeSideBySide(
   img1: string,
@@ -121,55 +92,48 @@ async function compositeSideBySide(
   view1: string,
   view2: string,
 ): Promise<string> {
-  return new Promise(resolve => {
-    const i1 = new Image(), i2 = new Image();
+  return new Promise((resolve) => {
+    const i1 = new Image(),
+      i2 = new Image();
     let loaded = 0;
     const onLoad = () => {
       if (++loaded < 2) return;
       const LABEL_H = 32;
       const W = i1.width + i2.width;
       const H = Math.max(i1.height, i2.height) + LABEL_H;
-      const canvas = document.createElement('canvas');
-      canvas.width  = W;
+      const canvas = document.createElement("canvas");
+      canvas.width = W;
       canvas.height = H;
-      const ctx = canvas.getContext('2d')!;
-
-      // Background
-      ctx.fillStyle = '#0d1117';
+      const ctx = canvas.getContext("2d")!;
+      ctx.fillStyle = "#0d1117";
       ctx.fillRect(0, 0, W, H);
-
-      // Frames
       ctx.drawImage(i1, 0, 0);
       ctx.drawImage(i2, i1.width, 0);
-
-      // Divider
-      ctx.strokeStyle = '#0e7c6a';
+      ctx.strokeStyle = "#0e7c6a";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(i1.width, 0);
       ctx.lineTo(i1.width, H - LABEL_H);
       ctx.stroke();
-
-      // Label bar
-      ctx.fillStyle = '#0e7c6a';
+      ctx.fillStyle = "#0e7c6a";
       ctx.fillRect(0, H - LABEL_H, W, LABEL_H);
-
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 13px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 13px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       const mid = H - LABEL_H / 2;
       ctx.fillText(label, W / 2, mid);
-
-      // View labels
-      ctx.font = '11px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.7)";
+      ctx.textAlign = "left";
       ctx.fillText(view1, 8, mid);
-      ctx.textAlign = 'right';
+      ctx.textAlign = "right";
       ctx.fillText(view2, W - 8, mid);
-
-      resolve(canvas.toDataURL('image/jpeg', 0.88).replace('data:image/jpeg;base64,', ''));
+      resolve(
+        canvas
+          .toDataURL("image/jpeg", 0.88)
+          .replace("data:image/jpeg;base64,", ""),
+      );
     };
     i1.onload = onLoad;
     i2.onload = onLoad;
@@ -180,13 +144,21 @@ async function compositeSideBySide(
   });
 }
 
-function toFrameData(frames: { index: number; timestamp: number; phase: { id: string; label: string; desc: string; fraction: number }; imageData: string }[]): FrameData[] {
-  return frames.map(f => ({
-    index:     f.index,
+function toFrameData(frames: ExtractedFrame[]): FrameData[] {
+  return frames.map((f) => ({
+    index: f.index,
     timestamp: f.timestamp,
-    phase:     f.phase,
+    phase: { id: f.phase.id, label: f.phase.label },
     imageData: f.imageData,
   }));
+}
+
+// ── Landmarker singleton ──────────────────────────────────────────────────────
+
+let _landmarker: PoseLandmarker | null = null;
+async function getLandmarker() {
+  if (!_landmarker) _landmarker = await initPoseLandmarker();
+  return _landmarker;
 }
 
 // ── Main runner ───────────────────────────────────────────────────────────────
@@ -194,271 +166,161 @@ function toFrameData(frames: { index: number; timestamp: number; phase: { id: st
 async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
   const { dir, apiKey } = input;
 
-  status(`[${dir}] Loading test config...`);
-  const assessment  = await fetchAssessment(dir);
-  const movementType = assessment.patient.movementType || 'Running';
-  const cameraView   = assessment.media.primary.cameraView;
+  status(`[${dir}] Loading config...`);
+  const assessment = await fetchAssessment(dir);
 
+  // Precedence: RunnerInput args > YAML capture block > hardcoded defaults
+  const startSecs    = input.startSecs    ?? assessment.capture?.startSecs    ?? 0;
+  const durationSecs = input.durationSecs ?? assessment.capture?.durationSecs ?? 2;
+  const targetFps    = input.targetFps    ?? assessment.capture?.targetFps    ?? 5;
+  const movementType = assessment.patient.movementType || "Running";
+  const cameraView = assessment.media.primary.cameraView;
   const secondaryMeta = assessment.media.secondary;
-  const secondaryCameraView = secondaryMeta?.cameraView;
 
   const output: RunnerOutput = {
     dir,
     movementType,
     cameraView,
-    secondaryCameraView,
+    secondaryCameraView: secondaryMeta?.cameraView,
     patient: {
-      name:      assessment.patient.name,
-      age:       assessment.patient.age,
+      name: assessment.patient.name,
+      age: assessment.patient.age,
       complaint: assessment.patient.diagnosis,
     },
-    steps: {
-      extraction:       { ok: false, ms: 0, data: null, error: null },
-      phaseSelection:   { ok: false, ms: 0, data: null, error: null },
-      poseDetection:    { ok: false, ms: 0, data: null, error: null },
-      angleCalculation: { ok: false, ms: 0, data: null, error: null },
-      secondaryPipeline: secondaryMeta ? { ok: false, ms: 0, data: null, error: null } : null,
-      reportGeneration: null,
-    },
-    diagnostics: {
-      primary:   { movenet: null, gaitFSM: null, mediapipe: null },
-      secondary: secondaryMeta ? { movenet: null, gaitFSM: null, mediapipe: null } : null,
-    },
+    phaseFrames: [],
+    annotatedFrames: [],
+    allAnnotatedFrames: [],
+    gif: null,
+    aggregated: {},
+    secondary: null,
+    report: null,
+    prompt: null,
+    error: null,
   };
 
-  // ── Steps 1 + 2: Frame extraction + phase selection (with retry) ─────────
-
-  status(`[${dir}] Step 1 — extracting frames...`);
   try {
+    status(`[${dir}] Step 1 — extracting frames...`);
     const videoFile = await fetchVideoFile(dir, assessment.media.primary.file);
+    const frames = await extractFramesSequential(videoFile, {
+      startSecs,
+      durationSecs,
+      targetFps,
+    });
+    status(`[${dir}] Step 1 ✓ — ${frames.length} frames`);
 
-    let frames: import('../types').ExtractedFrame[] = [];
-    let phaseResult: Awaited<ReturnType<typeof selectPhaseFrames>> | null = null;
-    let extractionMs = 0, phaseMs = 0;
+    status(`[${dir}] Steps 2–4 — detection, phase selection, angles...`);
+    const landmarker = await getLandmarker();
+    const primary: PrimaryAnalysisResult = await runPrimaryAnalysis(
+      frames,
+      landmarker,
+      { movementType, cameraView },
+    );
+    output.phaseFrames = toFrameData(primary.phaseFrames);
+    output.annotatedFrames = primary.annotatedFrames;
+    output.allAnnotatedFrames = primary.allAnnotatedFrames;
+    output.gif = primary.gifData;
+    output.aggregated = primary.aggregated as Record<string, unknown>;
+    status(
+      `[${dir}] Steps 2–4 ✓ — ${primary.phaseFrames.length} phase frames: ${primary.phaseFrames.map((f) => f.phase.id).join(", ")}`,
+    );
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const startFrac = 0.05 + attempt * 0.2;
-      const t1 = performance.now();
-      frames = await extractFramesSequential(videoFile, movementType, { startFraction: startFrac });
-      extractionMs = Math.round(performance.now() - t1);
-      status(`[${dir}] Step 1 ✓ — ${frames.length} frames in ${extractionMs}ms (offset ${Math.round(startFrac * 100)}%)`);
-
-      status(`[${dir}] Step 2 — selecting phase frames...`);
-      const t2 = performance.now();
-      const candidate = await selectPhaseFrames(frames, movementType, { cameraView });
-      phaseMs = Math.round(performance.now() - t2);
-      phaseResult = candidate;
-
-      if (isPhaseSelectionAdequate(candidate, movementType)) break;
-      status(`[${dir}] Attempt ${attempt + 1} insufficient quality, trying next window...`);
+    if (secondaryMeta) {
+      status(`[${dir}] Step 3b — secondary video...`);
+      const cameraView2 = (secondaryMeta.cameraView ?? "front") as
+        | "side"
+        | "front"
+        | "posterior";
+      try {
+        const videoFile2 = await fetchVideoFile(dir, secondaryMeta.file);
+        const sec: SecondaryAnalysisResult = await runSecondaryAnalysis(
+          videoFile2,
+          landmarker,
+          primary.phaseFrames,
+          { movementType, cameraView: cameraView2 },
+        );
+        const pairCount = Math.min(
+          primary.annotatedFrames.length,
+          sec.annotatedFrames.length,
+        );
+        const pairedFrames: string[] = [];
+        for (let i = 0; i < pairCount; i++) {
+          pairedFrames.push(
+            await compositeSideBySide(
+              primary.annotatedFrames[i],
+              sec.annotatedFrames[i],
+              primary.phaseFrames[i]?.phase.label ?? `Frame ${i + 1}`,
+              cameraView,
+              cameraView2,
+            ),
+          );
+        }
+        output.secondary = {
+          phaseFrames: toFrameData(sec.phaseFrames),
+          annotatedFrames: sec.annotatedFrames,
+          pairedFrames,
+          aggregated: sec.aggregated as Record<string, unknown>,
+        };
+        status(
+          `[${dir}] Step 3b ✓ — ${sec.phaseFrames.length} secondary frames`,
+        );
+      } catch (e) {
+        status(
+          `[${dir}] Step 3b ✗ (non-critical) — ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }
 
-    output.steps.extraction = {
-      ok: true, ms: extractionMs,
-      data: { frameCount: frames.length, frames: toFrameData(frames) },
-      error: null,
-    };
-
-    // ── Step 2 result ──────────────────────────────────────────────────────
-
-    try {
-      const phaseFrames = phaseResult!.frames;
-      if (phaseResult!.diag) {
-        output.diagnostics.primary.movenet = phaseResult!.diag.movenet;
-        output.diagnostics.primary.gaitFSM = phaseResult!.diag.gaitFSM;
-      }
-      output.steps.phaseSelection = {
-        ok: true, ms: phaseMs,
-        data: {
-          frameCount: phaseFrames.length,
-          phases:     phaseFrames.map(f => f.phase.id),
-          frames:     toFrameData(phaseFrames),
+    if (apiKey?.trim()) {
+      status(`[${dir}] Step 5 — generating report...`);
+      const hasDualView = (output.secondary?.phaseFrames.length ?? 0) > 0;
+      const prompt = buildReportPrompt({
+        patient: {
+          patientName: assessment.patient.name,
+          patientAge: assessment.patient.age,
+          diagnosis: assessment.patient.diagnosis,
+          movementType,
+          patientHeight: assessment.patient.height,
+          heightUnit: assessment.patient.heightUnit,
+          injuredSide: assessment.patient.injuredSide,
+          clinicalNotes: assessment.patient.notes,
         },
-        error: null,
-      };
-      status(`[${dir}] Step 2 ✓ — ${phaseFrames.length} phase frames in ${phaseMs}ms`);
-
-      // ── Step 3: Pose detection ───────────────────────────────────────────
-
-      status(`[${dir}] Step 3 — running pose detection (loading model if needed)...`);
-      try {
-        const landmarker = await getLandmarker();
-        const { ms: ms3, value: poseResults } = await timed(() =>
-          detectPoseOnFrames(landmarker, phaseFrames),
-        );
-        const detectedCount = poseResults.filter(r => (r.poseLandmarks?.length ?? 0) > 0).length;
-        output.diagnostics.primary.mediapipe = buildMediaPipeDiagnostics(poseResults, phaseFrames);
-
-        // Pre-compute angles so we can include them in this step's output
-        const allFrameAngles = poseResults.map(r =>
-          extractAngles(
-            mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
-            cameraView,
-            movementType,
-          ),
-        );
-
-        const annotatedFrames = await Promise.all(
-          poseResults.map((r, i) =>
-            r.poseLandmarks
-              ? annotateFrame(phaseFrames[i].imageData, r.poseLandmarks, `frame: ${phaseFrames[i].index + 1}/${frames.length}`)
-              : Promise.resolve(phaseFrames[i].imageData),
-          ),
-        );
-
-        output.steps.poseDetection = {
-          ok: true, ms: ms3,
-          data: { detectedCount, totalCount: poseResults.length, perFrameAngles: allFrameAngles, annotatedFrames },
-          error: null,
-        };
-        status(`[${dir}] Step 3 ✓ — ${detectedCount}/${poseResults.length} frames detected in ${ms3}ms`);
-
-        // ── Step 4: Angle aggregation ──────────────────────────────────────
-
-        try {
-          const aggregated = aggregateAngles(allFrameAngles, phaseFrames.map(f => f.phase));
-          output.steps.angleCalculation = {
-            ok: true, ms: 0,
-            data: { aggregated },
-            error: null,
-          };
-          status(`[${dir}] Step 4 ✓ — ${Object.keys(aggregated).length} metrics computed`);
-
-          // ── Step 3b: Secondary video pipeline (optional) ──────────────────
-
-          let phaseFrames2: typeof phaseFrames = [];
-          let aggregated2: Record<string, AngleStat> = {};
-          if (secondaryMeta) {
-            status(`[${dir}] Step 3b — processing secondary video (${secondaryCameraView})...`);
-            const t3b = performance.now();
-            try {
-              const videoFile2 = await fetchVideoFile(dir, secondaryMeta.file);
-              const cameraView2  = (secondaryCameraView ?? 'front') as 'side' | 'front' | 'posterior';
-
-              // Capture secondary frames at the same timestamps as the primary
-              // so both videos show the same phase moments.
-              phaseFrames2 = await extractFramesAtTimestamps(
-                videoFile2,
-                phaseFrames.map(f => ({ timestamp: f.timestamp, phase: f.phase, index: f.index })),
-              );
-
-              const poseResults2   = await detectPoseOnFrames(landmarker, phaseFrames2);
-              if (output.diagnostics.secondary) {
-                output.diagnostics.secondary.mediapipe = buildMediaPipeDiagnostics(poseResults2, phaseFrames2);
-              }
-              const allAngles2     = poseResults2.map(r =>
-                extractAngles(
-                  mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks),
-                  cameraView2,
-                  movementType,
-                ),
-              );
-              aggregated2 = aggregateAngles(allAngles2, phaseFrames2.map(f => f.phase));
-
-              const annotated2 = await Promise.all(
-                poseResults2.map((r, i) =>
-                  r.poseLandmarks
-                    ? annotateFrame(phaseFrames2[i].imageData, r.poseLandmarks, `frame: ${phaseFrames2[i].index + 1}/${frames.length}`)
-                    : Promise.resolve(phaseFrames2[i].imageData),
-                ),
-              );
-
-              // Composite paired frames (primary left, secondary right)
-              const pairedFrames: string[] = [];
-              const pairCount = Math.min(annotatedFrames.length, annotated2.length);
-              for (let i = 0; i < pairCount; i++) {
-                const label  = phaseFrames[i]?.phase?.label ?? `Frame ${i + 1}`;
-                const paired = await compositeSideBySide(
-                  annotatedFrames[i], annotated2[i],
-                  label, cameraView, cameraView2,
-                );
-                pairedFrames.push(paired);
-              }
-
-              const ms3b = Math.round(performance.now() - t3b);
-              output.steps.secondaryPipeline = {
-                ok: true, ms: ms3b,
-                data: {
-                  frameCount:      phaseFrames2.length,
-                  phases:          phaseFrames2.map(f => f.phase.id),
-                  frames:          toFrameData(phaseFrames2),
-                  aggregated:      aggregated2,
-                  annotatedFrames: annotated2,
-                  pairedFrames,
-                },
-                error: null,
-              };
-              status(`[${dir}] Step 3b ✓ — ${phaseFrames2.length} secondary frames in ${ms3b}ms`);
-            } catch (e) {
-              const err = e instanceof Error ? e.message : String(e);
-              output.steps.secondaryPipeline!.error = err;
-              status(`[${dir}] Step 3b ✗ — ${err} (continuing with primary only)`);
-            }
-          }
-
-          // ── Step 5: Report generation (optional) ──────────────────────────
-
-          if (apiKey?.trim()) {
-            status(`[${dir}] Step 5 — generating report...`);
-            try {
-              const hasDualView = phaseFrames2.length > 0;
-              const prompt = buildReportPrompt({
-                patient: {
-                  patientName:   assessment.patient.name,
-                  patientAge:    assessment.patient.age,
-                  diagnosis:     assessment.patient.diagnosis,
-                  movementType,
-                  patientHeight: assessment.patient.height,
-                  heightUnit:    assessment.patient.heightUnit,
-                  injuredSide:   assessment.patient.injuredSide,
-                  clinicalNotes: assessment.patient.notes,
-                },
-                movementType,
-                cameraView,
-                hasDualView,
-                secondaryCameraView: secondaryCameraView as 'side' | 'front' | 'posterior' | undefined,
-                focusAreas:   assessment.focus,
-                aggregated,
-                aggregated2:  hasDualView ? aggregated2 : undefined,
-                proms:        assessment.proms ?? {},
-                running:      assessment.running,
-                jump:         assessment.jump,
-                frameCount:   phaseFrames.length,
-                frameCount2:  hasDualView ? phaseFrames2.length : undefined,
-              });
-
-              const { ms: ms5, value: report } = await timed(() =>
-                generateReport({ apiKey, prompt, frames: phaseFrames, frames2: phaseFrames2 }),
-              );
-              output.steps.reportGeneration = {
-                ok: true, ms: ms5,
-                data: { prompt, report },
-                error: null,
-              };
-              status(`[${dir}] Step 5 ✓ — report generated in ${ms5}ms`);
-            } catch (e) {
-              const err = e instanceof Error ? e.message : String(e);
-              output.steps.reportGeneration = { ok: false, ms: 0, data: null, error: err };
-              status(`[${dir}] Step 5 ✗ — ${err}`);
-            }
-          } else {
-            status(`[${dir}] Step 5 — skipped (no API key)`);
-          }
-        } catch (e) {
-          output.steps.angleCalculation.error = e instanceof Error ? e.message : String(e);
-          status(`[${dir}] Step 4 ✗ — ${output.steps.angleCalculation.error}`);
-        }
-      } catch (e) {
-        output.steps.poseDetection.error = e instanceof Error ? e.message : String(e);
-        status(`[${dir}] Step 3 ✗ — ${output.steps.poseDetection.error}`);
-      }
-    } catch (e) {
-      output.steps.phaseSelection.error = e instanceof Error ? e.message : String(e);
-      status(`[${dir}] Step 2 ✗ — ${output.steps.phaseSelection.error}`);
+        movementType,
+        cameraView,
+        hasDualView,
+        secondaryCameraView: secondaryMeta?.cameraView as
+          | "side"
+          | "front"
+          | "posterior"
+          | undefined,
+        focusAreas: assessment.focus,
+        aggregated: primary.aggregated,
+        aggregated2: hasDualView
+          ? (output.secondary!.aggregated as typeof primary.aggregated)
+          : undefined,
+        proms: assessment.proms ?? {},
+        running: assessment.running,
+        jump: assessment.jump,
+        frameCount: primary.phaseFrames.length,
+        frameCount2: hasDualView
+          ? output.secondary!.phaseFrames.length
+          : undefined,
+      });
+      output.prompt = prompt;
+      output.report = await generateReport({
+        apiKey,
+        prompt,
+        frames: primary.phaseFrames,
+        frames2: output.secondary
+          ? output.secondary.phaseFrames
+              .map((_, i) => primary.phaseFrames[i])
+              .filter(Boolean)
+          : [],
+      });
+      status(`[${dir}] Step 5 ✓`);
     }
   } catch (e) {
-    output.steps.extraction.error = e instanceof Error ? e.message : String(e);
-    status(`[${dir}] Step 1 ✗ — ${output.steps.extraction.error}`);
+    output.error = e instanceof Error ? e.message : String(e);
+    status(`[${dir}] ✗ — ${output.error}`);
   }
 
   status(`[${dir}] Done.`);
@@ -468,4 +330,4 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
 // ── Expose on window ──────────────────────────────────────────────────────────
 
 (window as unknown as Record<string, unknown>).runPipeline = runPipeline;
-document.getElementById('status')!.textContent = 'Pipeline runner ready.';
+document.getElementById("status")!.textContent = "Pipeline runner ready.";
