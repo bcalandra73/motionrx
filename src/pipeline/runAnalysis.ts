@@ -6,9 +6,25 @@ import { selectPhaseFrames } from './phaseSelection';
 import type { GaitFSMDiagnostics } from './phaseSelection';
 import { annotateFrame } from './frameAnnotation';
 import { mergeWorldLandmarks, extractAngles, aggregateAngles } from './angleCalculation';
-import type { AngleStat } from './angleCalculation';
+import type { AngleStat, FrameAnglePoint } from './angleCalculation';
+import type { FrameLandmarkPoint, NormalizedLandmark } from '../types';
 import { extractFramesAtTimestamps } from './frameExtraction';
 import { framesToGif } from './gifGeneration';
+
+const VIS = 0.18;
+function extractLandmarkPositions(lm: NormalizedLandmark[]): Record<string, number> {
+  const get = (i: number, c: 'x' | 'y') =>
+    (lm[i]?.visibility ?? 0) > VIS ? lm[i][c] : null;
+  const entries: [string, number][] = [
+    ['Left Hip Y',    get(23, 'y')!], ['Right Hip Y',   get(24, 'y')!],
+    ['Left Knee Y',   get(25, 'y')!], ['Right Knee Y',  get(26, 'y')!],
+    ['Left Ankle Y',  get(27, 'y')!], ['Right Ankle Y', get(28, 'y')!],
+    ['Left Hip X',    get(23, 'x')!], ['Right Hip X',   get(24, 'x')!],
+    ['Left Knee X',   get(25, 'x')!], ['Right Knee X',  get(26, 'x')!],
+    ['Left Ankle X',  get(27, 'x')!], ['Right Ankle X', get(28, 'x')!],
+  ];
+  return Object.fromEntries(entries.filter(([, v]) => v != null));
+}
 
 export interface PrimaryAnalysisResult {
   allPoseResults: PoseFrameResult[];
@@ -19,6 +35,8 @@ export interface PrimaryAnalysisResult {
   gifData: string;
   allFrameAngles: Record<string, number>[];
   aggregated: Record<string, AngleStat>;
+  allFrameAngleSeries: FrameAnglePoint[];
+  allFrameLandmarkSeries: FrameLandmarkPoint[];
   gaitFSMDiag: GaitFSMDiagnostics | null;
   mediapipeDiag: MediaPipeDiagnostics | null;
 }
@@ -43,22 +61,56 @@ export async function runPrimaryAnalysis(
 ): Promise<PrimaryAnalysisResult> {
   const { movementType, cameraView, onProgress } = options;
 
+  // ── Step 2: Pose detection ────────────────────────────────────────────────
+  const t2 = performance.now();
   const allPoseResults = await detectPoseOnFrames(landmarker, frames, { onProgress });
+  const detectedCount = allPoseResults.filter(r => r.source === 'landmarker').length;
+  const lumaVals = allPoseResults.map(r => r.preprocessingLuma).filter(l => l >= 0);
+  const avgLuma = lumaVals.length
+    ? (lumaVals.reduce((s, v) => s + v, 0) / lumaVals.length).toFixed(1) : '—';
+  const boostedCount = allPoseResults.filter(r => r.preprocessingBrightOffset > 0).length;
+  const allDiag = buildMediaPipeDiagnostics(allPoseResults, frames.map(f => ({ phase: f.phase })));
+  console.log(
+    `[Step 2 ✓] Pose: ${detectedCount}/${allPoseResults.length}` +
+    ` (${((detectedCount / Math.max(1, allPoseResults.length)) * 100).toFixed(1)}%)` +
+    ` | delegate=${allDiag.delegate} | avg luma=${avgLuma} | brightness-boosted=${boostedCount}` +
+    ` | ${Math.round(performance.now() - t2)}ms`,
+  );
 
+  // ── Step 3: Phase selection ───────────────────────────────────────────────
+  const t3 = performance.now();
   const { frames: phaseFrames, diag } = await selectPhaseFrames(frames, allPoseResults, movementType, {
     cameraView,
     onProgress,
   });
+  const gd = diag?.gaitFSM ?? null;
+  if (gd) {
+    const refLeg = gd.refLeg === 'L' ? 'Left' : 'Right';
+    const ankleNote = gd.ankleSignalWeak ? 'ankle WEAK → knee-dominant' : 'ankle strong';
+    console.log(
+      `[Step 3 ✓] GaitFSM: ref=${refLeg} | L-vis=${gd.lVisFrames} R-vis=${gd.rVisFrames}` +
+      ` | ${ankleNote} (wA=${gd.ankleWeight.toFixed(2)} wK=${gd.kneeWeight.toFixed(2)})` +
+      ` | cycle frames ${gd.cycleStart}→${gd.cycleEnd} (${gd.cycleEnd - gd.cycleStart} frames)` +
+      ` | facing=${gd.icIsMin ? 'right→left' : 'left→right'} | ${Math.round(performance.now() - t3)}ms`,
+    );
+    console.log(`[Step 3]   Events: ${gd.detectedEvents.map(e => `${e.phaseId}@${e.proportion.toFixed(2)}`).join('  ')}`);
+  } else {
+    console.log(
+      `[Step 3 ✓] Phase selection: uniform sampling (${movementType})` +
+      ` | ${phaseFrames.length} frames | ${Math.round(performance.now() - t3)}ms`,
+    );
+  }
 
   const poseResults = phaseFrames.map(f => allPoseResults[f.index]).filter(Boolean);
   const mediapipeDiag = buildMediaPipeDiagnostics(poseResults, phaseFrames);
 
-  // Annotate every extracted frame with wireframe + "Frame: N/Total" counter
+  // ── Step 4: Annotation, angle calculation, GIF ────────────────────────────
+  const t4 = performance.now();
   const total = frames.length;
   const allAnnotatedFrames = await Promise.all(
     frames.map((f, i) => {
       const r = allPoseResults[i];
-      const label = `Frame: ${i + 1}/${total}`;
+      const label = `Frame: ${i + 1}/${total}  t=${f.timestamp.toFixed(3)}s`;
       return r?.poseLandmarks?.length
         ? annotateFrame(f.imageData, r.poseLandmarks, label)
         : annotateFrame(f.imageData, [], label);
@@ -72,7 +124,27 @@ export async function runPrimaryAnalysis(
     extractAngles(mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks), cameraView, movementType),
   );
   const aggregated = aggregateAngles(allFrameAngles, phaseFrames.map(f => f.phase));
+
+  const allFrameLandmarkSeries: FrameLandmarkPoint[] = allPoseResults.map((r, i) => ({
+    timestamp: frames[i].timestamp,
+    frameIndex: i,
+    positions: r.poseLandmarks ? extractLandmarkPositions(r.poseLandmarks) : {},
+  }));
+
+  const allFrameAngleSeries: FrameAnglePoint[] = allPoseResults.map((r, i) => ({
+    timestamp: frames[i].timestamp,
+    frameIndex: i,
+    angles: r.poseLandmarks
+      ? extractAngles(mergeWorldLandmarks(r.poseLandmarks, r.worldLandmarks), cameraView, movementType)
+      : {},
+  }));
+
   const gifData = await framesToGif(allAnnotatedFrames);
+  console.log(
+    `[Step 4 ✓] ${phaseFrames.length} frames annotated | ${Object.keys(aggregated).length} angle metrics` +
+    ` | ${Math.round(performance.now() - t4)}ms`,
+  );
+  console.log(`[Step 4]   Phases: ${phaseFrames.map(f => f.phase.id).join(', ')}`);
 
   return {
     allPoseResults,
@@ -83,6 +155,8 @@ export async function runPrimaryAnalysis(
     gifData,
     allFrameAngles,
     aggregated,
+    allFrameAngleSeries,
+    allFrameLandmarkSeries,
     gaitFSMDiag: diag?.gaitFSM ?? null,
     mediapipeDiag,
   };

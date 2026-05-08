@@ -24,6 +24,12 @@ export interface LandmarkWithWorld {
   _wz: number | null;
 }
 
+export interface FrameAnglePoint {
+  timestamp: number;
+  frameIndex: number;
+  angles: Record<string, number>;
+}
+
 export interface AngleStat {
   min: number;
   max: number;

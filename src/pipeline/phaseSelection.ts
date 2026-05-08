@@ -572,8 +572,21 @@ export async function selectPhaseFrames(
 
   if (isGait) {
     onProgress?.(0, 'Selecting gait phase frames...');
-    const proportions = frames.map((_, i) => i / Math.max(1, frames.length - 1));
-    const { frames: selected, diag: gaitDiag } = runGaitFSM(smoothed, frames, proportions, cameraView);
+
+    // GaitFSM peak-detection and phase-window parameters were calibrated for
+    // ~10 fps (≈20 frames over a 2 s clip). Dense WebCodecs output at 30+ fps
+    // causes localMaxima to find sub-cycle oscillations and collapses cycleFrameN,
+    // making most phase windows degenerate. Subsample to ≤20 frames before the
+    // FSM; .index values are preserved so allPoseResults lookups remain correct.
+    const MAX_FSM_FRAMES = 20;
+    const step = frames.length > MAX_FSM_FRAMES
+      ? Math.floor(frames.length / MAX_FSM_FRAMES)
+      : 1;
+    const fsmFrames   = step > 1 ? frames.filter((_, i) => i % step === 0)  : frames;
+    const fsmSmoothed = step > 1 ? smoothed.filter((_, i) => i % step === 0) : smoothed;
+
+    const proportions = fsmFrames.map((_, i) => i / Math.max(1, fsmFrames.length - 1));
+    const { frames: selected, diag: gaitDiag } = runGaitFSM(fsmSmoothed, fsmFrames, proportions, cameraView);
     onProgress?.(100, `Selected ${selected.length} phase frames`);
     return { frames: selected, diag: { gaitFSM: gaitDiag } };
   }

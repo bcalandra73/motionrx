@@ -32,7 +32,7 @@ function parseArgs() {
       i++;
     }
   }
-  return { test: args.test ?? null };
+  return { test: args.test ?? null, key: args.key ?? null };
 }
 
 // ── Test dir discovery ────────────────────────────────────────────────────────
@@ -130,13 +130,15 @@ async function writeOutput(outDir: string, result: RunnerOutput): Promise<void> 
   if (result.gif)    await fs.writeFile(path.join(outDir, 'animation.gif'), Buffer.from(result.gif, 'base64'));
   if (result.prompt) await fs.writeFile(path.join(outDir, 'prompt.txt'),    result.prompt);
   if (result.report) await fs.writeFile(path.join(outDir, 'report.json'),   JSON.stringify(result.report, null, 2));
+  if (result.angleChartSvg)    await fs.writeFile(path.join(outDir, 'angle_chart.svg'),    result.angleChartSvg);
+  if (result.landmarkChartSvg) await fs.writeFile(path.join(outDir, 'landmark_chart.svg'), result.landmarkChartSvg);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const { test } = parseArgs();
-  const key = process.env.ANTHROPIC_API_KEY ?? null;
+  const { test, key: cliKey } = parseArgs();
+  const key = cliKey ?? process.env.ANTHROPIC_API_KEY ?? null;
   const out = path.join(ROOT, 'test_output');
 
   const testDirs = await findTestDirs(test);

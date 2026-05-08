@@ -310,6 +310,14 @@ export interface CorrectionPack {
   videoKey: string;
 }
 
+// ── Landmark Position Series ───────────────────────────────────────────────
+
+export interface FrameLandmarkPoint {
+  timestamp: number;
+  frameIndex: number;
+  positions: Record<string, number>;
+}
+
 // ── Bar Path ───────────────────────────────────────────────────────────────
 
 export interface BarPoint {

@@ -82,6 +82,11 @@ const LANDMARKER_OPTIONS = {
 // Singleton so we only initialise once per page load.
 let _landmarker: PoseLandmarker | null = null;
 let _delegate: 'GPU' | 'CPU' | 'unknown' = 'unknown';
+let _needsReinit = false;
+// Set to true after a detect() error so reinit skips the GPU delegate.
+// WebGL shader failures on older GPUs are not recoverable by restarting the
+// same delegate — once it fails at inference time, CPU is more reliable.
+let _forceCpu = false;
 
 export function getMediaPipeDelegate(): 'GPU' | 'CPU' | 'unknown' {
   return _delegate;
@@ -101,15 +106,23 @@ export async function initPoseLandmarker(): Promise<PoseLandmarker> {
   }
   if (!vision) throw new Error('All WASM CDNs failed to load.');
 
-  // Try GPU first; fall back to CPU
-  try {
-    _landmarker = await PoseLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
-      ...LANDMARKER_OPTIONS,
-    });
-    _delegate = 'GPU';
-  } catch {
-    console.warn('[PoseLandmarker] GPU delegate failed — using CPU');
+  // Try GPU first; fall back to CPU.
+  // Skip GPU entirely if a previous detect() call failed with a GPU error —
+  // WebGL shader uniform failures on older hardware are not recoverable.
+  if (!_forceCpu) {
+    try {
+      _landmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+        ...LANDMARKER_OPTIONS,
+      });
+      _delegate = 'GPU';
+    } catch {
+      console.warn('[PoseLandmarker] GPU delegate failed — using CPU');
+      _forceCpu = true;
+    }
+  }
+
+  if (!_landmarker) {
     _landmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
       ...LANDMARKER_OPTIONS,
@@ -138,7 +151,7 @@ export function preprocessFrame(imageBase64: string): Promise<PreprocessResult> 
       const canvas = document.createElement('canvas');
       canvas.width = img.width;
       canvas.height = img.height;
-      const ctx = canvas.getContext('2d')!;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
       ctx.drawImage(img, 0, 0);
 
       // Sample a centre strip to estimate average luma
@@ -200,20 +213,25 @@ export async function detectPoseOnFrame(
   );
   const img = await loadImage(processed);
 
-  if (!img) return {
-    poseLandmarks: null, worldLandmarks: null, source: 'none',
+  const none = {
+    poseLandmarks: null, worldLandmarks: null, source: 'none' as const,
     preprocessingLuma: luma, preprocessingBrightOffset: brightOffset,
     landmarkVisibility: null,
   };
 
+  if (!img || img.naturalWidth === 0 || img.naturalHeight === 0) return none;
+
   let rawResult = null;
   try {
-    rawResult = await withTimeout(Promise.resolve(landmarker.detect(img)), 8000, null);
+    rawResult = landmarker.detect(img);
   } catch (e) {
     console.warn('[PoseLandmarker] detect() error:', e);
+    _needsReinit = true;
+    _forceCpu = true;
+    return none;
   }
 
-  if (rawResult?.landmarks?.length) {
+  if (rawResult?.landmarks?.length && rawResult.landmarks.length > 0) {
     const landmarks = rawResult.landmarks[0] as NormalizedLandmark[];
     return {
       poseLandmarks:  landmarks,
@@ -225,11 +243,7 @@ export async function detectPoseOnFrame(
     };
   }
 
-  return {
-    poseLandmarks: null, worldLandmarks: null, source: 'none',
-    preprocessingLuma: luma, preprocessingBrightOffset: brightOffset,
-    landmarkVisibility: null,
-  };
+  return none;
 }
 
 // ── All-frames entry point ────────────────────────────────────────────────────
@@ -245,14 +259,28 @@ export async function detectPoseOnFrames(
 ): Promise<PoseFrameResult[]> {
   const { onProgress } = options;
   const results: PoseFrameResult[] = [];
+  let active = landmarker;
 
   for (let i = 0; i < frames.length; i++) {
+    // After a detect() error, the landmarker's internal graph timestamp is
+    // corrupted. Reinitialise before the next frame to reset it.
+    if (_needsReinit) {
+      _needsReinit = false;
+      _landmarker = null;
+      try {
+        active = await initPoseLandmarker();
+        console.log('[PoseLandmarker] Reinitialized after error');
+      } catch {
+        active = landmarker;
+      }
+    }
+
     onProgress?.(
       Math.round((i / frames.length) * 100),
       `Detecting pose — frame ${i + 1} of ${frames.length}`,
     );
 
-    const partial = await detectPoseOnFrame(landmarker, frames[i].imageData);
+    const partial = await detectPoseOnFrame(active, frames[i].imageData);
     results.push({ ...partial, frameIndex: i });
   }
 

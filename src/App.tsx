@@ -24,6 +24,10 @@ import type { PatientFormData, JumpInvolvedLimb, JumpProtocol, JumpTimePostOp, A
 import { assessmentFromYaml } from './assessment';
 import { CAMERA_GUIDES } from './data/cameraGuides';
 import { extractFramesSequential } from './pipeline/frameExtraction';
+import type { FrameAnglePoint } from './pipeline/angleCalculation';
+import type { FrameLandmarkPoint } from './types';
+import { AngleChart } from './components/AngleChart/AngleChart';
+import { LandmarkChart } from './components/LandmarkChart/LandmarkChart';
 import { initPoseLandmarker } from './pipeline/poseDetection';
 import { runPrimaryAnalysis, runSecondaryAnalysis } from './pipeline/runAnalysis';
 import { buildReportPrompt } from './pipeline/reportGeneration';
@@ -39,6 +43,8 @@ export default function App() {
   const proms       = usePROMs();
   const [apiKey, setApiKey]                     = useState('');
   const [apiError, setApiError]                 = useState('');
+  const [angleSeries, setAngleSeries]           = useState<FrameAnglePoint[]>([]);
+  const [landmarkSeries, setLandmarkSeries]     = useState<FrameLandmarkPoint[]>([]);
   const [focusAreas, setFocusAreas]             = useState<string[]>([]);
   const [guideOpen, setGuideOpen]               = useState(false);
   const [enableLandmarkReview, setLandmarkReview] = useState(false);
@@ -74,6 +80,8 @@ export default function App() {
     if (!form.form.movementType) { setApiError('Please select a movement type.'); return; }
     if (!apiKey.trim()) { setApiError('Please enter your Anthropic API key.'); return; }
     setApiError('');
+    setAngleSeries([]);
+    setLandmarkSeries([]);
 
     const movementType = form.form.movementType;
     const cameraView = (video.primary.cameraView ?? 'side') as 'side' | 'front' | 'posterior';
@@ -91,19 +99,23 @@ export default function App() {
         targetFps,
         onProgress: (pct, label) => video.setStage('extracting', label, pct),
       });
-      console.log(`[Step 1 ✓] Extracted ${frames.length} frames in ${Math.round(performance.now() - t1)}ms`);
+      const tsRange = frames.length > 1
+        ? `  t=${frames[0].timestamp.toFixed(3)}s–${frames[frames.length - 1].timestamp.toFixed(3)}s`
+        : '';
+      console.log(`[Step 1 ✓] ${frames.length} frames in ${Math.round(performance.now() - t1)}ms${tsRange}`);
       video.updatePrimary({ extractedFrames: frames });
 
       // Steps 2–4: MediaPipe on all frames, phase selection, annotation, angle calculation
       video.setStage('detecting', 'Initialising pose model...', 0);
-      const t2 = performance.now();
       const landmarker = await initPoseLandmarker();
       const primary = await runPrimaryAnalysis(frames, landmarker, {
         movementType,
         cameraView,
         onProgress: (pct, label) => video.setStage('detecting', label, pct),
       });
-      console.log(`[Steps 2–4 ✓] ${Math.round(performance.now() - t2)}ms — ${primary.phaseFrames.length} phase frames: ${primary.phaseFrames.map(f => f.phase.id).join(', ')}`);
+
+      setAngleSeries(primary.allFrameAngleSeries);
+      setLandmarkSeries(primary.allFrameLandmarkSeries);
 
       video.updatePrimary({
         extractedFrames: primary.phaseFrames,
@@ -495,6 +507,22 @@ export default function App() {
             <div className="error-box" style={{ display: 'block' }}>{video.analysis.error}</div>
             <button className="analyze-btn" style={{ marginTop: 14 }} onClick={video.reset}>Try Again</button>
           </div>
+        )}
+
+        {/* ANGLE CHART */}
+        {hasResults && angleSeries.length > 0 && (
+          <AngleChart
+            series={angleSeries}
+            phaseFrames={video.primary.extractedFrames ?? []}
+          />
+        )}
+
+        {/* LANDMARK POSITION CHARTS */}
+        {hasResults && landmarkSeries.length > 0 && (
+          <LandmarkChart
+            series={landmarkSeries}
+            phaseFrames={video.primary.extractedFrames ?? []}
+          />
         )}
 
         {/* RESULTS */}

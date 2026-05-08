@@ -17,6 +17,8 @@ import type {
 import { buildReportPrompt } from "../pipeline/reportGeneration";
 import { generateReport } from "../api";
 import { assessmentFromYaml } from "../assessment";
+import { buildAngleChartSvg } from "../components/AngleChart/angleChartCore";
+import { buildLandmarkChartSvg } from "../components/LandmarkChart/landmarkChartCore";
 import type { Assessment, ExtractedFrame } from "../types";
 import type { PoseLandmarker } from "@mediapipe/tasks-vision";
 
@@ -41,6 +43,8 @@ export interface RunnerOutput {
   allAnnotatedFrames: string[];    // every frame with wireframe + counter
   gif: string | null;
   aggregated: Record<string, unknown>;
+  angleChartSvg: string;
+  landmarkChartSvg: string;
   secondary: SecondaryOutput | null;
   report: unknown | null;
   prompt: string | null;
@@ -192,6 +196,8 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
     allAnnotatedFrames: [],
     gif: null,
     aggregated: {},
+    angleChartSvg: '',
+    landmarkChartSvg: '',
     secondary: null,
     report: null,
     prompt: null,
@@ -220,6 +226,8 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
     output.allAnnotatedFrames = primary.allAnnotatedFrames;
     output.gif = primary.gifData;
     output.aggregated = primary.aggregated as Record<string, unknown>;
+    output.angleChartSvg = buildAngleChartSvg(primary.allFrameAngleSeries, primary.phaseFrames);
+    output.landmarkChartSvg = buildLandmarkChartSvg(primary.allFrameLandmarkSeries, primary.phaseFrames);
     status(
       `[${dir}] Steps 2–4 ✓ — ${primary.phaseFrames.length} phase frames: ${primary.phaseFrames.map((f) => f.phase.id).join(", ")}`,
     );
