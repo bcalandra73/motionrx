@@ -413,7 +413,7 @@ export function aggregateAngles(
     });
   });
 
-  // Determine REF leg from GaitFSM phase tags
+  // Determine REF leg from phase tags
   let refSide: 'L' | 'R' | null = null;
   for (const p of Object.values(framePhases)) {
     if (p?._side === 'L' || p?._side === 'R') { refSide = p._side; break; }

@@ -2,6 +2,8 @@ import type { ExtractedFrame, NormalizedLandmark, PhaseLabel } from '../types';
 import type { PoseFrameResult } from './poseDetection';
 import { PHASE_MAPS } from '../data/phaseMaps';
 import { getPhaseTimes } from './frameExtraction';
+import { analyzeMovement } from './movement-analysis';
+import type { PoseFrame } from './movement-analysis';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -10,34 +12,18 @@ type SparseLandmarks = (NormalizedLandmark | null)[];
 export interface SelectPhaseOptions {
   cameraView?: 'side' | 'front' | 'posterior';
   onProgress?: (pct: number, label: string) => void;
+  fps?: number;
 }
 
-export interface GaitFSMDiagnostics {
+export interface MovementAnalysisDiagnostics {
   refLeg: 'L' | 'R';
-  lVisFrames: number;
-  rVisFrames: number;
   lContactPeaks: number[];
   rContactPeaks: number[];
-  ankleSignalWeak: boolean;
-  ankleWeight: number;
-  kneeWeight: number;
-  cycleStart: number;
-  cycleEnd: number;
-  icIsMin: boolean;
-  detectedEvents: Array<{ phaseId: string; perFrameIndex: number; proportion: number }>;
-  signals: {
-    proportions: number[];
-    lAnkY: (number | null)[];
-    rAnkY: (number | null)[];
-    lKnee: (number | null)[];
-    rKnee: (number | null)[];
-    lComp: (number | null)[];
-    rComp: (number | null)[];
-  };
+  warnings: string[];
 }
 
 export interface PhaseSelectionDiagnostics {
-  gaitFSM: GaitFSMDiagnostics | null;
+  movementAnalysis: MovementAnalysisDiagnostics | null;
 }
 
 // ── Signal utilities ──────────────────────────────────────────────────────────
@@ -131,347 +117,6 @@ function applyTemporalSmoothing(allLandmarks: (SparseLandmarks | null)[]): (Spar
   return smoothed;
 }
 
-function smooth5(arr: (number | null)[]): (number | null)[] {
-  return arr.map((v, i) => {
-    if (v == null) return null;
-    const pts: number[] = [], ws: number[] = [];
-    for (let d = -2; d <= 2; d++) {
-      const idx = i + d;
-      if (idx >= 0 && idx < arr.length && arr[idx] != null) {
-        pts.push(arr[idx]!);
-        ws.push(d === 0 ? 2 : Math.abs(d) === 1 ? 1.5 : 1);
-      }
-    }
-    if (!pts.length) return null;
-    return pts.reduce((s, val, j) => s + val * ws[j], 0) / ws.reduce((s, w) => s + w, 0);
-  });
-}
-
-function normSig(arr: (number | null)[]): (number | null)[] {
-  const vals = arr.filter(v => v != null) as number[];
-  if (vals.length < 2) return arr.map(() => null);
-  const lo = Math.min(...vals), hi = Math.max(...vals), range = hi - lo;
-  if (range < 0.001) return arr.map(v => v != null ? 0.5 : null);
-  return arr.map(v => v != null ? (v - lo) / range : null);
-}
-
-function localMaxima(arr: (number | null)[], minProm: number): number[] {
-  const peaks: number[] = [];
-  for (let i = 1; i < arr.length - 1; i++) {
-    if (arr[i] == null) continue;
-    const prev = arr.slice(Math.max(0, i - 2), i).filter(x => x != null) as number[];
-    const next = arr.slice(i + 1, Math.min(arr.length, i + 3)).filter(x => x != null) as number[];
-    if (!prev.length || !next.length) continue;
-    if (arr[i]! > Math.max(...prev) && arr[i]! > Math.max(...next)) {
-      if (arr[i]! - Math.min(...prev, ...next) >= minProm) peaks.push(i);
-    }
-  }
-  if (!peaks.length) {
-    let best = -Infinity, bi = 0;
-    arr.forEach((v, i) => { if (v != null && v > best) { best = v; bi = i; } });
-    peaks.push(bi);
-  }
-  return peaks;
-}
-
-function argMinR(arr: (number | null)[], from: number, to: number): number {
-  let best = Infinity, bi = from;
-  for (let i = from; i <= to && i < arr.length; i++) {
-    if (arr[i] != null && arr[i]! < best) { best = arr[i]!; bi = i; }
-  }
-  return bi;
-}
-
-function argMaxR(arr: (number | null)[], from: number, to: number): number {
-  let best = -Infinity, bi = from;
-  for (let i = from; i <= to && i < arr.length; i++) {
-    if (arr[i] != null && arr[i]! > best) { best = arr[i]!; bi = i; }
-  }
-  return bi;
-}
-
-// ── GaitFSM ───────────────────────────────────────────────────────────────────
-
-interface PerFrameData {
-  fi: number; t: number;
-  lAnkY: number | null; rAnkY: number | null;
-  lAnkX: number | null; rAnkX: number | null;
-  noseX: number | null;
-  lKnee: number | null; rKnee: number | null;
-  lHip:  number | null; rHip:  number | null;
-  hipMidX: number | null; hipMidY: number | null;
-}
-
-export function runGaitFSM(
-  coarseLandmarks: (SparseLandmarks | null)[],
-  frames: ExtractedFrame[],
-  proportions: number[],
-  cameraView: 'side' | 'front' | 'posterior' = 'side',
-): { frames: ExtractedFrame[]; diag: GaitFSMDiagnostics } {
-  const v = (lms: SparseLandmarks | null, n: number) =>
-    lms?.[n] && (lms[n]!.visibility ?? 0) > 0.18 ? lms[n]! : null;
-
-  const perFrame: PerFrameData[] = coarseLandmarks.map((lms, fi) => {
-    if (!lms) return null as unknown as PerFrameData;
-    const lH = v(lms, 23), lK = v(lms, 25), lA = v(lms, 27);
-    const rH = v(lms, 24), rK = v(lms, 26), rA = v(lms, 28);
-    const nose = v(lms, 0);
-    return {
-      fi,
-      t: proportions[fi] ?? fi / Math.max(1, coarseLandmarks.length - 1),
-      lAnkY: lA?.y ?? null, rAnkY: rA?.y ?? null,
-      lAnkX: lA?.x ?? null, rAnkX: rA?.x ?? null,
-      noseX: nose?.x ?? null,
-      lKnee: lH && lK && lA ? calcAngle(lH, lK, lA) : null,
-      rKnee: rH && rK && rA ? calcAngle(rH, rK, rA) : null,
-      lHip: (lH && lK && lK.y - lH.y > -0.10)
-        ? Math.min(90, Math.round(Math.atan2(Math.abs(lK.x - lH.x), lK.y - lH.y) * 180 / Math.PI)) : null,
-      rHip: (rH && rK && rK.y - rH.y > -0.10)
-        ? Math.min(90, Math.round(Math.atan2(Math.abs(rK.x - rH.x), rK.y - rH.y) * 180 / Math.PI)) : null,
-      hipMidX: (lH && rH) ? (lH.x + rH.x) / 2 : lH?.x ?? rH?.x ?? null,
-      hipMidY: (lH && rH) ? (lH.y + rH.y) / 2 : lH?.y ?? rH?.y ?? null,
-    };
-  }).filter(Boolean) as PerFrameData[];
-
-  if (perFrame.length < 4) {
-    return {
-      frames: frames.slice(0, 8),
-      diag: {
-        refLeg: 'L', lVisFrames: 0, rVisFrames: 0,
-        lContactPeaks: [], rContactPeaks: [],
-        ankleSignalWeak: false, ankleWeight: 0.55, kneeWeight: 0.45,
-        cycleStart: 0, cycleEnd: 0, icIsMin: false,
-        detectedEvents: [],
-        signals: { proportions: [], lAnkY: [], rAnkY: [], lKnee: [], rKnee: [], lComp: [], rComp: [] },
-      },
-    };
-  }
-  perFrame.sort((a, b) => a.t - b.t);
-  const N = perFrame.length;
-
-  const lAnkS  = smooth5(perFrame.map(f => f.lAnkY));
-  const rAnkS  = smooth5(perFrame.map(f => f.rAnkY));
-  const lKneeS = smooth5(perFrame.map(f => f.lKnee));
-  const rKneeS = smooth5(perFrame.map(f => f.rKnee));
-  const lHipS  = smooth5(perFrame.map(f => f.lHip));
-  const rHipS  = smooth5(perFrame.map(f => f.rHip));
-
-  const lAnkRange = (() => { const v2 = lAnkS.filter(x => x != null) as number[]; return v2.length > 1 ? Math.max(...v2) - Math.min(...v2) : 0; })();
-  const rAnkRange = (() => { const v2 = rAnkS.filter(x => x != null) as number[]; return v2.length > 1 ? Math.max(...v2) - Math.min(...v2) : 0; })();
-  const ankWeak = (lAnkRange + rAnkRange) / 2 < 0.04;
-  const wA = ankWeak ? 0.30 : 0.55, wK = ankWeak ? 0.70 : 0.45;
-  const lAnkN = normSig(lAnkS), rAnkN = normSig(rAnkS);
-  const lKnN  = normSig(lKneeS), rKnN = normSig(rKneeS);
-  const mkComp = (aN: (number | null)[], kN: (number | null)[]) =>
-    aN.map((_, i) => {
-      const a = aN[i], k = kN[i];
-      if (a == null && k == null) return null;
-      const wa = a != null ? wA : 0, wk = k != null ? wK : 0, ws = wa + wk;
-      if (ws < 0.1) return null;
-      return ((a ?? 0.5) * wa + (k ?? 0.5) * wk) / ws;
-    });
-  const lComp = mkComp(lAnkN, lKnN);
-  const rComp = mkComp(rAnkN, rKnN);
-  const compRange = (() => {
-    const all = [...lComp, ...rComp].filter(v => v != null) as number[];
-    return all.length > 3 ? Math.max(...all) - Math.min(...all) : 0.12;
-  })();
-  const minProm = Math.max(0.08, compRange * 0.15);
-
-  const lContacts = localMaxima(lComp, minProm);
-  const rContacts = localMaxima(rComp, minProm);
-  const lVis = lAnkS.filter(v => v != null).length;
-  const rVis = rAnkS.filter(v => v != null).length;
-  const switchToR = (rVis > lVis * 1.2) && (rContacts.length > lContacts.length);
-  const REF = switchToR ? 'R' : 'L';
-  const refAnkS  = REF === 'L' ? lAnkS  : rAnkS;
-  const refKneeS = REF === 'L' ? lKneeS : rKneeS;
-  const refHipS  = REF === 'L' ? lHipS  : rHipS;
-  const oppAnkS  = REF === 'L' ? rAnkS  : lAnkS;
-  const oppKneeS = REF === 'L' ? rKneeS : lKneeS;
-  const oppHipS  = REF === 'L' ? rHipS  : lHipS;
-  const refC     = REF === 'L' ? lContacts : rContacts;
-  const oppC     = REF === 'L' ? rContacts : lContacts;
-
-  const noseDisps = perFrame.map(f => {
-    const nx = f.noseX, hx = f.hipMidX;
-    return nx != null && hx != null ? nx - hx : null;
-  }).filter(v => v != null) as number[];
-  const noseMean = noseDisps.length > 0
-    ? noseDisps.reduce((s, v) => s + v, 0) / noseDisps.length : 0;
-  const icIsMin = noseMean < 0;
-
-  const refAnkFwdS = smooth5(perFrame.map(f => {
-    const ax = REF === 'L' ? f.lAnkX : f.rAnkX;
-    if (ax == null || f.hipMidX == null) return null;
-    return icIsMin ? -(ax - f.hipMidX) : (ax - f.hipMidX);
-  }));
-
-  let cycleStart: number, cycleEnd: number;
-  if (refC.length >= 2)     { cycleStart = refC[0]; cycleEnd = refC[1]; }
-  else if (refC.length === 1) {
-    cycleStart = Math.max(0, refC[0] - 1);
-    cycleEnd   = Math.min(N - 1, refC[0] + Math.round(N * 0.7));
-  } else { cycleStart = 0; cycleEnd = N - 1; }
-  const cycleLen = Math.max(2, cycleEnd - cycleStart);
-  const r0 = cycleStart;
-
-  const refLoadingIdx = r0;
-  const icSt = Math.max(0, r0 - Math.round(cycleLen * 0.18));
-  const icEd = Math.max(icSt + 1, r0 - Math.round(cycleLen * 0.01));
-  let refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.08));
-  if (icEd > icSt) {
-    if (cameraView === 'side' && refAnkFwdS.some(v => v != null)) {
-      const icKN = normSig(refKneeS.slice(icSt, icEd + 1));
-      const icFN = normSig(refAnkFwdS.slice(icSt, icEd + 1));
-      const icScore = icKN.map((k, ii) => {
-        const f = icFN[ii];
-        if (k == null && f == null) return null;
-        return (k ?? 0.5) * 0.55 + (f ?? 0.5) * 0.45;
-      });
-      let bestScore = -Infinity;
-      icScore.forEach((s, ii) => { if (s != null && s > bestScore) { bestScore = s; refContactIdx = icSt + ii; } });
-      if (refContactIdx >= r0) refContactIdx = Math.max(0, r0 - Math.round(cycleLen * 0.08));
-    } else {
-      refContactIdx = argMaxR(refKneeS, icSt, icEd);
-    }
-  }
-
-  const refMidstIdx = (() => {
-    if (cameraView === 'side') {
-      const st = Math.min(N - 1, r0 + Math.round(cycleLen * 0.08));
-      const ed = Math.min(N - 1, r0 + Math.round(cycleLen * 0.20));
-      const slice = refAnkFwdS.slice(st, ed);
-      let minAbs = Infinity, minOff = 0;
-      slice.forEach((v, ii) => { if (v != null && Math.abs(v) < minAbs) { minAbs = Math.abs(v); minOff = ii; } });
-      if (minAbs < Infinity) return Math.min(N - 1, st + minOff);
-    }
-    return Math.min(N - 1, r0 + Math.round(cycleLen * 0.13));
-  })();
-
-  const toSt = Math.min(N - 1, r0 + Math.round(cycleLen * 0.34));
-  const toEd = Math.min(N - 1, r0 + Math.round(cycleLen * 0.44));
-  const refToeoffIdx = toSt < toEd
-    ? argMinR(refHipS, toSt, toEd)
-    : Math.min(N - 1, r0 + Math.round(cycleLen * 0.39));
-
-  const refPropIdx = Math.min(N - 1, r0 + Math.round(cycleLen * 0.27));
-
-  const mswSt = Math.min(N - 1, r0 + Math.round(cycleLen * 0.56));
-  const mswEd = Math.min(N - 1, r0 + Math.round(cycleLen * 0.74));
-  const refMidswingIdx = mswSt < mswEd
-    ? argMinR(refAnkS, mswSt, mswEd)
-    : Math.min(N - 1, r0 + Math.round(cycleLen * 0.64));
-
-  const oppEswSt = Math.min(N - 1, r0 + Math.round(cycleLen * 0.44));
-  const oppEswEd = Math.min(N - 1, r0 + Math.round(cycleLen * 0.59));
-  const oppContactIdx = oppC.length > 0
-    ? oppC.reduce((b, c) => { const tgt = r0 + Math.round(cycleLen * 0.51); return Math.abs(c - tgt) < Math.abs(b - tgt) ? c : b; }, oppC[0])
-    : oppEswSt < oppEswEd ? argMaxR(oppAnkS, oppEswSt, oppEswEd) : Math.min(N - 1, r0 + Math.round(cycleLen * 0.51));
-
-  const oppLswSt = Math.min(N - 1, r0 + Math.round(cycleLen * 0.68));
-  const oppLswEd = Math.min(N - 1, r0 + Math.round(cycleLen * 0.86));
-  const oppToeoffIdx = oppLswSt < oppLswEd
-    ? argMinR(oppHipS, oppLswSt, oppLswEd)
-    : Math.min(N - 1, r0 + Math.round(cycleLen * 0.78));
-
-  const timeline: Array<{ i: number; phaseId: string }> = [
-    { i: refContactIdx,  phaseId: 'contact' },
-    { i: refLoadingIdx,  phaseId: 'loading' },
-    { i: refMidstIdx,    phaseId: 'midstance' },
-    { i: refPropIdx,     phaseId: 'propulsion' },
-    { i: refToeoffIdx,   phaseId: 'toeoff' },
-    { i: oppContactIdx,  phaseId: 'earlyswing' },
-    { i: refMidswingIdx, phaseId: 'midswing' },
-    { i: oppToeoffIdx,   phaseId: 'lateswing' },
-  ];
-
-  const runningPhases = PHASE_MAPS['Running'] ?? [];
-  const phaseOrder = runningPhases.map(p => p.id);
-  const eventIndexMap: Record<string, number> = {};
-  timeline.forEach(ev => { if (!eventIndexMap[ev.phaseId]) eventIndexMap[ev.phaseId] = ev.i; });
-
-  const cycleFrameN = cycleEnd - cycleStart + 1;
-  const usedFisGal = new Set<number>();
-  const dedupedFrames: ExtractedFrame[] = [];
-  let minLi = 0;
-
-  for (let pi = 0; pi < runningPhases.length && dedupedFrames.length < 8; pi++) {
-    const ph = runningPhases[pi];
-    const nextPh = runningPhases[pi + 1];
-    const detectedIdx = eventIndexMap[ph.id];
-
-    let idealLi: number, fMin: number, fMax: number;
-    if (detectedIdx != null) {
-      const halfWin = Math.max(1, Math.round(cycleFrameN * 0.08));
-      fMin    = Math.max(cycleStart, detectedIdx - halfWin);
-      fMax    = Math.min(cycleEnd,   detectedIdx + halfWin);
-      idealLi = detectedIdx;
-    } else {
-      fMin    = cycleStart + Math.floor(ph.time * cycleFrameN);
-      fMax    = cycleStart + Math.ceil((nextPh?.time ?? 1.0) * cycleFrameN);
-      idealLi = cycleStart + Math.round(((ph.time + (nextPh?.time ?? 1.0)) / 2) * cycleFrameN);
-    }
-
-    const effectiveFMin = Math.max(fMin, minLi);
-
-    let candidates = perFrame
-      .map((fd, li) => ({ fd, li }))
-      .filter(({ fd, li }) => li >= effectiveFMin && li <= fMax && !usedFisGal.has(fd.fi));
-
-    if (!candidates.length) {
-      const nearest = perFrame
-        .map((fd, li) => ({ fd, li, dist: Math.abs(li - idealLi) }))
-        .filter(c => c.li >= effectiveFMin && !usedFisGal.has(c.fd.fi))
-        .sort((a, b) => a.dist - b.dist)[0];
-      if (!nearest) continue;
-      candidates = [nearest];
-    }
-
-    const keySet = new Set(timeline.map(e => e.i));
-    const detected = candidates.filter(c => keySet.has(c.li));
-    const pool = detected.length > 0 ? detected : candidates;
-    const best = pool.reduce((acc, cur) =>
-      Math.abs(cur.li - idealLi) < Math.abs(acc.li - idealLi) ? cur : acc,
-    );
-
-    const sideStr = REF === 'L' ? 'Left' : 'Right';
-    const phLabel: PhaseLabel = {
-      id: ph.id, label: `${sideStr} ${ph.label}`, desc: `${sideStr} leg — ${ph.desc}`,
-      fraction: perFrame[best.li]?.t ?? ph.time,
-      _footStrike: undefined,
-    };
-
-    usedFisGal.add(best.fd.fi);
-    minLi = best.li + 1;
-    dedupedFrames.push({ ...frames[best.fd.fi], phase: phLabel });
-  }
-
-  dedupedFrames.sort((a, b) =>
-    phaseOrder.indexOf(a.phase?.id ?? '') - phaseOrder.indexOf(b.phase?.id ?? ''),
-  );
-
-  const diag: GaitFSMDiagnostics = {
-    refLeg: REF,
-    lVisFrames: lVis, rVisFrames: rVis,
-    lContactPeaks: lContacts, rContactPeaks: rContacts,
-    ankleSignalWeak: ankWeak, ankleWeight: wA, kneeWeight: wK,
-    cycleStart, cycleEnd, icIsMin,
-    detectedEvents: timeline.map(ev => ({
-      phaseId: ev.phaseId,
-      perFrameIndex: ev.i,
-      proportion: perFrame[ev.i]?.t ?? 0,
-    })),
-    signals: {
-      proportions: perFrame.map(f => f.t),
-      lAnkY: lAnkS, rAnkY: rAnkS,
-      lKnee: lKneeS, rKnee: rKneeS,
-      lComp, rComp,
-    },
-  };
-  return { frames: dedupedFrames.slice(0, 8), diag };
-}
-
 // ── Smart phase relabeling for squats / deadlifts / landing ───────────────────
 
 export function runSmartPhaseRelabeling(
@@ -542,12 +187,10 @@ export async function selectPhaseFrames(
   movementType: string,
   options: SelectPhaseOptions = {},
 ): Promise<{ frames: ExtractedFrame[]; diag: PhaseSelectionDiagnostics | null }> {
-  const { cameraView = 'side', onProgress } = options;
+  const { onProgress } = options;
   const isGait      = /running|gait|walk/i.test(movementType);
   const needsRelabel = /squat|lunge|sit|deadlift|hinge|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(movementType);
 
-  // Convert MediaPipe results to the sparse landmark format GaitFSM expects.
-  // Landmarks are already in MediaPipe 33-point format — no index remapping needed.
   const sparseLandmarks: (SparseLandmarks | null)[] = poseResults.map(r =>
     r.poseLandmarks ? r.poseLandmarks.map(lm => ({ ...lm })) : null,
   );
@@ -573,22 +216,53 @@ export async function selectPhaseFrames(
   if (isGait) {
     onProgress?.(0, 'Selecting gait phase frames...');
 
-    // GaitFSM peak-detection and phase-window parameters were calibrated for
-    // ~10 fps (≈20 frames over a 2 s clip). Dense WebCodecs output at 30+ fps
-    // causes localMaxima to find sub-cycle oscillations and collapses cycleFrameN,
-    // making most phase windows degenerate. Subsample to ≤20 frames before the
-    // FSM; .index values are preserved so allPoseResults lookups remain correct.
-    const MAX_FSM_FRAMES = 20;
-    const step = frames.length > MAX_FSM_FRAMES
-      ? Math.floor(frames.length / MAX_FSM_FRAMES)
-      : 1;
-    const fsmFrames   = step > 1 ? frames.filter((_, i) => i % step === 0)  : frames;
-    const fsmSmoothed = step > 1 ? smoothed.filter((_, i) => i % step === 0) : smoothed;
+    const fps = options.fps ?? (
+      frames.length >= 2
+        ? (frames.length - 1) / (frames[frames.length - 1].timestamp - frames[0].timestamp)
+        : 30
+    );
+    const poseFrames: PoseFrame[] = frames
+      .map((f, i) => {
+        const lms = poseResults[i]?.poseLandmarks;
+        if (!lms) return null;
+        return { frameIndex: i, timestampMs: f.timestamp * 1000, landmarks: lms };
+      })
+      .filter((x): x is PoseFrame => x !== null);
 
-    const proportions = fsmFrames.map((_, i) => i / Math.max(1, fsmFrames.length - 1));
-    const { frames: selected, diag: gaitDiag } = runGaitFSM(fsmSmoothed, fsmFrames, proportions, cameraView);
+    const result = analyzeMovement('Running', poseFrames, fps);
+
+    const phaseMap = PHASE_MAPS['Running'] ?? [];
+    const selected: ExtractedFrame[] = result.keyFrames.map(kf => {
+      const phaseDef = phaseMap.find(p => p.id === kf.phaseId);
+      const sideStr  = kf.side === 'left' ? 'Left' : 'Right';
+      const totalMs  = (frames.at(-1)?.timestamp ?? 1) * 1000;
+      return {
+        ...frames[kf.frameIndex],
+        phase: {
+          id:       kf.phaseId,
+          label:    `${sideStr} ${phaseDef?.label ?? kf.phaseId}`,
+          desc:     `${sideStr} leg — ${phaseDef?.desc ?? ''}`,
+          fraction: totalMs > 0 ? kf.timestampMs / totalMs : 0,
+        } as PhaseLabel,
+      };
+    });
+
+    const lContactPeaks = result.keyFrames
+      .filter(kf => kf.phaseId === 'contact' && kf.side === 'left')
+      .map(kf => kf.frameIndex);
+    const rContactPeaks = result.keyFrames
+      .filter(kf => kf.phaseId === 'contact' && kf.side === 'right')
+      .map(kf => kf.frameIndex);
+
+    const movementDiag: MovementAnalysisDiagnostics = {
+      refLeg: result.refSide === 'left' ? 'L' : 'R',
+      lContactPeaks,
+      rContactPeaks,
+      warnings: result.warnings,
+    };
+
     onProgress?.(100, `Selected ${selected.length} phase frames`);
-    return { frames: selected, diag: { gaitFSM: gaitDiag } };
+    return { frames: selected, diag: { movementAnalysis: movementDiag } };
   }
 
   // Non-gait smart relabeling
@@ -624,9 +298,9 @@ export function isPhaseSelectionAdequate(
   movementType: string,
 ): boolean {
   if (result.frames.length < 6) return false;
-  if (/running|gait|walk/i.test(movementType) && result.diag?.gaitFSM) {
-    const { lContactPeaks, rContactPeaks, detectedEvents } = result.diag.gaitFSM;
-    return lContactPeaks.length + rContactPeaks.length >= 2 && detectedEvents.length >= 5;
+  if (/running|gait|walk/i.test(movementType) && result.diag?.movementAnalysis) {
+    const { lContactPeaks, rContactPeaks } = result.diag.movementAnalysis;
+    return lContactPeaks.length + rContactPeaks.length >= 2;
   }
   return true;
 }

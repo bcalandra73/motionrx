@@ -2,7 +2,6 @@
 
 ## Main
 
-- Improve gait fsm logic
 - Is tape marker used? -- Yes used in orginal; bypasses media pipe.  Let's disable for now.
 - Support for manual marker adjustments
 

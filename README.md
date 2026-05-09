@@ -1,6 +1,6 @@
 # MotionRx
 
-Clinical motion analysis tool for physiotherapists and sports medicine practitioners. Upload a patient video, and MotionRx tracks joints with MediaPipe, identifies key movement phases using GaitFSM, calculates joint angles, then generates a structured clinical report via Claude AI.
+Clinical motion analysis tool for physiotherapists and sports medicine practitioners. Upload a patient video, and MotionRx tracks joints with MediaPipe, identifies key movement phases using biomechanical signal analysis, calculates joint angles, then generates a structured clinical report via Claude AI.
 
 ---
 
@@ -15,7 +15,7 @@ Captures frames from a configurable analysis window (start time + duration) at 5
 Runs MediaPipe Pose Landmarker Heavy (IMAGE mode) on every extracted frame, detecting 33 body landmarks per frame. Includes a pre-processing pass that lifts brightness and contrast on underexposed footage before inference. GPU acceleration is used where available with automatic CPU fallback.
 
 **3. Phase selection**
-Feeds the per-frame landmark data into GaitFSM — a state machine that identifies the 8 most diagnostically useful gait events (initial contact, loading response, midstance, propulsion, toe-off, early swing, mid swing, late swing). For non-gait movement types (squats, jumps, overhead press, etc.) the app samples frames uniformly across the movement cycle.
+For running and walking, feeds per-frame landmark data into a Zeni-method pelvis-relative analyzer that identifies 8 diagnostically useful gait events (initial contact, loading response, midstance, propulsion, toe-off, early swing, mid swing, late swing) using peak detection on heel and toe signals. For non-gait movement types (squats, jumps, overhead press, etc.) the app samples frames uniformly across the movement cycle.
 
 **3b. Secondary video pipeline** *(dual-plane only)*
 If a second camera angle is uploaded, steps 1–3 run independently on that video using the same movement type and the secondary camera's view setting. Failures are non-fatal — the pipeline falls back to single-view if the secondary video cannot be processed.
@@ -55,10 +55,14 @@ npm test           # run once
 npm run test:watch # watch mode
 ```
 
-These cover pure functions across three modules:
+These cover pure functions across several modules:
 - `getPhaseTimes.test.ts` — phase time calculations and phase maps
 - `angleCalculation.test.ts` — `mergeWorldLandmarks`, `extractAngles`, `aggregateAngles`, `REF_RANGES`
 - `reportGeneration.test.ts` — `buildReportPrompt`: patient metadata, angle display-value selection, movement-specific norms, PROMs, ASI, camera view notes, footwear request, JSON schema
+- `peaks.test.ts` — `findPeaks` / `findTroughs`: prominence, minDistance, trough detection
+- `interpolate.test.ts` — `interpolateLowVisibility`: gap filling, large-gap flagging
+- `filter.test.ts` — `lowPassFilter`: DC passthrough, noise attenuation, zero-phase property
+- `running.test.ts` — `analyzeMovement('Running', ...)`: 8-phase output, edge inputs, synthetic fixture
 
 ### Pipeline runner
 

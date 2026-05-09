@@ -49,6 +49,7 @@ export interface RunnerOutput {
   report: unknown | null;
   prompt: string | null;
   error: string | null;
+  movementWarnings: string[];
 }
 
 interface SecondaryOutput {
@@ -202,6 +203,7 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
     report: null,
     prompt: null,
     error: null,
+    movementWarnings: [],
   };
 
   try {
@@ -231,6 +233,10 @@ async function runPipeline(input: RunnerInput): Promise<RunnerOutput> {
     status(
       `[${dir}] Steps 2–4 ✓ — ${primary.phaseFrames.length} phase frames: ${primary.phaseFrames.map((f) => f.phase.id).join(", ")}`,
     );
+    output.movementWarnings = primary.movementAnalysisDiag?.warnings ?? [];
+    if (output.movementWarnings.length > 0) {
+      status(`[${dir}] Movement warnings: ${output.movementWarnings.join(", ")}`);
+    }
 
     if (secondaryMeta) {
       status(`[${dir}] Step 3b — secondary video...`);

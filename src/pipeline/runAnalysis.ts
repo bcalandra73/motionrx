@@ -3,7 +3,7 @@ import type { ExtractedFrame } from '../types';
 import { detectPoseOnFrames, buildMediaPipeDiagnostics } from './poseDetection';
 import type { PoseFrameResult, MediaPipeDiagnostics } from './poseDetection';
 import { selectPhaseFrames } from './phaseSelection';
-import type { GaitFSMDiagnostics } from './phaseSelection';
+import type { MovementAnalysisDiagnostics } from './phaseSelection';
 import { annotateFrame } from './frameAnnotation';
 import { mergeWorldLandmarks, extractAngles, aggregateAngles } from './angleCalculation';
 import type { AngleStat, FrameAnglePoint } from './angleCalculation';
@@ -37,7 +37,7 @@ export interface PrimaryAnalysisResult {
   aggregated: Record<string, AngleStat>;
   allFrameAngleSeries: FrameAnglePoint[];
   allFrameLandmarkSeries: FrameLandmarkPoint[];
-  gaitFSMDiag: GaitFSMDiagnostics | null;
+  movementAnalysisDiag: MovementAnalysisDiagnostics | null;
   mediapipeDiag: MediaPipeDiagnostics | null;
 }
 
@@ -83,17 +83,15 @@ export async function runPrimaryAnalysis(
     cameraView,
     onProgress,
   });
-  const gd = diag?.gaitFSM ?? null;
+  const gd = diag?.movementAnalysis ?? null;
   if (gd) {
     const refLeg = gd.refLeg === 'L' ? 'Left' : 'Right';
-    const ankleNote = gd.ankleSignalWeak ? 'ankle WEAK → knee-dominant' : 'ankle strong';
+    const warnStr = gd.warnings.length > 0 ? ` | warnings: ${gd.warnings.join(', ')}` : '';
     console.log(
-      `[Step 3 ✓] GaitFSM: ref=${refLeg} | L-vis=${gd.lVisFrames} R-vis=${gd.rVisFrames}` +
-      ` | ${ankleNote} (wA=${gd.ankleWeight.toFixed(2)} wK=${gd.kneeWeight.toFixed(2)})` +
-      ` | cycle frames ${gd.cycleStart}→${gd.cycleEnd} (${gd.cycleEnd - gd.cycleStart} frames)` +
-      ` | facing=${gd.icIsMin ? 'right→left' : 'left→right'} | ${Math.round(performance.now() - t3)}ms`,
+      `[Step 3 ✓] Movement analysis: ref=${refLeg}` +
+      ` | L-contacts=${gd.lContactPeaks.length} R-contacts=${gd.rContactPeaks.length}` +
+      `${warnStr} | ${Math.round(performance.now() - t3)}ms`,
     );
-    console.log(`[Step 3]   Events: ${gd.detectedEvents.map(e => `${e.phaseId}@${e.proportion.toFixed(2)}`).join('  ')}`);
   } else {
     console.log(
       `[Step 3 ✓] Phase selection: uniform sampling (${movementType})` +
@@ -157,7 +155,7 @@ export async function runPrimaryAnalysis(
     aggregated,
     allFrameAngleSeries,
     allFrameLandmarkSeries,
-    gaitFSMDiag: diag?.gaitFSM ?? null,
+    movementAnalysisDiag: diag?.movementAnalysis ?? null,
     mediapipeDiag,
   };
 }
