@@ -195,13 +195,14 @@ export const runningAnalyzer: MovementAnalyzer = {
       events[side] = { ic, to };
     }
 
-    // Determine ref side: whichever has greater total IC prominence (quality × quantity).
-    // Interpolation-filled gaps produce flatter, lower-prominence peaks, so the occluded
-    // leg naturally loses even if it happens to have an equal or higher raw peak count.
-    // Ties → left.
+    // Determine ref side: use forward direction as primary (near leg = same side as travel
+    // direction in a typical side-on setup). Fall back to total IC prominence when direction
+    // detection was ambiguous.
     const leftScore  = events.left.ic.reduce((s, p) => s + p.prominence, 0);
     const rightScore = events.right.ic.reduce((s, p) => s + p.prominence, 0);
-    const refSide: Side = leftScore >= rightScore ? 'left' : 'right';
+    const refSide: Side = ambiguous
+      ? (leftScore >= rightScore ? 'left' : 'right')
+      : (fwdSign > 0 ? 'right' : 'left');
     const oppSide: Side = refSide === 'left' ? 'right' : 'left';
 
     if (events[refSide].ic.length < 2) warnings.push('FEW_STRIDES');
@@ -292,47 +293,7 @@ export const runningAnalyzer: MovementAnalyzer = {
         : 0.4,
     });
 
-    // Earlyswing: nearest opp IC to ~51% of stride. OIC and TO are nearly coincident in
-    // running (~50% of stride), so the nearest OIC may land on the same frame or just before
-    // toeoff. Clamp to toIdx+1 to guarantee earlyswing follows toeoff without skipping to
-    // the next stride's OIC.
-    const targetEarly = Math.round(contactIdx + strideLen * 0.51);
-    const earlyOppIC = oppIC.length > 0
-      ? oppIC.reduce((best, cur) => Math.abs(cur.index - targetEarly) < Math.abs(best.index - targetEarly) ? cur : best)
-      : null;
-    const earlyIdx = Math.min(n - 1, Math.max(earlyOppIC?.index ?? targetEarly, toIdx + 1));
-    const medOppIcProm = median(oppIC.map(p => p.prominence));
-    keyFrames.push({
-      frameIndex: earlyIdx,
-      timestampMs: frames[earlyIdx].timestampMs,
-      phaseId: 'earlyswing',
-      side: refSide,
-      confidence: earlyOppIC
-        ? computeConfidence(frames, heelIdx[oppSide], earlyIdx, earlyOppIC.prominence, medOppIcProm)
-        : 0.3,
-    });
-
-    // Midswing: ankle minimum in swing window (start 1 frame past TO → end of stride)
-    const swingEnd = Math.min(n - 1, contactIdx + strideLen);
-    const swingStart = Math.min(toIdx + 1, swingEnd);
-    let midswingIdx = swingStart;
-    let minAnk = Infinity;
-    for (let i = swingStart; i <= swingEnd; i++) {
-      if (sideSignals[refSide].ankleFwd[i] < minAnk) {
-        minAnk = sideSignals[refSide].ankleFwd[i];
-        midswingIdx = i;
-      }
-    }
-    const clampedMsw = Math.min(n - 1, midswingIdx);
-    keyFrames.push({
-      frameIndex: clampedMsw,
-      timestampMs: frames[clampedMsw].timestampMs,
-      phaseId: 'midswing',
-      side: refSide,
-      confidence: 0.5,
-    });
-
-    // Lateswing: nearest opp TO after TO
+    // Lateswing: nearest opp TO after TO (compute first — anchors the swing window)
     const oppTOafter = oppTO.find(t => t.index > toIdx) ?? oppTO[oppTO.length - 1];
     const lateIdx = Math.min(n - 1, oppTOafter?.index ?? Math.round(contactIdx + strideLen * 0.85));
     const medOppToProm = median(oppTO.map(p => p.prominence));
@@ -344,6 +305,27 @@ export const runningAnalyzer: MovementAnalyzer = {
       confidence: oppTOafter
         ? computeConfidence(frames, toeIdx[oppSide], lateIdx, oppTOafter.prominence, medOppToProm)
         : 0.3,
+    });
+
+    // Earlyswing and midswing: subdivide the toeoff→lateswing window into thirds.
+    // OIC (~51% of stride) and ankle-minimum approaches both collapse to toIdx+1 at typical
+    // clinical frame rates, so proportional subdivision is more reliable.
+    const swingSpan = lateIdx - toIdx;
+    const earlyIdx = Math.min(n - 1, toIdx + Math.max(1, Math.round(swingSpan / 3)));
+    const midIdx   = Math.min(n - 1, toIdx + Math.max(2, Math.round((swingSpan * 2) / 3)));
+    keyFrames.push({
+      frameIndex: earlyIdx,
+      timestampMs: frames[earlyIdx].timestampMs,
+      phaseId: 'earlyswing',
+      side: refSide,
+      confidence: 0.4,
+    });
+    keyFrames.push({
+      frameIndex: midIdx,
+      timestampMs: frames[midIdx].timestampMs,
+      phaseId: 'midswing',
+      side: refSide,
+      confidence: 0.4,
     });
 
     keyFrames.sort((a, b) => a.frameIndex - b.frameIndex);
