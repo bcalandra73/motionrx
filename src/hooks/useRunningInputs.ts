@@ -6,7 +6,6 @@ const defaultInputs: RunningInputs = {
   speedUnit: 'mph',
   treadmillIncline: '',
   runningSurface: 'treadmill',
-  videoFps: 30,
   shoe: '',
   experience: '',
   includeFootwear: true,

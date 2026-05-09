@@ -58,7 +58,6 @@ export interface RunningInputs {
   speedUnit: SpeedUnit;
   treadmillIncline: string;
   runningSurface: RunningSurface;
-  videoFps: number;
   shoe: ShoeType;
   experience: RunnerExperience;
   includeFootwear: boolean;

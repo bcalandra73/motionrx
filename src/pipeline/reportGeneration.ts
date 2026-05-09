@@ -333,8 +333,6 @@ function formatRunningContext(running: RunningInputs | undefined, patient: Patie
     lines.push(`Symptomatic/injured side: ${patient.injuredSide} — use this to interpret which side is compensating`);
   }
 
-  lines.push(`Video frame rate: ${running.videoFps}fps${running.videoFps < 60 ? ' (GCT/float unreliable at this fps)' : ' (GCT measurement viable)'}`);
-
   return lines.length ? '\nRUNNING CONTEXT:\n' + lines.map(l => `- ${l}`).join('\n') : '';
 }
 

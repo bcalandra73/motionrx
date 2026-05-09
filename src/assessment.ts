@@ -145,7 +145,6 @@ export function assessmentFromYaml(raw: YamlObject): Assessment {
       speedUnit:        (str(r.speed_unit, 'mph') as SpeedUnit) || 'mph',
       treadmillIncline: str(r.treadmill_incline),
       runningSurface:   (str(r.surface, 'treadmill') as RunningSurface) || 'treadmill',
-      videoFps:         num(r.fps, 30),
       shoe:             str(r.shoe) as ShoeType,
       experience:       str(r.experience) as RunnerExperience,
       includeFootwear:  bool(r.include_footwear, true),

@@ -339,16 +339,6 @@ export default function App() {
                         </select>
                       </div>
                       <div className="form-group">
-                        <label className="form-label">Video Frame Rate <span style={{ fontWeight: 400, color: 'var(--muted)' }}>(60fps+ enables GCT)</span></label>
-                        <select value={running.inputs.videoFps}
-                          onChange={e => running.setField('videoFps', parseInt(e.target.value, 10))}>
-                          <option value={30}>30 fps — standard</option>
-                          <option value={60}>60 fps — slo-mo</option>
-                          <option value={120}>120 fps — high slo-mo</option>
-                          <option value={240}>240 fps — super slo-mo</option>
-                        </select>
-                      </div>
-                      <div className="form-group">
                         <label className="form-label">Shoe Type</label>
                         <select value={running.inputs.shoe}
                           onChange={e => running.setField('shoe', e.target.value as typeof running.inputs.shoe)}>

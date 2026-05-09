@@ -182,7 +182,6 @@ describe('buildReportPrompt — running context', () => {
       speedUnit:        'kph',
       treadmillIncline: '1',
       runningSurface:   'treadmill',
-      videoFps:          60,
       shoe:             'stability',
       experience:       'recreational',
       includeFootwear:  false,
@@ -204,10 +203,6 @@ describe('buildReportPrompt — running context', () => {
 
   it('includes shoe type', () => {
     expect(buildReportPrompt(runCtx)).toContain('stability');
-  });
-
-  it('includes fps', () => {
-    expect(buildReportPrompt(runCtx)).toContain('60fps');
   });
 
   it('includes patient height in cm', () => {
@@ -268,7 +263,7 @@ describe('buildReportPrompt — footwear recommendation', () => {
     },
     running: {
       treadmillSpeed: '', speedUnit: 'mph', treadmillIncline: '',
-      runningSurface: 'road', videoFps: 30, shoe: 'neutral',
+      runningSurface: 'road', shoe: 'neutral',
       experience: '', includeFootwear: true,
     },
   });
@@ -289,7 +284,7 @@ describe('buildReportPrompt — footwear recommendation', () => {
   it('does NOT include footwear section when unchecked', () => {
     const p = buildReportPrompt(makeCtx({
       movementType: 'Running',
-      running: { treadmillSpeed: '', speedUnit: 'mph', treadmillIncline: '', runningSurface: 'road', videoFps: 30, shoe: '', experience: '', includeFootwear: false },
+      running: { treadmillSpeed: '', speedUnit: 'mph', treadmillIncline: '', runningSurface: 'road', shoe: '', experience: '', includeFootwear: false },
     }));
     expect(p).not.toContain('FOOTWEAR RECOMMENDATION REQUEST');
     expect(p).not.toContain('footwear_recommendation');
@@ -298,7 +293,7 @@ describe('buildReportPrompt — footwear recommendation', () => {
   it('does NOT include footwear section for non-running movements', () => {
     const p = buildReportPrompt(makeCtx({
       movementType: 'Squat (Double-Leg)',
-      running: { treadmillSpeed: '', speedUnit: 'mph', treadmillIncline: '', runningSurface: 'road', videoFps: 30, shoe: '', experience: '', includeFootwear: true },
+      running: { treadmillSpeed: '', speedUnit: 'mph', treadmillIncline: '', runningSurface: 'road', shoe: '', experience: '', includeFootwear: true },
     }));
     expect(p).not.toContain('FOOTWEAR RECOMMENDATION REQUEST');
   });

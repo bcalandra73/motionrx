@@ -26,7 +26,6 @@ running:
   speed_unit: mph
   treadmill_incline: "0"
   surface: treadmill
-  fps: 120
   shoe: minimalist
   experience: recreational
   include_footwear: false
