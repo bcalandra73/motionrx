@@ -118,10 +118,14 @@ export async function runPrimaryAnalysis(
   // Phase-selected annotated frames (for report / UI slideshow) — reuse from allAnnotatedFrames
   const annotatedFrames = phaseFrames.map(f => allAnnotatedFrames[f.index]);
 
-  const allFrameAngles = poseResults.map(r =>
-    extractAngles(mergeWorldLandmarks(r.poseLandmarks ?? [], r.worldLandmarks), cameraView, movementType),
+  const allFrameAngles = allPoseResults.map(r =>
+    r.poseLandmarks
+      ? extractAngles(mergeWorldLandmarks(r.poseLandmarks, r.worldLandmarks), cameraView, movementType)
+      : {},
   );
-  const aggregated = aggregateAngles(allFrameAngles, phaseFrames.map(f => f.phase));
+  const phaseByIndex = new Map(phaseFrames.map(f => [f.index, f.phase]));
+  const allFramePhases = frames.map((_, i) => phaseByIndex.get(i) ?? null);
+  const aggregated = aggregateAngles(allFrameAngles, allFramePhases);
 
   const allFrameLandmarkSeries: FrameLandmarkPoint[] = allPoseResults.map((r, i) => ({
     timestamp: frames[i].timestamp,
@@ -132,9 +136,7 @@ export async function runPrimaryAnalysis(
   const allFrameAngleSeries: FrameAnglePoint[] = allPoseResults.map((r, i) => ({
     timestamp: frames[i].timestamp,
     frameIndex: i,
-    angles: r.poseLandmarks
-      ? extractAngles(mergeWorldLandmarks(r.poseLandmarks, r.worldLandmarks), cameraView, movementType)
-      : {},
+    angles: allFrameAngles[i],
   }));
 
   const gifData = await framesToGif(allAnnotatedFrames);

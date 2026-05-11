@@ -88,7 +88,7 @@ export default function App() {
 
     video.setStage('extracting', 'Extracting video frames...', 0);
     const t0 = performance.now();
-    console.log('[Pipeline] Starting analysis —', movementType, video.primary.file.name);
+    console.log(`[Pipeline] Starting analysis — ${movementType} | ${video.primary.file.name} | start=${startSecs}s duration=${durationSecs}s fps=${targetFps}`);
 
     try {
       // Step 1: Extract frames across the user-specified window
