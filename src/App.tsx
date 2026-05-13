@@ -499,22 +499,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ANGLE CHART */}
-        {hasResults && angleSeries.length > 0 && (
-          <AngleChart
-            series={angleSeries}
-            phaseFrames={video.primary.extractedFrames ?? []}
-          />
-        )}
-
-        {/* LANDMARK POSITION CHARTS */}
-        {hasResults && landmarkSeries.length > 0 && (
-          <LandmarkChart
-            series={landmarkSeries}
-            phaseFrames={video.primary.extractedFrames ?? []}
-          />
-        )}
-
         {/* RESULTS */}
         {hasResults && video.analysis.report && (
           <ResultsSection
@@ -529,6 +513,35 @@ export default function App() {
             onExportPdf={() => {/* TODO */}}
             onCompare={() => {/* TODO */}}
           />
+        )}
+
+        {/* GRAPHS (collapsible) */}
+        {hasResults && (angleSeries.length > 0 || landmarkSeries.length > 0) && (
+          <details style={{ margin: '20px 0' }}>
+            <summary style={{
+              cursor: 'pointer', fontWeight: 600, fontSize: '.9rem',
+              color: 'var(--ink)', padding: '12px 16px',
+              background: 'var(--navy-light)', border: '1px solid var(--border)',
+              borderRadius: 10, listStyle: 'none', display: 'flex',
+              alignItems: 'center', gap: 8, userSelect: 'none',
+            }}>
+              <span style={{ fontSize: '1rem' }}>📊</span> Graphs
+            </summary>
+            <div style={{ marginTop: 8 }}>
+              {angleSeries.length > 0 && (
+                <AngleChart
+                  series={angleSeries}
+                  phaseFrames={video.primary.extractedFrames ?? []}
+                />
+              )}
+              {landmarkSeries.length > 0 && (
+                <LandmarkChart
+                  series={landmarkSeries}
+                  phaseFrames={video.primary.extractedFrames ?? []}
+                />
+              )}
+            </div>
+          </details>
         )}
       </div>
 
