@@ -3,6 +3,16 @@
 ## What this project does
 MotionRx is a browser-based clinical motion analysis tool. A clinician uploads a patient video; the app extracts frames, runs MediaPipe Pose Landmarker to detect 33 body landmarks on every frame, uses a Zeni-method pelvis-relative analyzer to select the 8 most clinically relevant gait phase frames, calculates joint angles, and sends the annotated frames + angle data to Claude (via the Anthropic API) which generates a structured clinical report.
 
+## About the maintainer
+
+The current maintainer is a practicing physical therapist with no programming background. They drive all development through Claude Code. Calibrate accordingly:
+
+- **Plan before non-trivial changes.** For anything that touches multiple files, the pipeline, the data model, external APIs, or clinical assumptions, lay out the plan in plain language *first* and confirm before writing code. Small, localized changes (a copy edit, a styling tweak, a typo fix) don't need a plan.
+- **Work on a branch by default.** For anything beyond a trivial fix, `git checkout -b <descriptive-name>`, make the change there, verify with `npm run dev` and `npm test`, and only merge to `main` once it's confirmed working. After merging, delete the topic branch.
+- **Surface clinical and biomechanical assumptions.** If a change implies a clinical decision — which limb counts as "involved," how a phase is defined, what counts as a normative range, what threshold flags an abnormality — call it out and ask. The maintainer is the domain expert; you are not. Never silently encode a clinical assumption.
+- **Append to `CHANGELOG.md` after meaningful changes.** One line: date, what changed, any follow-ups left undone. Future Claude sessions and the maintainer both read it.
+- **Explain in clinical/product terms first, code terms second.** When summarizing what you did, lead with the user-visible behaviour change, then the technical detail.
+
 ## Tech stack
 - **React 19 + TypeScript** (Vite 8)
 - **MediaPipe Tasks Vision 0.10.34** — Pose Landmarker Heavy, IMAGE mode, GPU→CPU fallback
@@ -11,9 +21,9 @@ MotionRx is a browser-based clinical motion analysis tool. A clinician uploads a
 - No backend — all processing runs in the browser; Claude API is called directly from the client with a user-supplied API key
 
 ## Pipeline (in order)
-1. **Frame extraction** (`src/pipeline/frameExtraction.ts`) — seek-based capture using `video.currentTime` + `seeked` event; configurable `startSecs`, `durationSecs`, `targetFps` (default 5 fps)
+1. **Frame extraction** (`src/pipeline/frameExtraction.ts`) — two extraction paths: seek-based (`video.currentTime` + `seeked` event) and WebCodecs (`decodeVideoFrames`); both must be preserved when editing this file; configurable `startSecs`, `durationSecs`, `targetFps` (default 30 fps)
 2. **Pose detection** (`src/pipeline/poseDetection.ts`) — `detectPoseOnFrames` runs MediaPipe `PoseLandmarker.detect()` (IMAGE mode) on every extracted frame; mild luma-based brightness pre-processing for underexposed footage
-3. **Phase selection** (`src/pipeline/phaseSelection.ts`) — `selectPhaseFrames` calls `analyzeMovement()` from `src/pipeline/movement-analysis/` to identify 8 gait events (contact, loading, midstance, propulsion, toeoff, earlyswing, midswing, lateswing) using the Zeni pelvis-relative method; falls back to uniform sampling for non-gait movement types
+3. **Phase selection** (`src/pipeline/phaseSelection.ts`) — `selectPhaseFrames` calls `analyzeMovement()` from `src/pipeline/movement-analysis/` to identify 8 gait events (contact, loading, midstance, propulsion, toeoff, earlyswing, midswing, lateswing) using the Zeni pelvis-relative method; falls back to uniform sampling for non-gait movement types. *Detailed running-gait logic: `docs/running-analyzer.md`.*
 4. **Angle calculation** (`src/pipeline/angleCalculation.ts`) — `extractAngles` + `aggregateAngles` per phase
 5. **Report generation** (`src/pipeline/reportGeneration.ts` + `src/api.ts`) — structured prompt + annotated frame images → Claude API → JSON report
 
@@ -32,121 +42,45 @@ MotionRx is a browser-based clinical motion analysis tool. A clinician uploads a
 | `src/hooks/useVideoAnalysis.ts` | Video upload + analysis state |
 | `src/hooks/usePoseDetector.ts` | MediaPipe singleton state |
 | `src/types/index.ts` | Shared types (`ExtractedFrame`, `NormalizedLandmark`, etc.) |
-
-## Movement analysis module (`src/pipeline/movement-analysis/`)
-
-The module is the single authoritative entry point for all movement-type phase selection:
-
-```
-movement-analysis/
-├── index.ts          # exports analyzeMovement(movementType, frames, fps)
-├── types.ts          # PoseFrame, KeyFrame, MovementAnalysisResult, MovementAnalyzer
-├── registry.ts       # movementType → analyzer dispatch
-├── analyzers/
-│   └── running.ts    # Zeni pelvis-relative running analyzer (8 phases)
-└── signal/
-    ├── landmarks.ts  # LM index constants (MediaPipe 33-point)
-    ├── peaks.ts      # findPeaks / findTroughs with prominence + minDistance
-    ├── interpolate.ts # visibility-gap linear interpolation
-    └── filter.ts     # zero-phase Butterworth (fili) with SG-11 fallback
-```
-
-**Adding a new movement type to the module:**
-1. Create `analyzers/<type>.ts` implementing `MovementAnalyzer`.
-2. Register it in `registry.ts`.
-3. Extend `AnalyzableMovement` and `PhaseId` unions in `types.ts`.
-
-## MediaPipe landmark indices
-33-point format. Key indices used by the running analyzer (see `signal/landmarks.ts`):
-- Hips: 23 (L), 24 (R)
-- Knees: 25 (L), 26 (R)
-- Ankles: 27 (L), 28 (R)
-- Heels: 29 (L), 30 (R)
-- Foot index: 31 (L), 32 (R)
-
-## Pipeline runner (headless batch mode)
-`scripts/run-pipeline.ts` runs test cases from `test_data/` headlessly via Playwright + Vite.
-
-```bash
-npm run pipeline                  # run all test_data/test_* cases
-npm run pipeline -- --test test_1 # run a single case
-```
-
-**All run parameters come from each test's `test.yaml` — never from CLI args.** The only CLI argument is `--test` to select which case to run. Set `ANTHROPIC_API_KEY` in the environment to enable report generation. Output always goes to `test_output/<test_name>/`.
-
-## test.yaml schema
-Every parameter that controls a run lives in the YAML file. Key top-level blocks:
-
-```yaml
-patient:
-  name: Jane Doe
-  age: 34
-  diagnosis: Knee pain
-  movement_type: Running        # must match a key in PHASE_MAPS
-  height: 65
-  height_unit: in               # 'in' | 'cm'
-  injured_side: left            # 'left' | 'right' | 'bilateral' | 'none'
-  notes: Post-ACL reconstruction
-
-media:
-  primary:
-    file: video.mov
-    camera_view: side           # 'side' | 'front' | 'posterior'
-  secondary:                    # optional second camera angle
-    file: video2.mov
-    camera_view: front
-  capture:                      # optional — controls frame extraction
-    start: 0                    # startSecs (default 0)
-    duration: 2                 # durationSecs (default 2)
-    fps: 30                     # targetFps (default 30)
-
-focus:                          # optional — clinical areas to highlight in report
-  - knee valgus
-  - trunk lean
-
-running:                        # include for Running movement type
-  treadmill_speed: 7.5
-  speed_unit: mph
-  surface: treadmill
-  fps: 240
-
-jump:                           # include for jump/landing movement types
-  fps: 120
-  involved_limb: left
-  protocol: 30cm
-  time_post_op: 6mo
-```
+| `src/assessment.ts` | YAML → runtime object bridge; update whenever `test.yaml` schema changes or a new movement-type block is added |
+| `src/runner/runner.ts` | Headless pipeline runner — canonical E2E test |
+| `scripts/run-pipeline.ts` | CLI entry point for the runner (`npm run pipeline`) |
 
 ## Running
 ```bash
-npm run dev      # dev server
-npm run build    # production build
-npm test         # unit tests
+npm run dev      # dev server at http://localhost:5173
+npm run build    # production build → dist/
+npm test         # unit tests (Vitest)
+npx tsc --noEmit # type-check
 ```
+
+For the headless pipeline runner against `test_data/`, see `docs/test-data.md`.
 
 ## Development conventions
 
-- **Keep the README current** — if you add a pipeline step, change behaviour, or add a CLI flag, update `README.md` to reflect it before considering the task done.
+- **Plan before complex changes** — see "About the maintainer" above.
+- **Work on a branch** — see "About the maintainer" above. After merging, delete the topic branch.
+- **Update `CHANGELOG.md`** — a one-line entry for any user-visible or behavioural change.
+- **Run tests before declaring a task done** — `npm test` for unit tests; for any pipeline change, also `npm run pipeline -- --test <case>` against at least one real case in `test_data/`. Type-check with `npx tsc --noEmit`.
+- **Keep the README current** — `README.md` is written for the (non-technical) maintainer. If you add a user-visible feature, a new CLI flag, change setup steps, or change the workflow, update it in plain language they can follow.
+- **Keep `docs/` and this file in sync with reality** — if you add a pipeline step, change the movement-analysis module structure, add a new movement type, or change the `test.yaml` schema, update the relevant doc in lockstep with the code. Stale docs mislead future Claude sessions.
 - **Keep the E2E runner current** — any change to pipeline logic (new step, new output field, changed aggregation) must be reflected in `src/runner/runner.ts` and `scripts/run-pipeline.ts`. The runner is the canonical end-to-end test; if it doesn't exercise a feature, that feature is untested.
 
-## Architecture notes
+## Architecture invariants — do not change without explicit confirmation
 
-- **Pure functions** — pipeline logic is kept free of side effects and UI concerns. Keep it this way — it's why unit tests are fast.
-- **Non-fatal secondary pipeline** — any failure in the secondary video path must not crash the primary pipeline. Always wrap secondary processing in try/catch and fall back gracefully.
-- **Primary view precedence** — when merging dual-plane angle data, primary view values always win on overlap. Do not change this without updating tests.
-- **`_original_index.html`** — the original single-file prototype. Treat as read-only reference. Do not modify or re-integrate it.
+These behaviours are load-bearing. Changing any of them needs an explicit conversation with the maintainer, not a unilateral refactor.
 
-## Adding a new movement type
+- **Pure-function pipeline.** Pipeline logic under `src/pipeline/` is kept free of side effects, React state, DOM access, and network calls. This is why unit tests are fast — keep it this way.
+- **Non-fatal secondary pipeline.** Any failure in the secondary video path must not crash the primary pipeline. Always wrap secondary processing in try/catch and fall back gracefully to single-view.
+- **Primary view precedence.** When merging dual-plane angle data, primary-view values always win on overlap. Don't change this without updating tests in lockstep.
+- **API key handling.** The Anthropic API key is user-supplied at runtime and lives only in memory on the client. Never log it, persist it to disk or storage, or send it anywhere other than `api.anthropic.com`. Don't introduce a backend that proxies it without an explicit discussion with the maintainer.
+- **Pipeline runner inputs come from `test.yaml`.** Never from CLI args (except `--test` to select the case). Don't add per-run CLI overrides for pipeline behaviour.
+- **`_original_index.html`.** The original single-file prototype, kept as a read-only reference. Do not modify or re-integrate.
 
-For non-gait movement types (uniform frame sampling), the existing path handles them:
-1. Add phase timestamps to `PHASE_MAPS` in `src/data/phaseMaps.ts` and update `getPhaseTimes.test.ts`.
-2. Determine which angle metrics apply (side / front / posterior) and verify `extractAngles` covers them.
-3. Add movement-specific normative ranges to `REF_RANGES` and `buildReportPrompt`.
-4. Add a test case to `test_data/` and run the E2E pipeline to validate end-to-end.
-5. Update `reportGeneration.test.ts` for any `buildReportPrompt` changes.
+## Further reading
 
-For movement types requiring biomechanical signal analysis (like Running):
-1. Create `src/pipeline/movement-analysis/analyzers/<type>.ts` implementing `MovementAnalyzer`.
-2. Register it in `registry.ts` and extend `AnalyzableMovement` / `PhaseId` in `types.ts`.
-3. Update the `isGait` regex in `selectPhaseFrames` if needed.
-4. Add tests in `src/pipeline/__tests__/`.
+In-depth references live in `docs/`. Read whichever applies before non-trivial work in that area:
+
+- **`docs/architecture.md`** — code organisation, the movement-analysis module layout, MediaPipe landmark indices, and the canonical recipe for adding a new movement type. Read before any change to `src/pipeline/movement-analysis/` or before adding a new movement type anywhere.
+- **`docs/running-analyzer.md`** — the Zeni-method running gait analyzer in detail (signal preparation, event detection, phase derivation, confidence scoring, failure modes). Required reading before changing `src/pipeline/movement-analysis/analyzers/running.ts`.
+- **`docs/test-data.md`** — `test.yaml` schema and the headless pipeline runner (both CLI and in-browser modes).
