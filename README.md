@@ -52,7 +52,7 @@ For every change you want to make, follow this loop:
 1. **Describe what you want in plain language.** Tell Claude the goal, not the implementation. "On the patient intake form, I want a new optional field for pain score, 0 to 10."
 2. **For anything non-trivial, ask Claude to plan first.** Say *"Plan this change before making it."* Claude will outline what it intends to do. Read the plan. If something looks wrong or unclear, push back before any code is written. This catches the majority of mistakes for free.
 3. **Ask Claude to work on a branch.** Say *"Make this change on a new branch."* This keeps the working version of the app safe and lets you compare before/after. You don't need to know what a branch is — Claude handles the git commands.
-4. **Test the change.** Run `npm run dev` and try the new behaviour in your browser. Run `npm test` to make sure nothing else broke. For pipeline changes, also run `npm run pipeline -- --test <case>` against a real test case in `test_data/` to verify end-to-end behaviour.
+4. **Test the change.** Run `npm run dev` and try the new behaviour in your browser. For pipeline changes, also run `npm run pipeline -- --test <case>` against a real test case in `test_data/` to verify end-to-end behaviour.
 5. **If it works, merge it.** Say *"Merge this branch into main."* If it doesn't, say *"This isn't working — \[describe what you're seeing\]. Can you fix it, or undo the change?"*
 
 For trivial changes (a typo, a label tweak) you can skip the branch step. Save that ceremony for anything that touches how the app actually behaves.
@@ -102,7 +102,6 @@ Terms you'll hear Claude use, in plain language:
 
 - **API key** — a long password-like string that authorizes the app (or Claude Code) to use Anthropic's services. Keep it private; never paste it into a public chat, a GitHub issue, or a screenshot. If you ever leak one, rotate it at https://console.anthropic.com.
 - **Branch** — a separate, parallel copy of the project. Lets you make changes in a sandbox before deciding to keep them.
-- **Build** — bundling the code into a form ready to be deployed. `npm run build` does this.
 - **Commit** — a saved snapshot of the project at one point in time. Git keeps a full history.
 - **Dependency** — a library the project uses but didn't write itself. Listed in `package.json`.
 - **Dev server** — the local copy of the app running on your machine while you work. `npm run dev` starts it.
@@ -113,7 +112,6 @@ Terms you'll hear Claude use, in plain language:
 - **npm** — the tool that installs and manages dependencies.
 - **Pipeline** — the sequence the app runs every video through: extract frames → detect pose → pick key phases → measure angles → generate report.
 - **Pull request / PR** — a proposed merge that can be reviewed before it's accepted. Not strictly required for this project but Claude may use the term.
-- **Type-check** — verifying that the code is internally consistent before running it. `npx tsc --noEmit` does this.
 
 ---
 

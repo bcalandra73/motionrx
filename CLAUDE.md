@@ -5,8 +5,9 @@ MotionRx is a browser-based clinical motion analysis tool. A clinician uploads a
 
 ## About the maintainer
 
-The current maintainer is a practicing physical therapist with no programming background. They drive all development through Claude Code. Calibrate accordingly:
+The maintainer is a practicing physical therapist with no programming background. They work through Claude Code on their own machine via git. Calibrate accordingly:
 
+- **Keep answers simple and non-technical.** For how-to questions, direct the user to `README.md` — it is written in plain language for them. Avoid jargon and code-level detail unless they ask.
 - **Plan before non-trivial changes.** For anything that touches multiple files, the pipeline, the data model, external APIs, or clinical assumptions, lay out the plan in plain language *first* and confirm before writing code. Small, localized changes (a copy edit, a styling tweak, a typo fix) don't need a plan.
 - **Work on a branch by default.** For anything beyond a trivial fix, `git checkout -b <descriptive-name>`, make the change there, verify with `npm run dev` and `npm test`, and only merge to `main` once it's confirmed working. After merging, delete the topic branch.
 - **Surface clinical and biomechanical assumptions.** If a change implies a clinical decision — which limb counts as "involved," how a phase is defined, what counts as a normative range, what threshold flags an abnormality — call it out and ask. The maintainer is the domain expert; you are not. Never silently encode a clinical assumption.
