@@ -1,0 +1,28 @@
+patient:
+  name: Joe
+  age: 42
+  diagnosis: knee pain
+  movement_type: running
+
+media:
+  primary:
+    file: side.mov
+    camera_view: side
+  # secondary:
+  #   file: front.mov
+  #   camera_view: posterior
+  capture:
+    start: 1
+    duration: 3
+    fps: 30
+
+focus: []
+
+running:
+  treadmill_speed: "7.0"
+  speed_unit: mph
+  treadmill_incline: "0"
+  surface: treadmill
+  shoe: minimalist
+  experience: recreational
+  include_footwear: false
