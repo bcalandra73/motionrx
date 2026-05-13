@@ -2,7 +2,16 @@
 
 Running log of meaningful changes to MotionRx. Most recent at the top.
 
-Each entry: date, what changed in plain language, and any follow-ups the change leaves behind. New entries get added by Claude Code after any user-visible or behavioural change — see `CLAUDE.md` for the convention.
+Each entry covers one session: date, what changed in plain language, and any follow-ups left undone. Long sessions get compacted into a summary. Added by Claude Code at the end of every session.
+
+---
+
+## 2026-05-13 — Code cleanup: remove duplicate calcAngle and dead prop
+
+- Consolidated duplicate `calcAngle()` function — exported from `angleCalculation.ts`, removed copy from `phaseSelection.ts`
+- Removed unused `hasDualView` prop from `LoadingState` component interface and call site
+
+No behaviour change.
 
 ---
 

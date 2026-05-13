@@ -10,7 +10,7 @@ The current maintainer is a practicing physical therapist with no programming ba
 - **Plan before non-trivial changes.** For anything that touches multiple files, the pipeline, the data model, external APIs, or clinical assumptions, lay out the plan in plain language *first* and confirm before writing code. Small, localized changes (a copy edit, a styling tweak, a typo fix) don't need a plan.
 - **Work on a branch by default.** For anything beyond a trivial fix, `git checkout -b <descriptive-name>`, make the change there, verify with `npm run dev` and `npm test`, and only merge to `main` once it's confirmed working. After merging, delete the topic branch.
 - **Surface clinical and biomechanical assumptions.** If a change implies a clinical decision — which limb counts as "involved," how a phase is defined, what counts as a normative range, what threshold flags an abnormality — call it out and ask. The maintainer is the domain expert; you are not. Never silently encode a clinical assumption.
-- **Append to `CHANGELOG.md` after meaningful changes.** One line: date, what changed, any follow-ups left undone. Future Claude sessions and the maintainer both read it.
+- **Append to `CHANGELOG.md` at the end of every session.** Log all changes made — one entry per session, compacted if the session was long. Include date, what changed, and any follow-ups left undone. Future Claude sessions and the maintainer both read it.
 - **Explain in clinical/product terms first, code terms second.** When summarizing what you did, lead with the user-visible behaviour change, then the technical detail.
 
 ## Tech stack
@@ -60,7 +60,7 @@ For the headless pipeline runner against `test_data/`, see `docs/test-data.md`.
 
 - **Plan before complex changes** — see "About the maintainer" above.
 - **Work on a branch** — see "About the maintainer" above. After merging, delete the topic branch.
-- **Update `CHANGELOG.md`** — a one-line entry for any user-visible or behavioural change.
+- **Update `CHANGELOG.md`** — one entry per session covering all changes; compact if the session was long.
 - **Run tests before declaring a task done** — `npm test` for unit tests; for any pipeline change, also `npm run pipeline -- --test <case>` against at least one real case in `test_data/`. Type-check with `npx tsc --noEmit`.
 - **Keep the README current** — `README.md` is written for the (non-technical) maintainer. If you add a user-visible feature, a new CLI flag, change setup steps, or change the workflow, update it in plain language they can follow.
 - **Keep `docs/` and this file in sync with reality** — if you add a pipeline step, change the movement-analysis module structure, add a new movement type, or change the `test.yaml` schema, update the relevant doc in lockstep with the code. Stale docs mislead future Claude sessions.

@@ -4,6 +4,7 @@ import { PHASE_MAPS } from '../data/phaseMaps';
 import { getPhaseTimes } from './frameExtraction';
 import { analyzeMovement } from './movement-analysis';
 import type { PoseFrame } from './movement-analysis';
+import { calcAngle } from './angleCalculation';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -27,19 +28,6 @@ export interface PhaseSelectionDiagnostics {
 }
 
 // ── Signal utilities ──────────────────────────────────────────────────────────
-
-function calcAngle(
-  a: { x: number; y: number },
-  b: { x: number; y: number },
-  c: { x: number; y: number },
-): number | null {
-  const ab = { x: a.x - b.x, y: a.y - b.y };
-  const cb = { x: c.x - b.x, y: c.y - b.y };
-  const dot = ab.x * cb.x + ab.y * cb.y;
-  const mag = Math.sqrt(ab.x ** 2 + ab.y ** 2) * Math.sqrt(cb.x ** 2 + cb.y ** 2);
-  if (!mag) return null;
-  return Math.round(Math.acos(Math.max(-1, Math.min(1, dot / mag))) * 180 / Math.PI);
-}
 
 function fillGaps(arr: (number | null)[]): number[] {
   const out = [...arr] as (number | null)[];

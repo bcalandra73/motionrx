@@ -88,7 +88,7 @@ export function mergeWorldLandmarks(
 
 // ── Angle math ────────────────────────────────────────────────────────────────
 
-function calcAngle(
+export function calcAngle(
   a: { x: number; y: number },
   b: { x: number; y: number },
   c: { x: number; y: number },

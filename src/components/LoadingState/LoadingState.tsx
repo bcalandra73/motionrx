@@ -3,7 +3,6 @@ import type { AnalysisStage } from '../../hooks/useVideoAnalysis';
 interface Props {
   stage: AnalysisStage;
   label: string;
-  hasDualView?: boolean;
 }
 
 const STEPS: { id: AnalysisStage; text: string }[] = [

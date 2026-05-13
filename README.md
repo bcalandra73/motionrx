@@ -90,7 +90,7 @@ A few files keep Claude oriented across sessions:
 
 - **`CLAUDE.md`** — technical context Claude reads at the start of every session. Written in code-speak. You don't need to read it, but you can ask Claude *"Read CLAUDE.md and tell me in plain English what it says about X"* any time.
 - **`docs/`** — deeper technical references (architecture, the running gait analyzer, the test-data format). Claude reads these when relevant.
-- **`CHANGELOG.md`** — a running log of what's been changed. After any meaningful change, ask Claude *"Add an entry to the changelog for what we just did."*
+- **`CHANGELOG.md`** — a running log of every session's changes. Claude adds an entry at the end of each session automatically.
 
 If Claude does something that turns out to be a recurring pattern you want it to follow forever, say *"Add a note about this to CLAUDE.md so future sessions remember."*
 

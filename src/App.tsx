@@ -488,7 +488,7 @@ export default function App() {
 
         {/* LOADING STATE */}
         {isAnalyzing && (
-          <LoadingState stage={video.analysis.stage} label={video.analysis.stageLabel} hasDualView={!!video.secondary.file} />
+          <LoadingState stage={video.analysis.stage} label={video.analysis.stageLabel} />
         )}
 
         {/* ERROR STATE */}
