@@ -6,6 +6,13 @@ Each entry covers one session: date, what changed in plain language, and any fol
 
 ---
 
+## 2026-05-13 — Move graphs to collapsible section below report
+
+- Graphs (angle chart, landmark chart) moved to the bottom of the results page
+- Wrapped in a native `<details>`/`<summary>` collapsible box labeled "Graphs" — hidden by default, expand to view
+
+---
+
 ## 2026-05-13 — Code cleanup: remove duplicate calcAngle and dead prop
 
 - Consolidated duplicate `calcAngle()` function — exported from `angleCalculation.ts`, removed copy from `phaseSelection.ts`
