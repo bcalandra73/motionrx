@@ -1832,6 +1832,13 @@ function startFrameExtraction(file, vid) {
                 lKneeX: lK?.x ?? null,  // for shin angle
                 lAnkXFull: lA?.x ?? null, // already captured as lAnkX
                 lKneeY: lK?.y ?? null,   // for shin angle
+                // v0.14.0: per-side visibility for camera-near detection
+                lHipVis:  lms[23]?.visibility ?? 0,
+                lKneeVis: lms[25]?.visibility ?? 0,
+                lAnkVis:  lms[27]?.visibility ?? 0,
+                rHipVis:  lms[24]?.visibility ?? 0,
+                rKneeVis: lms[26]?.visibility ?? 0,
+                rAnkVis:  lms[28]?.visibility ?? 0,
               };
             }).filter(Boolean);
 
@@ -4994,29 +5001,32 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         ];
 
         // Draw connections — solid if both joints confident, dashed if estimated
-        // LEFT side (MediaPipe odd landmarks: 11,13,15,23,25,27,29,31) = TEAL
-        // RIGHT side (MediaPipe even landmarks: 12,14,16,24,26,28,30,32) = GOLD
-        // In SIDE VIEW for running/gait: fade right leg heavily so the PT focuses on the left leg.
-        // The labels are for LEFT foot phases — right leg causes consistent visual misreading.
+        // v0.14.0: REF leg = TEAL (assess this side), OPP leg = GOLD (faded in side view)
+        // REF is determined by visibility-based camera-near detection in StrideEngine.
+        // MediaPipe: left body = odd indices (11,13,15,23,25,27,29,31)
+        //            right body = even indices (12,14,16,24,26,28,30,32)
+        const _skelRefSide = window_strideMetrics?.refSide || 'L'; // fall back to L if no stride data
+        const _skelRefIsRight = _skelRefSide === 'R';
         connections.forEach(([a,b]) => {
           if(!lm[a]||!lm[b]) return;
           const visA = lm[a].visibility, visB = lm[b].visibility;
           if(visA < 0.2 && visB < 0.2) return; // skip very low confidence
           const conf = Math.min(visA, visB);
-          // MediaPipe: left body = odd indices (11,13,23,25,27,29,31)
-          //            right body = even indices (12,14,24,26,28,30,32)
-          const isRightSide = a > 10 && b > 10 && a % 2 === 0 && b % 2 === 0;
-          // In gait side view: fade right leg to 20% opacity so only left (teal) is prominent
-          const rightAlpha = _isGaitSideView ? 0.20 : 0.90;
-          const rightLowAlpha = _isGaitSideView ? 0.12 : 0.70;
+          // Determine if this connection is on the OPP (non-ref) side
+          const isRightBodySide = a > 10 && b > 10 && a % 2 === 0 && b % 2 === 0;
+          const isLeftBodySide  = a > 10 && b > 10 && a % 2 === 1 && b % 2 === 1;
+          const isOppSide = _skelRefIsRight ? isLeftBodySide : isRightBodySide;
+          // In gait side view: fade OPP leg to 20% opacity so the PT focuses on the REF leg
+          const oppAlpha = _isGaitSideView ? 0.20 : 0.90;
+          const oppLowAlpha = _isGaitSideView ? 0.12 : 0.70;
           ctx.save();
-          ctx.lineWidth = isRightSide ? lw * 0.7 : lw; // right leg slightly thinner always
+          ctx.lineWidth = isOppSide ? lw * 0.7 : lw; // OPP leg slightly thinner
           if(conf < 0.4) {
             ctx.setLineDash([6, 4]);
-            ctx.strokeStyle = isRightSide ? `rgba(251,191,36,${rightLowAlpha})` : 'rgba(255,200,0,0.7)';
+            ctx.strokeStyle = isOppSide ? `rgba(251,191,36,${oppLowAlpha})` : 'rgba(255,200,0,0.7)';
           } else {
             ctx.setLineDash([]);
-            ctx.strokeStyle = isRightSide ? `rgba(251,191,36,${rightAlpha})` : 'rgba(0,229,204,0.9)';
+            ctx.strokeStyle = isOppSide ? `rgba(251,191,36,${oppAlpha})` : 'rgba(0,229,204,0.9)';
           }
           ctx.beginPath();
           ctx.moveTo(lm[a].x*W, lm[a].y*H);
@@ -5090,32 +5100,33 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
                           : (isSwingPhase && (i===27||i===28)) ? '#facc15'
                           : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
           } else {
-            // Non-foot joints: color by body side and confidence
-            // RIGHT side (even indices 12,14,16,24,26,28,30,32) = GOLD (faded in gait side view)
-            // LEFT side (odd indices 11,13,15,23,25,27,29,31) + face = TEAL
+            // v0.14.0: Non-foot joints: REF leg = TEAL, OPP leg = GOLD (faded in side view)
             const isRightJoint = i > 10 && i % 2 === 0;
-            // Fade right joints heavily in side-view running to eliminate contralateral confusion
-            const rightJointAlpha = _isGaitSideView ? 0.18 : 1.0;
+            const isLeftJoint  = i > 10 && i % 2 === 1;
+            const isOppJoint = _skelRefIsRight ? isLeftJoint : isRightJoint;
+            // Fade OPP joints heavily in side-view running to eliminate contralateral confusion
+            const oppJointAlpha = _isGaitSideView ? 0.18 : 1.0;
             if(conf >= 0.6) {
               ctx.fillStyle = i < 11 ? '#ffeb3b'
-                : isRightJoint ? `rgba(251,191,36,${rightJointAlpha})`
+                : isOppJoint ? `rgba(251,191,36,${oppJointAlpha})`
                 : '#00e5cc';
             } else if(conf >= 0.35) {
-              ctx.fillStyle = isRightJoint ? `rgba(245,158,11,${rightJointAlpha})` : '#ffa500';
+              ctx.fillStyle = isOppJoint ? `rgba(245,158,11,${oppJointAlpha})` : '#ffa500';
             } else {
-              ctx.fillStyle = isRightJoint ? `rgba(255,100,100,${rightJointAlpha})` : 'rgba(255,100,100,0.7)';
+              ctx.fillStyle = isOppJoint ? `rgba(255,100,100,${oppJointAlpha})` : 'rgba(255,100,100,0.7)';
             }
             // Add knee labels to help identify left vs right leg
             if(i === 25 || i === 26) {
               const kneeLabel = (i === 25) ? 'LK' : 'RK';
+              const isRefKnee = (i === 25 && _skelRefSide === 'L') || (i === 26 && _skelRefSide === 'R');
               ctx.font = `bold ${Math.max(8, W/95)}px sans-serif`;
               ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
               ctx.strokeText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
-              ctx.fillStyle = (i === 25) ? '#00e5cc' : `rgba(251,191,36,${_isGaitSideView ? 0.35 : 1.0})`;
+              ctx.fillStyle = isRefKnee ? '#00e5cc' : `rgba(251,191,36,${_isGaitSideView ? 0.35 : 1.0})`;
               ctx.fillText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
               // Reset for the dot
-              ctx.fillStyle = isRightJoint
-                ? `rgba(251,191,36,${rightJointAlpha})`
+              ctx.fillStyle = isOppJoint
+                ? `rgba(251,191,36,${oppJointAlpha})`
                 : (conf >= 0.6 ? '#00e5cc' : '#ffa500');
             }
           }
@@ -5223,9 +5234,9 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         const hasLowConf         = lms.some(p => p && (p.visibility||0) > 0 && (p.visibility||0) < 0.35);
         const legendItems = [
           {color:'#ffd700',               label:'Tape-refined (physical marker)',   show:hasTapeRefined},
-          {color:'#00e5cc',               label:'LEFT leg — assess this side',      show:true},
-          {color:'rgba(251,191,36,0.45)', label:'RIGHT leg — contralateral ref',    show:_isGaitSideView},
-          {color:'#fbbf24',               label:'RIGHT leg — High confidence',      show:!_isGaitSideView},
+          {color:'#00e5cc',               label:`${_skelRefSide === 'R' ? 'RIGHT' : 'LEFT'} leg — assess this side`,      show:true},
+          {color:'rgba(251,191,36,0.45)', label:`${_skelRefSide === 'R' ? 'LEFT' : 'RIGHT'} leg — contralateral ref`,    show:_isGaitSideView},
+          {color:'#fbbf24',               label:`${_skelRefSide === 'R' ? 'LEFT' : 'RIGHT'} leg — High confidence`,      show:!_isGaitSideView},
           {color:'#a8ff78',               label:'Foot landmark (verify!)',          show:hasFootLM},
           {color:'#c084fc',               label:'Ankle: tibia-projected (est.)',   show:hasProjected},
           {color:'#fb923c',               label:'Ankle: ground-corrected',          show:hasGroundCorrected},
@@ -5254,7 +5265,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         ctx.fillRect(0, lblY - 2, W * 0.62, lblH + 6);
         ctx.font = `bold ${Math.max(10, H/38)}px sans-serif`;
         ctx.fillStyle = '#00e5cc';
-        ctx.fillText('← Assess LEFT leg (teal)', 6, lblY + lblH - 3);
+        ctx.fillText(`← Assess ${_skelRefSide === 'R' ? 'RIGHT' : 'LEFT'} leg (teal)`, 6, lblY + lblH - 3);
         ctx.restore();
       }
 
@@ -7658,9 +7669,33 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       console.log(`[StrideEngine] Facing detection: insufficient data, defaulting to LEFT`);
     }
   }
-  const _cameraNearLeg = _facesLeft ? 'L' : 'R';
+  // v0.14.0: Visibility-based camera-near detection replaces facing-direction assumption.
+  // The old logic assumed faces-left → camera on left side → LEFT leg is camera-near.
+  // This breaks when the camera is on the opposite side (e.g. Joe faces RIGHT but camera
+  // is on his LEFT side). Instead, compute mean visibility of lower-body landmarks per side.
+  // The camera-near leg consistently has higher visibility scores because it's not occluded.
+  const _lLegVis = (() => {
+    let sum = 0, n = 0;
+    for(const f of perFrameData) {
+      // Use hip, knee, ankle visibility for each side
+      const lh = f.lHipVis ?? 0, lk = f.lKneeVis ?? 0, la = f.lAnkVis ?? 0;
+      sum += lh + lk + la; n += 3;
+    }
+    return n > 0 ? sum / n : 0;
+  })();
+  const _rLegVis = (() => {
+    let sum = 0, n = 0;
+    for(const f of perFrameData) {
+      const rh = f.rHipVis ?? 0, rk = f.rKneeVis ?? 0, ra = f.rAnkVis ?? 0;
+      sum += rh + rk + ra; n += 3;
+    }
+    return n > 0 ? sum / n : 0;
+  })();
+  const _visMargin = Math.abs(_lLegVis - _rLegVis);
+  const _cameraNearLeg = _visMargin > 0.03 ? (_lLegVis > _rLegVis ? 'L' : 'R') : (_facesLeft ? 'L' : 'R');
+  console.log(`[StrideEngine] Visibility: L=${_lLegVis.toFixed(3)} R=${_rLegVis.toFixed(3)} margin=${_visMargin.toFixed(3)} → cameraNear=${_cameraNearLeg}`);
 
-  // REF leg selection — prefer camera-near leg for tracking accuracy.
+  // REF leg selection — prefer camera-near leg (by visibility) for tracking accuracy.
   // Override only if one side has meaningfully more contacts (>20% margin),
   // indicating the other side tracks poorly regardless of camera proximity.
   const lContactCount = lContactIdxs.length;
@@ -7671,7 +7706,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   } else if(lContactCount > rContactCount * 1.20) {
     REF = 'L';  // L has significantly more contacts
   } else {
-    REF = _cameraNearLeg;  // contacts roughly equal — use camera-near leg
+    REF = _cameraNearLeg;  // contacts roughly equal — use camera-near leg (by visibility)
   }
   const refContacts = REF==='L' ? lContactIdxs : rContactIdxs;
   const oppContacts = REF==='L' ? rContactIdxs : lContactIdxs;
@@ -7941,8 +7976,16 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const hipExtensions = strideDetails.map(s=>s.hipAtToeoff).filter(v=>v!=null);
 
   const avgDuration   = mean(durations);
-  const cadenceSpm    = Math.round(60 / avgDuration * 2);
+  let cadenceSpm    = Math.round(60 / avgDuration * 2);
   const cadenceStride = Math.round(60 / avgDuration);
+  // v0.14.0: Cadence sanity check. Human running cadence ranges from ~140 spm (slow jog)
+  // to ~220 spm (elite sprint). Values above 240 indicate stride detection is picking up
+  // half-strides (both L+R contacts counted as same-leg events). When detected, halve
+  // the cadence and log a warning.
+  if(cadenceSpm > 240) {
+    console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm exceeds human maximum (240). Likely detecting half-strides — halving to ${Math.round(cadenceSpm/2)} spm.`);
+    cadenceSpm = Math.round(cadenceSpm / 2);
+  }
   const cvDuration    = durations.length > 1 ? Math.round(stdev(durations) / mean(durations) * 100) : null;
 
   // GCT and float: null when signal is too flat (treadmill at 30fps)
