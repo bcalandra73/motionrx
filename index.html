@@ -7692,8 +7692,31 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     return n > 0 ? sum / n : 0;
   })();
   const _visMargin = Math.abs(_lLegVis - _rLegVis);
-  const _cameraNearLeg = _visMargin > 0.03 ? (_lLegVis > _rLegVis ? 'L' : 'R') : (_facesLeft ? 'L' : 'R');
-  console.log(`[StrideEngine] Visibility: L=${_lLegVis.toFixed(3)} R=${_rLegVis.toFixed(3)} margin=${_visMargin.toFixed(3)} → cameraNear=${_cameraNearLeg}`);
+  let _cameraNearLeg;
+  if(_visMargin > 0.03) {
+    _cameraNearLeg = _lLegVis > _rLegVis ? 'L' : 'R';
+    console.log(`[StrideEngine] Visibility: L=${_lLegVis.toFixed(3)} R=${_rLegVis.toFixed(3)} margin=${_visMargin.toFixed(3)} → cameraNear=${_cameraNearLeg} (by visibility)`);
+  } else {
+    // v0.14.0: When visibility is equal (common on treadmill), use composite signal
+    // consistency as tiebreaker. The camera-near leg's composite contact signal has
+    // higher peaks and cleaner separation between contacts. Compare peak-to-trough
+    // range of each side's composite signal.
+    const _lCompRange = (() => {
+      const vals = lComposite.filter(v=>v!=null);
+      return vals.length > 2 ? Math.max(...vals) - Math.min(...vals) : 0;
+    })();
+    const _rCompRange = (() => {
+      const vals = rComposite.filter(v=>v!=null);
+      return vals.length > 2 ? Math.max(...vals) - Math.min(...vals) : 0;
+    })();
+    if(Math.abs(_lCompRange - _rCompRange) > 0.05) {
+      _cameraNearLeg = _lCompRange > _rCompRange ? 'L' : 'R';
+      console.log(`[StrideEngine] Visibility tied (margin=${_visMargin.toFixed(3)}). Composite range: L=${_lCompRange.toFixed(3)} R=${_rCompRange.toFixed(3)} → cameraNear=${_cameraNearLeg} (by signal strength)`);
+    } else {
+      _cameraNearLeg = _facesLeft ? 'L' : 'R';
+      console.log(`[StrideEngine] Visibility tied, composite tied. Falling back to facing direction → cameraNear=${_cameraNearLeg}`);
+    }
+  }
 
   // REF leg selection — prefer camera-near leg (by visibility) for tracking accuracy.
   // Override only if one side has meaningfully more contacts (>20% margin),
@@ -7723,9 +7746,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     const startT   = idxToTime(startIdx);
     const endT     = idxToTime(endIdx);
     const dur      = endT - startT;
-    // Sanity check: running stride at 120-240 spm = 0.25-0.5s/step, 0.5-1.0s/stride
-    if(dur >= 0.35 && dur <= 1.5) {
+    // v0.14.0: Stride = same foot to same foot. At max human cadence (240 spm),
+    // one stride = 0.50s. The old 0.35s minimum allowed half-strides (step intervals
+    // where the opposite foot's contact was detected as a ref-leg contact) through,
+    // producing doubled cadence. Raise minimum to 0.50s.
+    if(dur >= 0.50 && dur <= 1.5) {
       strideCycles.push({startIdx, endIdx, startT, endT, durationS: dur, refSide: REF});
+    } else if(dur < 0.50) {
+      console.log(`[StrideEngine] Rejected half-stride: frames ${startIdx}→${endIdx}, dur=${dur.toFixed(3)}s (< 0.50s minimum)`);
     }
   }
 
@@ -7979,12 +8007,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   let cadenceSpm    = Math.round(60 / avgDuration * 2);
   const cadenceStride = Math.round(60 / avgDuration);
   // v0.14.0: Cadence sanity check. Human running cadence ranges from ~140 spm (slow jog)
-  // to ~220 spm (elite sprint). Values above 240 indicate stride detection is picking up
-  // half-strides (both L+R contacts counted as same-leg events). When detected, halve
-  // the cadence and log a warning.
+  // to ~220 spm (elite sprint). Values above 240 after stride filtering indicate
+  // remaining detection issues — flag as unreliable rather than guessing.
   if(cadenceSpm > 240) {
-    console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm exceeds human maximum (240). Likely detecting half-strides — halving to ${Math.round(cadenceSpm/2)} spm.`);
-    cadenceSpm = Math.round(cadenceSpm / 2);
+    console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm exceeds human maximum (240). Marking as unreliable.`);
+    cadenceSpm = null; // will show as unavailable in report rather than wrong
+  } else if(cadenceSpm < 120) {
+    console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm below minimum running cadence (120). Marking as unreliable.`);
+    cadenceSpm = null;
   }
   const cvDuration    = durations.length > 1 ? Math.round(stdev(durations) / mean(durations) * 100) : null;
 
@@ -8150,7 +8180,8 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // ── 8. Clinical flags ──
   const flags = {};
   // Cadence norms for recreational running: 160-180 spm optimal
-  if(cadenceSpm < 155)       flags.cadence = {level:'warn', msg:'Cadence below 160 spm — consider shorter, quicker steps to reduce impact loading'};
+  if(cadenceSpm == null)     flags.cadence = {level:'warn', msg:'Cadence could not be reliably measured — try recording at 60fps or higher'};
+  else if(cadenceSpm < 155)  flags.cadence = {level:'warn', msg:'Cadence below 160 spm — consider shorter, quicker steps to reduce impact loading'};
   else if(cadenceSpm > 185)  flags.cadence = {level:'ok',   msg:'Cadence in optimal range (>160 spm)'};
   else                       flags.cadence = {level:'ok',   msg:`Cadence ${cadenceSpm} spm — within optimal running range (160–180)`};
 
