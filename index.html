@@ -7149,9 +7149,14 @@ function renderCompensations(aggregated, movement, strideMetrics) {
 // v0.15.0: max MP/MoveNet disagreement among the landmarks behind a metric label.
 // Used to suppress artifact-level "asymmetry" from low-quality tracking.
 function _metricLandmarkDisagree(label) {
-  var m = { 'Hip Flexion':[23,24], 'Knee Flexion':[25,26], 'Knee Valgus':[25,26],
-            'Hip Adduction':[23,24], 'Ankle Dorsiflexion':[27,28,29,30,31,32], 'Pronation':[29,30,31,32] };
-  var idxs = m[label]; if(!idxs) return 0;
+  if(!label) return 0;
+  // v0.15.0: match by keyword so both 'Ankle' (header tile) and 'Ankle Dorsiflexion' (LSI) resolve.
+  var L = String(label).toLowerCase();
+  var idxs = (L.indexOf('ankle') >= 0 || L.indexOf('dorsiflex') >= 0 || L.indexOf('pronation') >= 0) ? [27,28,29,30,31,32]
+           : (L.indexOf('knee') >= 0) ? [25,26]
+           : (L.indexOf('hip')  >= 0) ? [23,24]
+           : null;
+  if(!idxs) return 0;
   var fd = (typeof window !== 'undefined' && window._fusionDisagree) || {};
   return Math.max.apply(null, [0].concat(idxs.map(function(i){ return fd[i] || 0; })));
 }
