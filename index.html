@@ -1832,6 +1832,13 @@ function startFrameExtraction(file, vid) {
                 lKneeX: lK?.x ?? null,  // for shin angle
                 lAnkXFull: lA?.x ?? null, // already captured as lAnkX
                 lKneeY: lK?.y ?? null,   // for shin angle
+                // v0.14.0: per-side visibility for camera-near detection
+                lHipVis:  lms[23]?.visibility ?? 0,
+                lKneeVis: lms[25]?.visibility ?? 0,
+                lAnkVis:  lms[27]?.visibility ?? 0,
+                rHipVis:  lms[24]?.visibility ?? 0,
+                rKneeVis: lms[26]?.visibility ?? 0,
+                rAnkVis:  lms[28]?.visibility ?? 0,
               };
             }).filter(Boolean);
 
@@ -4980,6 +4987,10 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
       // block so the "Assess LEFT leg" label below (outside that block) can reference it.
       const _mvt = (document.getElementById('movementType')?.value || '').toLowerCase();
       const _isGaitSideView = /running|gait|walk/.test(_mvt) && view === 'side';
+      // v0.14.0: REF side for skeleton rendering — declared outside poseLandmarks block
+      // so the "Assess" label below can always access it
+      const _skelRefSide = window_strideMetrics?.refSide || 'L';
+      const _skelRefIsRight = _skelRefSide === 'R';
 
       if(poseResult && poseResult.poseLandmarks) {
         const lm = poseResult.poseLandmarks;
@@ -4992,31 +5003,26 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
           [24,26],[26,28],[28,30],[30,32],
           [15,17],[15,19],[16,18],[16,20]
         ];
-
-        // Draw connections — solid if both joints confident, dashed if estimated
-        // LEFT side (MediaPipe odd landmarks: 11,13,15,23,25,27,29,31) = TEAL
-        // RIGHT side (MediaPipe even landmarks: 12,14,16,24,26,28,30,32) = GOLD
-        // In SIDE VIEW for running/gait: fade right leg heavily so the PT focuses on the left leg.
-        // The labels are for LEFT foot phases — right leg causes consistent visual misreading.
         connections.forEach(([a,b]) => {
           if(!lm[a]||!lm[b]) return;
           const visA = lm[a].visibility, visB = lm[b].visibility;
           if(visA < 0.2 && visB < 0.2) return; // skip very low confidence
           const conf = Math.min(visA, visB);
-          // MediaPipe: left body = odd indices (11,13,23,25,27,29,31)
-          //            right body = even indices (12,14,24,26,28,30,32)
-          const isRightSide = a > 10 && b > 10 && a % 2 === 0 && b % 2 === 0;
-          // In gait side view: fade right leg to 20% opacity so only left (teal) is prominent
-          const rightAlpha = _isGaitSideView ? 0.20 : 0.90;
-          const rightLowAlpha = _isGaitSideView ? 0.12 : 0.70;
+          // Determine if this connection is on the OPP (non-ref) side
+          const isRightBodySide = a > 10 && b > 10 && a % 2 === 0 && b % 2 === 0;
+          const isLeftBodySide  = a > 10 && b > 10 && a % 2 === 1 && b % 2 === 1;
+          const isOppSide = _skelRefIsRight ? isLeftBodySide : isRightBodySide;
+          // In gait side view: fade OPP leg to 20% opacity so the PT focuses on the REF leg
+          const oppAlpha = _isGaitSideView ? 0.20 : 0.90;
+          const oppLowAlpha = _isGaitSideView ? 0.12 : 0.70;
           ctx.save();
-          ctx.lineWidth = isRightSide ? lw * 0.7 : lw; // right leg slightly thinner always
+          ctx.lineWidth = isOppSide ? lw * 0.7 : lw; // OPP leg slightly thinner
           if(conf < 0.4) {
             ctx.setLineDash([6, 4]);
-            ctx.strokeStyle = isRightSide ? `rgba(251,191,36,${rightLowAlpha})` : 'rgba(255,200,0,0.7)';
+            ctx.strokeStyle = isOppSide ? `rgba(251,191,36,${oppLowAlpha})` : 'rgba(255,200,0,0.7)';
           } else {
             ctx.setLineDash([]);
-            ctx.strokeStyle = isRightSide ? `rgba(251,191,36,${rightAlpha})` : 'rgba(0,229,204,0.9)';
+            ctx.strokeStyle = isOppSide ? `rgba(251,191,36,${oppAlpha})` : 'rgba(0,229,204,0.9)';
           }
           ctx.beginPath();
           ctx.moveTo(lm[a].x*W, lm[a].y*H);
@@ -5090,32 +5096,33 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
                           : (isSwingPhase && (i===27||i===28)) ? '#facc15'
                           : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
           } else {
-            // Non-foot joints: color by body side and confidence
-            // RIGHT side (even indices 12,14,16,24,26,28,30,32) = GOLD (faded in gait side view)
-            // LEFT side (odd indices 11,13,15,23,25,27,29,31) + face = TEAL
+            // v0.14.0: Non-foot joints: REF leg = TEAL, OPP leg = GOLD (faded in side view)
             const isRightJoint = i > 10 && i % 2 === 0;
-            // Fade right joints heavily in side-view running to eliminate contralateral confusion
-            const rightJointAlpha = _isGaitSideView ? 0.18 : 1.0;
+            const isLeftJoint  = i > 10 && i % 2 === 1;
+            const isOppJoint = _skelRefIsRight ? isLeftJoint : isRightJoint;
+            // Fade OPP joints heavily in side-view running to eliminate contralateral confusion
+            const oppJointAlpha = _isGaitSideView ? 0.18 : 1.0;
             if(conf >= 0.6) {
               ctx.fillStyle = i < 11 ? '#ffeb3b'
-                : isRightJoint ? `rgba(251,191,36,${rightJointAlpha})`
+                : isOppJoint ? `rgba(251,191,36,${oppJointAlpha})`
                 : '#00e5cc';
             } else if(conf >= 0.35) {
-              ctx.fillStyle = isRightJoint ? `rgba(245,158,11,${rightJointAlpha})` : '#ffa500';
+              ctx.fillStyle = isOppJoint ? `rgba(245,158,11,${oppJointAlpha})` : '#ffa500';
             } else {
-              ctx.fillStyle = isRightJoint ? `rgba(255,100,100,${rightJointAlpha})` : 'rgba(255,100,100,0.7)';
+              ctx.fillStyle = isOppJoint ? `rgba(255,100,100,${oppJointAlpha})` : 'rgba(255,100,100,0.7)';
             }
             // Add knee labels to help identify left vs right leg
             if(i === 25 || i === 26) {
               const kneeLabel = (i === 25) ? 'LK' : 'RK';
+              const isRefKnee = (i === 25 && _skelRefSide === 'L') || (i === 26 && _skelRefSide === 'R');
               ctx.font = `bold ${Math.max(8, W/95)}px sans-serif`;
               ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
               ctx.strokeText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
-              ctx.fillStyle = (i === 25) ? '#00e5cc' : `rgba(251,191,36,${_isGaitSideView ? 0.35 : 1.0})`;
+              ctx.fillStyle = isRefKnee ? '#00e5cc' : `rgba(251,191,36,${_isGaitSideView ? 0.35 : 1.0})`;
               ctx.fillText(kneeLabel, p.x*W + jr + 2, p.y*H + 4);
               // Reset for the dot
-              ctx.fillStyle = isRightJoint
-                ? `rgba(251,191,36,${rightJointAlpha})`
+              ctx.fillStyle = isOppJoint
+                ? `rgba(251,191,36,${oppJointAlpha})`
                 : (conf >= 0.6 ? '#00e5cc' : '#ffa500');
             }
           }
@@ -5223,9 +5230,9 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         const hasLowConf         = lms.some(p => p && (p.visibility||0) > 0 && (p.visibility||0) < 0.35);
         const legendItems = [
           {color:'#ffd700',               label:'Tape-refined (physical marker)',   show:hasTapeRefined},
-          {color:'#00e5cc',               label:'LEFT leg — assess this side',      show:true},
-          {color:'rgba(251,191,36,0.45)', label:'RIGHT leg — contralateral ref',    show:_isGaitSideView},
-          {color:'#fbbf24',               label:'RIGHT leg — High confidence',      show:!_isGaitSideView},
+          {color:'#00e5cc',               label:`${_skelRefSide === 'R' ? 'RIGHT' : 'LEFT'} leg — assess this side`,      show:true},
+          {color:'rgba(251,191,36,0.45)', label:`${_skelRefSide === 'R' ? 'LEFT' : 'RIGHT'} leg — contralateral ref`,    show:_isGaitSideView},
+          {color:'#fbbf24',               label:`${_skelRefSide === 'R' ? 'LEFT' : 'RIGHT'} leg — High confidence`,      show:!_isGaitSideView},
           {color:'#a8ff78',               label:'Foot landmark (verify!)',          show:hasFootLM},
           {color:'#c084fc',               label:'Ankle: tibia-projected (est.)',   show:hasProjected},
           {color:'#fb923c',               label:'Ankle: ground-corrected',          show:hasGroundCorrected},
@@ -5254,7 +5261,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         ctx.fillRect(0, lblY - 2, W * 0.62, lblH + 6);
         ctx.font = `bold ${Math.max(10, H/38)}px sans-serif`;
         ctx.fillStyle = '#00e5cc';
-        ctx.fillText('← Assess LEFT leg (teal)', 6, lblY + lblH - 3);
+        ctx.fillText(`← Assess ${_skelRefSide === 'R' ? 'RIGHT' : 'LEFT'} leg (teal)`, 6, lblY + lblH - 3);
         ctx.restore();
       }
 
@@ -7658,9 +7665,56 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       console.log(`[StrideEngine] Facing detection: insufficient data, defaulting to LEFT`);
     }
   }
-  const _cameraNearLeg = _facesLeft ? 'L' : 'R';
+  // v0.14.0: Visibility-based camera-near detection replaces facing-direction assumption.
+  // The old logic assumed faces-left → camera on left side → LEFT leg is camera-near.
+  // This breaks when the camera is on the opposite side (e.g. Joe faces RIGHT but camera
+  // is on his LEFT side). Instead, compute mean visibility of lower-body landmarks per side.
+  // The camera-near leg consistently has higher visibility scores because it's not occluded.
+  const _lLegVis = (() => {
+    let sum = 0, n = 0;
+    for(const f of perFrameData) {
+      // Use hip, knee, ankle visibility for each side
+      const lh = f.lHipVis ?? 0, lk = f.lKneeVis ?? 0, la = f.lAnkVis ?? 0;
+      sum += lh + lk + la; n += 3;
+    }
+    return n > 0 ? sum / n : 0;
+  })();
+  const _rLegVis = (() => {
+    let sum = 0, n = 0;
+    for(const f of perFrameData) {
+      const rh = f.rHipVis ?? 0, rk = f.rKneeVis ?? 0, ra = f.rAnkVis ?? 0;
+      sum += rh + rk + ra; n += 3;
+    }
+    return n > 0 ? sum / n : 0;
+  })();
+  const _visMargin = Math.abs(_lLegVis - _rLegVis);
+  let _cameraNearLeg;
+  if(_visMargin > 0.03) {
+    _cameraNearLeg = _lLegVis > _rLegVis ? 'L' : 'R';
+    console.log(`[StrideEngine] Visibility: L=${_lLegVis.toFixed(3)} R=${_rLegVis.toFixed(3)} margin=${_visMargin.toFixed(3)} → cameraNear=${_cameraNearLeg} (by visibility)`);
+  } else {
+    // v0.14.0: When visibility is equal (common on treadmill), use composite signal
+    // consistency as tiebreaker. The camera-near leg's composite contact signal has
+    // higher peaks and cleaner separation between contacts. Compare peak-to-trough
+    // range of each side's composite signal.
+    const _lCompRange = (() => {
+      const vals = lComposite.filter(v=>v!=null);
+      return vals.length > 2 ? Math.max(...vals) - Math.min(...vals) : 0;
+    })();
+    const _rCompRange = (() => {
+      const vals = rComposite.filter(v=>v!=null);
+      return vals.length > 2 ? Math.max(...vals) - Math.min(...vals) : 0;
+    })();
+    if(Math.abs(_lCompRange - _rCompRange) > 0.05) {
+      _cameraNearLeg = _lCompRange > _rCompRange ? 'L' : 'R';
+      console.log(`[StrideEngine] Visibility tied (margin=${_visMargin.toFixed(3)}). Composite range: L=${_lCompRange.toFixed(3)} R=${_rCompRange.toFixed(3)} → cameraNear=${_cameraNearLeg} (by signal strength)`);
+    } else {
+      _cameraNearLeg = _facesLeft ? 'L' : 'R';
+      console.log(`[StrideEngine] Visibility tied, composite tied. Falling back to facing direction → cameraNear=${_cameraNearLeg}`);
+    }
+  }
 
-  // REF leg selection — prefer camera-near leg for tracking accuracy.
+  // REF leg selection — prefer camera-near leg (by visibility) for tracking accuracy.
   // Override only if one side has meaningfully more contacts (>20% margin),
   // indicating the other side tracks poorly regardless of camera proximity.
   const lContactCount = lContactIdxs.length;
@@ -7671,7 +7725,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   } else if(lContactCount > rContactCount * 1.20) {
     REF = 'L';  // L has significantly more contacts
   } else {
-    REF = _cameraNearLeg;  // contacts roughly equal — use camera-near leg
+    REF = _cameraNearLeg;  // contacts roughly equal — use camera-near leg (by visibility)
   }
   const refContacts = REF==='L' ? lContactIdxs : rContactIdxs;
   const oppContacts = REF==='L' ? rContactIdxs : lContactIdxs;
@@ -7688,9 +7742,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     const startT   = idxToTime(startIdx);
     const endT     = idxToTime(endIdx);
     const dur      = endT - startT;
-    // Sanity check: running stride at 120-240 spm = 0.25-0.5s/step, 0.5-1.0s/stride
-    if(dur >= 0.35 && dur <= 1.5) {
+    // v0.14.0: Stride = same foot to same foot. At max human cadence (240 spm),
+    // one stride = 0.50s. The old 0.35s minimum allowed half-strides (step intervals
+    // where the opposite foot's contact was detected as a ref-leg contact) through,
+    // producing doubled cadence. Raise minimum to 0.50s.
+    if(dur >= 0.50 && dur <= 1.5) {
       strideCycles.push({startIdx, endIdx, startT, endT, durationS: dur, refSide: REF});
+    } else if(dur < 0.50) {
+      console.log(`[StrideEngine] Rejected half-stride: frames ${startIdx}→${endIdx}, dur=${dur.toFixed(3)}s (< 0.50s minimum)`);
     }
   }
 
@@ -7941,8 +8000,21 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const hipExtensions = strideDetails.map(s=>s.hipAtToeoff).filter(v=>v!=null);
 
   const avgDuration   = mean(durations);
-  const cadenceSpm    = Math.round(60 / avgDuration * 2);
-  const cadenceStride = Math.round(60 / avgDuration);
+  let cadenceSpm    = Math.round(60 / avgDuration * 2);
+  let cadenceStride = Math.round(60 / avgDuration);
+  // v0.14.0: Cadence sanity check. Human running cadence ranges from ~140 spm (slow jog)
+  // to ~220 spm (elite sprint). Values below 120 spm indicate remaining detection issues
+  // — flag as unreliable rather than guessing. (The >240 branch is a defensive backstop;
+  // the 0.50s stride floor already caps computed cadence at 240 spm, so it rarely fires.)
+  if(cadenceSpm > 240) {
+    console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm exceeds human maximum (240). Marking as unreliable.`);
+    cadenceSpm = null;    // will show as unavailable in report rather than wrong
+    cadenceStride = null; // keep derived stride-rate consistent with spm
+  } else if(cadenceSpm < 120) {
+    console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm below minimum running cadence (120). Marking as unreliable.`);
+    cadenceSpm = null;
+    cadenceStride = null; // keep derived stride-rate consistent with spm
+  }
   const cvDuration    = durations.length > 1 ? Math.round(stdev(durations) / mean(durations) * 100) : null;
 
   // GCT and float: null when signal is too flat (treadmill at 30fps)
@@ -8107,7 +8179,8 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // ── 8. Clinical flags ──
   const flags = {};
   // Cadence norms for recreational running: 160-180 spm optimal
-  if(cadenceSpm < 155)       flags.cadence = {level:'warn', msg:'Cadence below 160 spm — consider shorter, quicker steps to reduce impact loading'};
+  if(cadenceSpm == null)     flags.cadence = {level:'warn', msg:'Cadence could not be reliably measured — try recording at 60fps or higher'};
+  else if(cadenceSpm < 155)  flags.cadence = {level:'warn', msg:'Cadence below 160 spm — consider shorter, quicker steps to reduce impact loading'};
   else if(cadenceSpm > 185)  flags.cadence = {level:'ok',   msg:'Cadence in optimal range (>160 spm)'};
   else                       flags.cadence = {level:'ok',   msg:`Cadence ${cadenceSpm} spm — within optimal running range (160–180)`};
 
@@ -8393,7 +8466,7 @@ function gaitDisplayVal(jointName, agg, movement) {
 // ── Running Style Archetype Classification ────────────────────────────────────
 function classifyRunningArchetype(sm, aggregated) {
   if(!sm) return null;
-  const cadence    = sm.cadenceSpm ?? 0;
+  const cadence    = sm.cadenceSpm ?? null; // null = unreliable; cadence-based scoring is skipped below
   const vo         = sm.verticalOscillationCm ?? null;
   const overstride = sm.overstrideGrade ?? 'none';
   const shinAngle  = sm.shinAngleAtContactDeg ?? null;
@@ -8429,7 +8502,7 @@ function classifyRunningArchetype(sm, aggregated) {
   if(vo!=null&&vo>12)    {scores.bouncer+=3;drivers.bouncer.push('VO '+vo+'cm — excessive');}
   else if(vo!=null&&vo>10){scores.bouncer+=2;drivers.bouncer.push('VO '+vo+'cm — elevated');}
   else if(vo!=null&&vo>8) {scores.bouncer+=1;drivers.bouncer.push('VO '+vo+'cm — borderline');}
-  if(cadence<160)        {scores.bouncer+=1;drivers.bouncer.push('cadence '+cadence+' spm');}
+  if(cadence!=null&&cadence<160)        {scores.bouncer+=1;drivers.bouncer.push('cadence '+cadence+' spm');}
 
   // Collapser
   if(maxValgus!=null&&maxValgus>10){scores.collapser+=3;drivers.collapser.push('knee valgus '+Math.round(maxValgus)+'\u00b0');}
@@ -8443,16 +8516,16 @@ function classifyRunningArchetype(sm, aggregated) {
   else if(hipExt!=null&&hipExt<12){scores.glutAmnesiac+=2;drivers.glutAmnesiac.push('limited hip ext '+hipExt+'\u00b0');}
   if(trunkLean!=null&&trunkLean>18){scores.glutAmnesiac+=2;drivers.glutAmnesiac.push('trunk lean '+Math.round(trunkLean)+'\u00b0');}
   else if(trunkLean!=null&&trunkLean>12){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('trunk lean '+Math.round(trunkLean)+'\u00b0');}
-  if(cadence<165&&overstride!=='none'){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('overstride + low cadence');}
+  if(cadence!=null&&cadence<165&&overstride!=='none'){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('overstride + low cadence');}
 
   // Shuffler
   if(peakKnee!=null&&peakKnee<90)  {scores.shuffler+=3;drivers.shuffler.push('peak knee flex '+peakKnee+'\u00b0 — very stiff');}
   else if(peakKnee!=null&&peakKnee<100){scores.shuffler+=1;drivers.shuffler.push('peak knee flex '+peakKnee+'\u00b0');}
-  if(cadence<160)                   {scores.shuffler+=1;drivers.shuffler.push('cadence '+cadence+' spm');}
+  if(cadence!=null&&cadence<160)                   {scores.shuffler+=1;drivers.shuffler.push('cadence '+cadence+' spm');}
   if(strideNorm!=null&&strideNorm<1.5){scores.shuffler+=1;drivers.shuffler.push('stride '+strideNorm+'\u00d7 leg — short');}
 
   // Efficient
-  if(cadence>=170) {scores.efficient+=1;drivers.efficient.push('cadence '+cadence+' spm');}
+  if(cadence!=null&&cadence>=170) {scores.efficient+=1;drivers.efficient.push('cadence '+cadence+' spm');}
   if(footStrike==='midfoot'||footStrike==='forefoot'){scores.efficient+=1;drivers.efficient.push(footStrike+' strike');}
   if(vo!=null&&vo<=8)  {scores.efficient+=1;drivers.efficient.push('VO '+vo+'cm');}
   if(overstride==='none'){scores.efficient+=1;drivers.efficient.push('no overstride');}
@@ -8551,9 +8624,9 @@ function renderStrideMetrics(metrics, aggregated={}) {
   const kpis = [
     {
       label:'Cadence',
-      value: metrics.cadenceSpm,
-      unit:'spm',
-      sub:`${metrics.cadenceStride} strides/min`,
+      value: metrics.cadenceSpm != null ? metrics.cadenceSpm : '—',
+      unit: metrics.cadenceSpm != null ? 'spm' : 'unreliable',
+      sub: metrics.cadenceSpm != null ? `${metrics.cadenceStride} strides/min` : 'Could not be reliably measured',
       flag: metrics.flags.cadence?.level ?? 'ok',
     },
     {
@@ -11874,7 +11947,7 @@ ${(() => {
 })()}
 ${window_strideMetrics ? `
 RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete strides detected):
-- Cadence: ${window_strideMetrics.cadenceSpm} steps/min (optimal range: 160-180 spm)
+- Cadence: ${window_strideMetrics.cadenceSpm != null ? window_strideMetrics.cadenceSpm + ' steps/min (optimal range: 160-180 spm)' : 'Could not be reliably measured — likely a frame-rate or detection limitation. Do NOT report a cadence value.'}
 - Stride duration: ${Math.round(window_strideMetrics.strideDurationS*1000)}ms avg${window_strideMetrics.cvStridePct!=null ? `, CV=${window_strideMetrics.cvStridePct}% stride-to-stride variability` : ''}
 - Ground contact: ${window_strideMetrics.gcPct!=null ? window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
 - Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics.hasFloat ? window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' : '0% detected (may indicate shuffle-run or 30fps limitation)') : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
@@ -13921,7 +13994,7 @@ async function exportPDF() {
 
       // KPI grid: 3 per row
       const kpiDefs = [
-        {label:'Cadence',          value:`${sm.cadenceSpm} spm`,   sub:`${sm.cadenceStride} strides/min`},
+        {label:'Cadence',          value: sm.cadenceSpm!=null ? `${sm.cadenceSpm} spm` : '—',   sub: sm.cadenceSpm!=null ? `${sm.cadenceStride} strides/min` : 'low confidence'},
         {label:'Stride Duration',  value:`${Math.round(sm.strideDurationS*1000)} ms`, sub: sm.cvStridePct!=null ? `CV ${sm.cvStridePct}%` : `avg of ${sm.stridesDetected} strides`},
         {
           label:'Ground Contact',
