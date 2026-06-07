@@ -8001,16 +8001,19 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 
   const avgDuration   = mean(durations);
   let cadenceSpm    = Math.round(60 / avgDuration * 2);
-  const cadenceStride = Math.round(60 / avgDuration);
+  let cadenceStride = Math.round(60 / avgDuration);
   // v0.14.0: Cadence sanity check. Human running cadence ranges from ~140 spm (slow jog)
-  // to ~220 spm (elite sprint). Values above 240 after stride filtering indicate
-  // remaining detection issues — flag as unreliable rather than guessing.
+  // to ~220 spm (elite sprint). Values below 120 spm indicate remaining detection issues
+  // — flag as unreliable rather than guessing. (The >240 branch is a defensive backstop;
+  // the 0.50s stride floor already caps computed cadence at 240 spm, so it rarely fires.)
   if(cadenceSpm > 240) {
     console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm exceeds human maximum (240). Marking as unreliable.`);
-    cadenceSpm = null; // will show as unavailable in report rather than wrong
+    cadenceSpm = null;    // will show as unavailable in report rather than wrong
+    cadenceStride = null; // keep derived stride-rate consistent with spm
   } else if(cadenceSpm < 120) {
     console.warn(`[StrideEngine] Cadence ${cadenceSpm} spm below minimum running cadence (120). Marking as unreliable.`);
     cadenceSpm = null;
+    cadenceStride = null; // keep derived stride-rate consistent with spm
   }
   const cvDuration    = durations.length > 1 ? Math.round(stdev(durations) / mean(durations) * 100) : null;
 
@@ -8463,7 +8466,7 @@ function gaitDisplayVal(jointName, agg, movement) {
 // ── Running Style Archetype Classification ────────────────────────────────────
 function classifyRunningArchetype(sm, aggregated) {
   if(!sm) return null;
-  const cadence    = sm.cadenceSpm ?? 0;
+  const cadence    = sm.cadenceSpm ?? null; // null = unreliable; cadence-based scoring is skipped below
   const vo         = sm.verticalOscillationCm ?? null;
   const overstride = sm.overstrideGrade ?? 'none';
   const shinAngle  = sm.shinAngleAtContactDeg ?? null;
@@ -8499,7 +8502,7 @@ function classifyRunningArchetype(sm, aggregated) {
   if(vo!=null&&vo>12)    {scores.bouncer+=3;drivers.bouncer.push('VO '+vo+'cm — excessive');}
   else if(vo!=null&&vo>10){scores.bouncer+=2;drivers.bouncer.push('VO '+vo+'cm — elevated');}
   else if(vo!=null&&vo>8) {scores.bouncer+=1;drivers.bouncer.push('VO '+vo+'cm — borderline');}
-  if(cadence<160)        {scores.bouncer+=1;drivers.bouncer.push('cadence '+cadence+' spm');}
+  if(cadence!=null&&cadence<160)        {scores.bouncer+=1;drivers.bouncer.push('cadence '+cadence+' spm');}
 
   // Collapser
   if(maxValgus!=null&&maxValgus>10){scores.collapser+=3;drivers.collapser.push('knee valgus '+Math.round(maxValgus)+'\u00b0');}
@@ -8513,16 +8516,16 @@ function classifyRunningArchetype(sm, aggregated) {
   else if(hipExt!=null&&hipExt<12){scores.glutAmnesiac+=2;drivers.glutAmnesiac.push('limited hip ext '+hipExt+'\u00b0');}
   if(trunkLean!=null&&trunkLean>18){scores.glutAmnesiac+=2;drivers.glutAmnesiac.push('trunk lean '+Math.round(trunkLean)+'\u00b0');}
   else if(trunkLean!=null&&trunkLean>12){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('trunk lean '+Math.round(trunkLean)+'\u00b0');}
-  if(cadence<165&&overstride!=='none'){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('overstride + low cadence');}
+  if(cadence!=null&&cadence<165&&overstride!=='none'){scores.glutAmnesiac+=1;drivers.glutAmnesiac.push('overstride + low cadence');}
 
   // Shuffler
   if(peakKnee!=null&&peakKnee<90)  {scores.shuffler+=3;drivers.shuffler.push('peak knee flex '+peakKnee+'\u00b0 — very stiff');}
   else if(peakKnee!=null&&peakKnee<100){scores.shuffler+=1;drivers.shuffler.push('peak knee flex '+peakKnee+'\u00b0');}
-  if(cadence<160)                   {scores.shuffler+=1;drivers.shuffler.push('cadence '+cadence+' spm');}
+  if(cadence!=null&&cadence<160)                   {scores.shuffler+=1;drivers.shuffler.push('cadence '+cadence+' spm');}
   if(strideNorm!=null&&strideNorm<1.5){scores.shuffler+=1;drivers.shuffler.push('stride '+strideNorm+'\u00d7 leg — short');}
 
   // Efficient
-  if(cadence>=170) {scores.efficient+=1;drivers.efficient.push('cadence '+cadence+' spm');}
+  if(cadence!=null&&cadence>=170) {scores.efficient+=1;drivers.efficient.push('cadence '+cadence+' spm');}
   if(footStrike==='midfoot'||footStrike==='forefoot'){scores.efficient+=1;drivers.efficient.push(footStrike+' strike');}
   if(vo!=null&&vo<=8)  {scores.efficient+=1;drivers.efficient.push('VO '+vo+'cm');}
   if(overstride==='none'){scores.efficient+=1;drivers.efficient.push('no overstride');}
@@ -8621,9 +8624,9 @@ function renderStrideMetrics(metrics, aggregated={}) {
   const kpis = [
     {
       label:'Cadence',
-      value: metrics.cadenceSpm,
-      unit:'spm',
-      sub:`${metrics.cadenceStride} strides/min`,
+      value: metrics.cadenceSpm != null ? metrics.cadenceSpm : '—',
+      unit: metrics.cadenceSpm != null ? 'spm' : 'unreliable',
+      sub: metrics.cadenceSpm != null ? `${metrics.cadenceStride} strides/min` : 'Could not be reliably measured',
       flag: metrics.flags.cadence?.level ?? 'ok',
     },
     {
@@ -11944,7 +11947,7 @@ ${(() => {
 })()}
 ${window_strideMetrics ? `
 RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete strides detected):
-- Cadence: ${window_strideMetrics.cadenceSpm} steps/min (optimal range: 160-180 spm)
+- Cadence: ${window_strideMetrics.cadenceSpm != null ? window_strideMetrics.cadenceSpm + ' steps/min (optimal range: 160-180 spm)' : 'Could not be reliably measured — likely a frame-rate or detection limitation. Do NOT report a cadence value.'}
 - Stride duration: ${Math.round(window_strideMetrics.strideDurationS*1000)}ms avg${window_strideMetrics.cvStridePct!=null ? `, CV=${window_strideMetrics.cvStridePct}% stride-to-stride variability` : ''}
 - Ground contact: ${window_strideMetrics.gcPct!=null ? window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
 - Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics.hasFloat ? window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' : '0% detected (may indicate shuffle-run or 30fps limitation)') : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
@@ -13991,7 +13994,7 @@ async function exportPDF() {
 
       // KPI grid: 3 per row
       const kpiDefs = [
-        {label:'Cadence',          value:`${sm.cadenceSpm} spm`,   sub:`${sm.cadenceStride} strides/min`},
+        {label:'Cadence',          value: sm.cadenceSpm!=null ? `${sm.cadenceSpm} spm` : '—',   sub: sm.cadenceSpm!=null ? `${sm.cadenceStride} strides/min` : 'low confidence'},
         {label:'Stride Duration',  value:`${Math.round(sm.strideDurationS*1000)} ms`, sub: sm.cvStridePct!=null ? `CV ${sm.cvStridePct}%` : `avg of ${sm.stridesDetected} strides`},
         {
           label:'Ground Contact',
@@ -14638,21 +14641,4 @@ window.addEventListener('unhandledrejection', e => {
       <div class="guide-icon">🏃</div>
       <div class="guide-tip-text">
         <strong>Tuck Jump</strong>
-        <span>Bilateral jump bringing both knees to the chest. Myer et al. Tuck Jump Assessment (TJA) — 10-item observational checklist. Standard ACL risk screen, particularly validated for female athletes. Key observations: knee valgus, foot separation, asymmetric arm swing, landing stiffness.</span>
-      </div>
-    </div>
-    <div class="guide-tip" style="border-bottom:none;">
-      <div class="guide-icon">↔️</div>
-      <div class="guide-tip-text">
-        <strong>Triple Hop for Distance</strong>
-        <span>Three consecutive maximal single-leg hops for maximum distance. Limb Symmetry Index (LSI) standard: LSI &gt;90% is the typical return-to-sport threshold. Record both limbs. MotionRx measures landing mechanics on each contact; distance must be measured manually and entered in clinical notes.</span>
-      </div>
-    </div>
-
-    <button class="guide-close" onclick="document.getElementById('jumpProtocolModal').classList.remove('open')">Got it</button>
-  </div>
-</div>
-
-</body>
-</html>
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+        <span>Bilateral jump bringing both knees to the chest. Myer et al. Tuck Jump Assessment (TJA) — 10-item observational checklist. Standard ACL risk screen, particularly validated for female athletes. Key observations: knee valgus, fo
