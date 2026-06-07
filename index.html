@@ -1576,6 +1576,7 @@ function startFrameExtraction(file, vid) {
   window_strideMetrics = null; // reset for each new analysis
   window_primaryPhaseSelection = null;
   window._denseAnglesFrames = null;
+  window._fusionDisagree = {}; // v0.15.0: per-landmark MP/MoveNet disagreement (max across fusion frames)
   window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
   window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
 
@@ -4821,6 +4822,21 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
 
     statusEl.textContent = 'Applying temporal smoothing...';
     allLandmarks = applyTemporalSmoothing(allLandmarks);
+
+    // v0.15.0: record per-landmark MP/MoveNet disagreement (max across these frames) into a
+    // global so the report can flag joints the two models disagreed on (e.g. ankles on blurry
+    // low-fps clips). The dense scan is MoveNet-only, so this gallery fusion is the only place
+    // the disagreement signal exists. Merge-max across calls (side + front views).
+    try {
+      window._fusionDisagree = window._fusionDisagree || {};
+      for(const _lms of allLandmarks) {
+        if(!Array.isArray(_lms)) continue;
+        for(let _i = 0; _i < _lms.length; _i++) {
+          const _d = _lms[_i]?._disagree;
+          if(_d != null && _d > (window._fusionDisagree[_i] || 0)) window._fusionDisagree[_i] = _d;
+        }
+      }
+    } catch(_e) { /* non-fatal */ }
 
     console.log('[FusionPipeline] Complete — all refinement layers applied');
     return allLandmarks;
@@ -9059,6 +9075,91 @@ function flagAngle(name, val) {
 // Aggregate angles across frames (take the most extreme / representative value)
 // For ankle DF in running: only use frames tagged as stance (contact/loading/midstance)
 // to avoid push-off plantarflexion swamping the loading-response measurement.
+// ── v0.15.0: Capture Quality panel ───────────────────────────────────────────
+// At-a-glance reliability for the whole analysis. Rewards the high-quality clinical
+// workflow (tape markers + 120fps) and flags low-quality capture so the clinician
+// knows how much to trust the numbers below. Purely additive — never throws.
+function renderCaptureQuality() {
+  try {
+    const items = [];
+    let score = 0, maxScore = 0;
+
+    // 1) Frame rate
+    const fps = parseInt(document.getElementById('videoFps')?.value
+              || document.getElementById('jumpVideoFps')?.value || '0');
+    if(fps) {
+      maxScore += 2;
+      if(fps >= 120)     { score += 2; items.push({ok:'good', text:`${fps} fps — excellent; timing and landing metrics are reliable`}); }
+      else if(fps >= 60) { score += 1; items.push({ok:'warn', text:`${fps} fps — fine for joint angles; ground-contact / float timing is borderline`}); }
+      else               {             items.push({ok:'bad',  text:`${fps} fps — too low for timing metrics (cadence, ground contact, float). Record at 120 fps for clinical use`}); }
+    }
+
+    // 2) Tape refinement + 3) tracking quality, scanned from the dense landmark frames
+    const dense = window._denseAnglesFrames;
+    let tapeCount = 0, visSum = 0, visN = 0, disHigh = 0, disN = 0;
+    if(Array.isArray(dense)) {
+      for(const f of dense) {
+        const lms = f?.landmarks;
+        if(!Array.isArray(lms)) continue;
+        for(let i = 11; i <= 32; i++) {
+          const lm = lms[i]; if(!lm) continue;
+          if(typeof lm.source === 'string' && lm.source.includes('tape-')) tapeCount++;
+          if(i >= 23) { visSum += (lm.visibility || 0); visN++; }
+        }
+      }
+    }
+
+    maxScore += 1;
+    if(tapeCount > 0) { score += 1; items.push({ok:'good', text:'Tape markers detected — marked joints are pixel-accurate'}); }
+    else              {             items.push({ok:'warn', text:'No tape markers detected — joint positions are model estimates. Tape gives pixel-accurate landmarks'}); }
+
+    // v0.15.0: disagreement comes from the gallery FUSION pass (MP vs MoveNet), recorded
+    // globally -- the dense scan is MoveNet-only and carries no disagreement signal.
+    const fd = window._fusionDisagree || {};
+    for(let i = 23; i <= 32; i++) { if(fd[i] != null) { disN++; if(fd[i] > 0.15) disHigh++; } }
+    if(visN > 0) {
+      maxScore += 2;
+      const meanVis = visSum / visN;
+      const disRate = disN > 0 ? disHigh / disN : 0;
+      if(meanVis >= 0.70 && disRate < 0.10)      { score += 2; items.push({ok:'good', text:`Strong tracking — high landmark visibility, models agree (${Math.round(disRate*100)}% disagreement)`}); }
+      else if(meanVis >= 0.50 && disRate < 0.25) { score += 1; items.push({ok:'warn', text:`Moderate tracking — some low visibility or model disagreement (${Math.round(disRate*100)}% of joints). Affected angles are flagged below`}); }
+      else                                       {             items.push({ok:'bad',  text:`Noisy tracking — frequent model disagreement (${Math.round(disRate*100)}%) or low visibility. Treat flagged angles with caution`}); }
+    }
+
+    // 4) Strides analyzed (gait only)
+    const sd = window_strideMetrics?.stridesDetected;
+    if(sd != null) {
+      maxScore += 1;
+      if(sd >= 8)      { score += 1; items.push({ok:'good', text:`${sd} strides analyzed — robust sample`}); }
+      else if(sd >= 4) {             items.push({ok:'warn', text:`${sd} strides analyzed — limited sample; values may vary`}); }
+      else             {             items.push({ok:'bad',  text:`${sd} strides analyzed — very limited; interpret stride metrics cautiously`}); }
+    }
+
+    if(items.length === 0) return '';
+
+    const pct = maxScore > 0 ? score / maxScore : 0;
+    const overall = pct >= 0.8 ? {label:'HIGH', color:'var(--green)'}
+                  : pct >= 0.5 ? {label:'MODERATE', color:'var(--amber)'}
+                  :              {label:'LOW', color:'var(--red)'};
+    const sym = (ok) => ok==='good' ? '✓' : ok==='warn' ? '⚠' : '✕';
+    const col = (ok) => ok==='good' ? 'var(--green)' : ok==='warn' ? 'var(--amber)' : 'var(--red)';
+    const rows = items.map(it =>
+      `<div style="display:flex;gap:8px;align-items:flex-start;margin:3px 0;font-size:.78rem;">`
+      + `<span style="color:${col(it.ok)};font-weight:700;flex:0 0 auto;">${sym(it.ok)}</span>`
+      + `<span>${it.text}</span></div>`).join('');
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin-bottom:14px;background:var(--bg);">`
+      + `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">`
+      + `<strong style="font-size:.74rem;letter-spacing:.05em;text-transform:uppercase;color:var(--navy);">Capture Quality</strong>`
+      + `<span style="font-weight:800;color:${overall.color};font-size:.8rem;">${overall.label}</span></div>`
+      + rows
+      + `<div style="font-size:.68rem;color:var(--muted);margin-top:8px;">Individual measurements below are flagged separately when too few frames contributed.</div>`
+      + `</div>`;
+  } catch(e) {
+    console.warn('[CaptureQuality] panel skipped:', e);
+    return '';
+  }
+}
+
 function aggregateAngles(allFrameAngles, framePhases) {
   const combined = {};
   const frameCounts = {}; // total frames where metric was attempted
@@ -12545,6 +12646,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
                 Check skeleton overlay for foot landmark placement. 60fps+ video and bright footwear improve accuracy.
               </td></tr>`;
             }
+            // v0.15.0: flag ankle dorsiflexion when the two pose models disagreed strongly on
+            // ankle position -- the L/R difference is then likely a tracking artifact, not real.
+            const _ankDis = Math.max(window._fusionDisagree?.[27] || 0, window._fusionDisagree?.[28] || 0);
+            if(_ankDis > 0.30) {
+              ankleCaveat = `<tr><td colspan="4" style="font-size:.68rem;color:var(--red);padding:2px 10px 8px;background:#fff5f5;">
+                <strong>Low-confidence ankle tracking:</strong> the two pose models disagreed on ankle position by ${Math.round(_ankDis*100)}% on this video (usually motion blur, low frame-rate, or no ankle tape). Treat the L/R dorsiflexion difference as unreliable - it may be a tracking artifact rather than a true asymmetry. Tape markers + 120fps resolve this.
+              </td></tr>`;
+            }
           }
 
           const confNote = (hitRate) => hitRate != null
@@ -12640,7 +12749,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         }
       }
 
-      document.getElementById('anglesBody').innerHTML = tableHtml;
+      document.getElementById('anglesBody').innerHTML = renderCaptureQuality() + tableHtml;
       document.getElementById('anglesSection').style.display='block';
     }
 
