@@ -7146,6 +7146,16 @@ function renderCompensations(aggregated, movement, strideMetrics) {
   section.style.display = 'block';
 }
 
+// v0.15.0: max MP/MoveNet disagreement among the landmarks behind a metric label.
+// Used to suppress artifact-level "asymmetry" from low-quality tracking.
+function _metricLandmarkDisagree(label) {
+  var m = { 'Hip Flexion':[23,24], 'Knee Flexion':[25,26], 'Knee Valgus':[25,26],
+            'Hip Adduction':[23,24], 'Ankle Dorsiflexion':[27,28,29,30,31,32], 'Pronation':[29,30,31,32] };
+  var idxs = m[label]; if(!idxs) return 0;
+  var fd = (typeof window !== 'undefined' && window._fusionDisagree) || {};
+  return Math.max.apply(null, [0].concat(idxs.map(function(i){ return fd[i] || 0; })));
+}
+
 function renderASI(aggregated, movement) {
   const pairs = [
     {label:'Knee Flexion',       left:'Left Knee Flexion',         right:'Right Knee Flexion',         minMag: 10},
@@ -7180,6 +7190,7 @@ function renderASI(aggregated, movement) {
     if(!L || !R) return;
     // Skip if either side has insufficient frame coverage
     if(L.lowConfidence || R.lowConfidence) return;
+    if(_metricLandmarkDisagree(pair.label) > 0.40) return; // v0.15.0: artifact-level model disagreement
     const lAvg = gaitDisplayVal(pair.left, L, movement);
     const rAvg = gaitDisplayVal(pair.right, R, movement);
     const lsi = calcLSI(lAvg, rAvg, pair.minMag);
@@ -11987,6 +11998,18 @@ ${notes ? `CLINICAL NOTES: ${notes}` : ''}
 ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
+${(() => {
+  try {
+    var fd = window._fusionDisagree || {};
+    var groups = {'ankle dorsiflexion':[27,28,29,30,31,32], 'knee flexion / valgus':[25,26], 'hip flexion / adduction':[23,24]};
+    var bad = [];
+    for(var gname in groups) {
+      var gd = Math.max.apply(null, [0].concat(groups[gname].map(function(i){ return fd[i] || 0; })));
+      if(gd > 0.30) bad.push(gname + ' (' + Math.round(gd*100) + '% model disagreement)');
+    }
+    return bad.length ? ('MEASUREMENT RELIABILITY (CRITICAL): On THIS video the two pose models disagreed substantially on ' + bad.join('; ') + '. These joints could NOT be reliably tracked (motion blur / low frame-rate / no tape markers). Do NOT report asymmetry, restriction, or dysfunction for them as a definitive or headline finding; if mentioned, state the measurement was unreliable and recommend re-recording with tape markers at 120fps.') : '';
+  } catch(_e) { return ''; }
+})()}
 ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). For running/gait, this is the thigh-from-vertical angle (independent of arm swing). For lifts, this is the shoulder-hip-knee included angle corrected to 0°=neutral. Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion.
 - SIDE VIEW LIMITATION — Hip and Knee Flexion: In a side-view camera, only the near leg's thigh/knee direction can be measured reliably in 2D. The far leg is foreshortened (its thigh points partly toward/away from camera), making its 2D angle systematically underestimate true hip flexion. If one side shows "N/A" for hip or knee flexion, it means the far-side 2D measurement was suppressed because it would be inaccurate. The available side's measurement IS valid and should be used clinically. For true bilateral hip/knee comparison, use the posterior or frontal view, or rely on 3D worldLandmarks when the device supports them.
@@ -12924,6 +12947,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     // Suppress asymmetry when both values are within the normal range —
     // e.g. L=3° R=9° hip adduction (both 0-8° normal) should not be "worst asymmetry"
     if(bothWithinNormal(p.label, lDisp, rDisp)) return;
+    if(_metricLandmarkDisagree(p.label) > 0.40) return; // v0.15.0: artifact-level model disagreement
     const a = calcAsymmetryPct(lDisp, rDisp, p.minMag);
     if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; }
   });
