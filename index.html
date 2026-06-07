@@ -4012,14 +4012,14 @@ function fuseLandmarks(mpLandmarks, mnNormalized, view='side') {
           visibility: Math.max(mpConf, mnConf),
           // Preserve world coords from MP — MoveNet doesn't provide them
           _wx: mpLM._wx ?? null, _wy: mpLM._wy ?? null, _wz: mpLM._wz ?? null,
-          source: 'fused', agreement: dist
+          source: 'fused', agreement: dist, _disagree: dist
         };
       } else {
         // High disagreement: for frontal prefer MoveNet, for side prefer higher confidence
         const winner = isFrontal
           ? (mnConf >= mpConf * 0.6 ? {...mnLM} : {...mpLM})  // frontal: MoveNet unless much lower conf
           : (mpConf >= mnConf ? {...mpLM} : {...mnLM});         // side: higher confidence wins
-        winner.disagreement = dist;
+        winner.disagreement = dist; winner._disagree = dist;
         winner.source = isFrontal ? 'mn-frontal' : (mpConf >= mnConf ? 'mp-won' : 'mn-won');
         // Always preserve world coords from MP (MoveNet doesn't have them)
         if(!winner._wx && mpLM._wx != null) { winner._wx = mpLM._wx; winner._wy = mpLM._wy; winner._wz = mpLM._wz; }
@@ -4664,11 +4664,13 @@ function applyTemporalSmoothing(allFrameLandmarks) {
     // Collect x, y series across all frames for this landmark
     const xs = new Array(n), ys = new Array(n);
     const vis = new Array(n); // visibility for confidence gating
+    const dis = new Array(n); // v0.15.0: MP/MoveNet disagreement per frame
     for(let fi = 0; fi < n; fi++) {
       const lm = allFrameLandmarks[fi]?.[lmIdx];
       xs[fi]  = lm?.x  ?? null;
       ys[fi]  = lm?.y  ?? null;
       vis[fi] = lm?.visibility ?? 0;
+      dis[fi] = lm?._disagree ?? 0;
     }
 
     // Only smooth if we have enough valid values
@@ -4690,7 +4692,12 @@ function applyTemporalSmoothing(allFrameLandmarks) {
       // High confidence (>0.7): keep 80% original, 20% smoothed
       // Low confidence (<0.3): keep 20% original, 80% smoothed
       // Mid confidence: linear blend
-      const smoothWeight = conf > 0.7 ? 0.2 : conf < 0.3 ? 0.8 : 0.2 + (0.7 - conf) * 1.5;
+      let smoothWeight = conf > 0.7 ? 0.2 : conf < 0.3 ? 0.8 : 0.2 + (0.7 - conf) * 1.5;
+      // v0.15.0 fusion arbitration: if MediaPipe and MoveNet disagreed on this landmark,
+      // the single-frame fused position is unreliable (it jumps between the two models —
+      // the cause of the 30fps ankle-dorsiflexion L/R asymmetry). Trust the temporally-
+      // consistent OneEuro trajectory by smoothing these uncertain points hard.
+      if(dis[fi] > 0.04) smoothWeight = Math.max(smoothWeight, Math.min(0.9, 0.3 + dis[fi] * 4));
       smoothed[fi][lmIdx] = {
         ...smoothed[fi][lmIdx],
         x: xs[fi] * (1 - smoothWeight) + xSmooth[fi] * smoothWeight,
