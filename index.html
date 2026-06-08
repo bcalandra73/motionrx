@@ -6199,51 +6199,6 @@ function calcAngleBest(a, b, c) {
 // Heel (29/30) and toe (31/32) landmarks are not available from MoveNet.
 // Pronation and ankle DF are therefore only measured from the 8 MediaPipe gallery frames.
 // For peak hip/knee flexion (which need dense data), MoveNet provides adequate quality.
-// ── v0.15.0: Temporal limb-identity tracking ─────────────────────────────────
-// Corrects whole-leg LEFT<->RIGHT swaps in the dense MoveNet scan (the signature
-// leg-swap artifact, where a left landmark briefly jumps onto the right leg as the
-// legs cross). For each frame it compares the CURRENT assignment vs the SWAPPED one
-// against the position predicted from the previous two frames (constant-velocity),
-// and only swaps when the swap is DECISIVELY more continuous. Very conservative, so
-// clean clips are left untouched. Operates on hip/knee/ankle (the lower-limb joints
-// MoveNet provides); runs before temporal smoothing.
-function enforceLimbContinuity(seq) {
-  if(!Array.isArray(seq) || seq.length < 3) return seq;
-  const PAIRS = [[23,24],[25,26],[27,28]]; // [left, right] hip, knee, ankle
-  const SWAP_RATIO = 0.55;   // swap cost must be < 55% of keep cost
-  const SWAP_MARGIN = 0.10;  // ...and absolutely better by this much (normalized units)
-  const MIN_PAIRS = 2;       // need >=2 confident joint pairs to judge
-  const pred = (idx, i) => {
-    const a = seq[i-1] && seq[i-1][idx], b = seq[i-2] && seq[i-2][idx];
-    if(a && b) return { x: 2*a.x - b.x, y: 2*a.y - b.y }; // velocity extrapolation
-    if(a) return { x: a.x, y: a.y };                       // hold last
-    return null;
-  };
-  const d = (p, q) => (p && q) ? Math.hypot(p.x - q.x, p.y - q.y) : 0;
-  let swaps = 0;
-  for(let i = 2; i < seq.length; i++) {
-    const fr = seq[i];
-    if(!Array.isArray(fr)) continue;
-    let keep = 0, swap = 0, n = 0;
-    for(const [li, ri] of PAIRS) {
-      const oL = fr[li], oR = fr[ri], pL = pred(li, i), pR = pred(ri, i);
-      if(oL && oR && pL && pR && (oL.visibility ?? 0) > 0.3 && (oR.visibility ?? 0) > 0.3) {
-        keep += d(oL, pL) + d(oR, pR);
-        swap += d(oL, pR) + d(oR, pL);
-        n++;
-      }
-    }
-    if(n >= MIN_PAIRS && swap < keep * SWAP_RATIO && (keep - swap) > SWAP_MARGIN) {
-      for(const [li, ri] of PAIRS) { const t = fr[li]; fr[li] = fr[ri]; fr[ri] = t; }
-      swaps++;
-      console.log(`[LimbTrack] Frame ${i}: corrected L/R leg swap (keep=${keep.toFixed(3)}, swap=${swap.toFixed(3)})`);
-    }
-  }
-  console.log(swaps ? `[LimbTrack] ${swaps}/${seq.length} frames corrected for leg-swap`
-                    : `[LimbTrack] no leg swaps detected across ${seq.length} frames`);
-  return seq;
-}
-
 async function coarseScanWithMoveNet(frames, statusEl) {
   const results = [];
   const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(null), ms))]);
@@ -6276,8 +6231,7 @@ async function coarseScanWithMoveNet(frames, statusEl) {
   }
 
   // Light temporal smoothing for a cleaner contact/toeoff signal (same as MediaPipe path)
-  const tracked = enforceLimbContinuity(results); // v0.15.0: fix L/R leg-swaps before smoothing
-  return applyTemporalSmoothing(tracked);
+  return applyTemporalSmoothing(results);
 }
 
 function extractAngles(lm, view='side', movement='') {
