@@ -8031,6 +8031,20 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const mean  = arr => arr.reduce((s,v)=>s+v,0)/arr.length;
   const stdev = arr => { const m=mean(arr); return Math.sqrt(arr.map(v=>(v-m)**2).reduce((s,v)=>s+v,0)/arr.length); };
   const median = arr => { const s=[...arr].sort((a,b)=>a-b); return s[Math.floor(s.length/2)]; };
+  // v0.15.0: robust central value -- median, with MAD-based outlier rejection when there
+  // are enough strides (>=5) to judge an outlier. Returns value + how many were dropped.
+  const robustStat = (arr, minN, k) => {
+    minN = minN || 5; k = k || 2.5;
+    const vals = arr.filter(v => v != null && !isNaN(v));
+    if(vals.length === 0) return {v:null, used:0, rejected:0};
+    const med = median(vals);
+    if(vals.length < minN) return {v:med, used:vals.length, rejected:0};
+    const mad = median(vals.map(v => Math.abs(v - med)));
+    if(!(mad > 0)) return {v:med, used:vals.length, rejected:0};
+    const thresh = k * 1.4826 * mad;
+    const keep = vals.filter(v => Math.abs(v - med) <= thresh);
+    return {v: median(keep), used: keep.length, rejected: vals.length - keep.length};
+  };
 
   const durations     = strideDetails.map(s=>s.durationS);
   const gcPcts        = strideDetails.map(s=>s.gcPct).filter(v=>v!=null); // null = unreliable
@@ -8038,7 +8052,9 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const kneePeaks     = strideDetails.map(s=>s.peakKneeFlex).filter(v=>v!=null);
   const hipExtensions = strideDetails.map(s=>s.hipAtToeoff).filter(v=>v!=null);
 
-  const avgDuration   = mean(durations);
+  const _durStat       = robustStat(durations);
+  const avgDuration    = _durStat.v != null ? _durStat.v : mean(durations);
+  const strideOutliersRejected = _durStat.rejected; // v0.15.0: duration-based outlier strides
   let cadenceSpm    = Math.round(60 / avgDuration * 2);
   let cadenceStride = Math.round(60 / avgDuration);
   // v0.14.0: Cadence sanity check. Human running cadence ranges from ~140 spm (slow jog)
@@ -8065,8 +8081,8 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const fpsGate     = fps >= 60;
   const gcpReliable   = fpsGate && gcpReliableCount >= Math.ceil(strideDetails.length / 2);
   const floatReliable = fpsGate && floatReliableCount >= Math.ceil(strideDetails.length / 2);
-  const avgGcPct   = (gcpReliable && gcPcts.length > 0) ? Math.round(mean(gcPcts)) : null;
-  let avgFloatPct= (floatReliable && floatPcts.length > 0) ? Math.round(mean(floatPcts)) : null;
+  const avgGcPct   = (gcpReliable && gcPcts.length > 0) ? Math.round(robustStat(gcPcts).v) : null;
+  let avgFloatPct= (floatReliable && floatPcts.length > 0) ? Math.round(robustStat(floatPcts).v) : null;
 
   // v0.13.4 Analytical float fallback: the 128-frame coarse scan (~9 fps) can't
   // reliably detect brief float phases (≈100-150 ms each at 170-180 spm).
@@ -8089,7 +8105,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const fsConsensus = ['heel','midfoot','forefoot'].reduce((a,b) => fsCounts[a]>=fsCounts[b]?a:b);
 
   // Peak knee flexion average
-  const avgPeakKnee = kneePeaks.length > 0 ? Math.round(mean(kneePeaks)) : null;
+  const avgPeakKnee = kneePeaks.length > 0 ? Math.round(robustStat(kneePeaks).v) : null;
 
   // ── Knee flexion at initial contact ───────────────────────────────────────
   // Convert included angles → clinical flexion degrees (180 − included).
@@ -8106,7 +8122,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // angles (>80° flexion at contact) and get filtered. A low pass rate signals bad IC detection.
   const _kcfReliable = kneeContactFlexVals.length >= Math.ceil(strideDetails.length * 0.5);
   const kneeFlexAtContact = (_kcfReliable && kneeContactFlexVals.length > 0)
-    ? Math.round(mean(kneeContactFlexVals))
+    ? Math.round(robustStat(kneeContactFlexVals).v)
     : null;
   console.log(`[StrideEngine] Knee flex at contact: ${kneeFlexAtContact ?? 'suppressed'} (${kneeContactFlexVals.length}/${strideDetails.length} strides valid, reliable=${_kcfReliable})`);
 
@@ -8429,6 +8445,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     gctFpsOk, floatFpsOk,
     // Meta
     stridesDetected:  strideCycles.length,
+    strideOutliersRejected,
     refSide:          REF,
     fps:              fps,
     bestStrideFrameRange: bestStride ? [bestStride.startIdx, bestStride.endIdx] : null,
@@ -8627,7 +8644,7 @@ function renderStrideMetrics(metrics, aggregated={}) {
     reliabilityColor = '#f87171';
   }
 
-  badge.innerHTML = `${metrics.stridesDetected} strides &nbsp;·&nbsp; ${metrics.videoDurationS.toFixed(1)}s &nbsp;·&nbsp; <span style="color:${reliabilityColor};font-weight:700;" title="Each stride = one trial. 10+ strides equivalent to 3–4 separate test trials per Collings et al. 2024.">${reliabilityLabel}</span>`;
+  badge.innerHTML = `${metrics.stridesDetected} strides${metrics.strideOutliersRejected ? ' ('+metrics.strideOutliersRejected+' rejected)' : ''} &nbsp;·&nbsp; ${metrics.videoDurationS.toFixed(1)}s &nbsp;·&nbsp; <span style="color:${reliabilityColor};font-weight:700;" title="Each stride = one trial. 10+ strides equivalent to 3–4 separate test trials per Collings et al. 2024.">${reliabilityLabel}</span>`;
   section.style.display = 'block';
 
   const flagColor = (level) =>
@@ -9144,6 +9161,7 @@ function renderCaptureQuality() {
 
     // 4) Strides analyzed (gait only)
     const sd = window_strideMetrics?.stridesDetected;
+    const sdRej = window_strideMetrics?.strideOutliersRejected || 0;
     if(sd != null) {
       maxScore += 1;
       if(sd >= 8)      { score += 1; items.push({ok:'good', text:`${sd} strides analyzed — robust sample`}); }
@@ -9151,6 +9169,7 @@ function renderCaptureQuality() {
       else             {             items.push({ok:'bad',  text:`${sd} strides analyzed — very limited; interpret stride metrics cautiously`}); }
     }
 
+    if(sdRej > 0) items.push({ok:'warn', text: sdRej + ' stride(s) rejected as outliers before averaging (robust median used)'});
     if(items.length === 0) return '';
 
     const pct = maxScore > 0 ? score / maxScore : 0;
