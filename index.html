@@ -1578,6 +1578,7 @@ function startFrameExtraction(file, vid) {
   window._denseAnglesFrames = null;
   window._fusionDisagree = {}; // v0.15.0: per-landmark MP/MoveNet disagreement (max across fusion frames)
   window._tapeRefinedCount = 0; // v0.15.0: # landmarks refined from tape blobs this analysis
+  window._interpGapFrames = 0; // v0.15.0: lower-body frames in uninterpolable gaps
   window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
   window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
 
@@ -4639,6 +4640,7 @@ function applyTemporalSmoothing(allFrameLandmarks) {
   if(n < 3) return allFrameLandmarks;
 
   const LANDMARK_COUNT = 33;
+  let _lbGapFrames = 0; // v0.15.0: lower-body frames in uninterpolable gaps (this call)
   // Estimate dt from frame count: assume ~9-14 fps effective sampling for
   // 128 frames across a 14s clip.  Exact fps doesn't matter much since OneEuro
   // adapts, but a reasonable estimate helps the derivative filter.
@@ -4679,9 +4681,17 @@ function applyTemporalSmoothing(allFrameLandmarks) {
     const validCount = xs.filter(v => v != null).length;
     if(validCount < 3) continue;
 
-    // Fill gaps with linear interpolation before filtering (OneEuro needs continuous input)
-    const xFilled = _fillGaps(xs);
-    const yFilled = _fillGaps(ys);
+    // v0.15.0: visibility-aware gap interpolation (ported from Nathan's interpolate.ts).
+    // Treat null OR low-visibility (<0.5) frames as gaps: linearly interpolate short gaps
+    // (<=5 frames) so OneEuro is not pulled by noisy low-confidence positions; genuinely
+    // long dropouts are held and flagged as uninterpolable.
+    const _xg = _interpolateGaps(xs, vis, 0.5, 5);
+    const _yg = _interpolateGaps(ys, vis, 0.5, 5);
+    const xFilled = _xg.filled, yFilled = _yg.filled;
+    if(lmIdx >= 23 && lmIdx <= 32 && _xg.gapFrames > 0) {
+      _lbGapFrames += _xg.gapFrames;
+      if(typeof window !== 'undefined') window._interpGapFrames = (window._interpGapFrames || 0) + _xg.gapFrames;
+    }
 
     const xSmooth = _oneEuroFilter1D(xFilled, dt, MIN_CUTOFF, BETA, D_CUTOFF);
     const ySmooth = _oneEuroFilter1D(yFilled, dt, MIN_CUTOFF, BETA, D_CUTOFF);
@@ -4708,10 +4718,43 @@ function applyTemporalSmoothing(allFrameLandmarks) {
       };
     }
   }
+  if(_lbGapFrames > 0) console.log(`[GapFill] ${_lbGapFrames} lower-body landmark-frame(s) in dropouts too long to interpolate (held as nearest value)`);
   return smoothed;
 }
 
 // ── Gap-fill helper for OneEuro (needs continuous signal) ──────────────────
+// ── v0.15.0: Visibility-aware gap interpolation (ported from Nathan's interpolate.ts) ──
+// A frame is a "gap" when its landmark is null OR its visibility is below vthresh.
+// Short gaps (<= maxGap) bounded by good frames are linearly interpolated so the OneEuro
+// filter is not pulled off-trajectory by noisy low-confidence positions. Genuinely long
+// dropouts are held at the nearest good value and counted (gapFrames) so the report can
+// flag reduced reliability. Returns { filled, gapFrames }.
+function _interpolateGaps(vals, vis, vthresh, maxGap) {
+  vthresh = (vthresh == null) ? 0.5 : vthresh;
+  maxGap  = maxGap || 5;
+  const n = vals.length;
+  const out = vals.slice();
+  const bad = (i) => out[i] == null || (vis[i] ?? 0) < vthresh;
+  let gapFrames = 0, i = 0;
+  while(i < n) {
+    if(!bad(i)) { i++; continue; }
+    let j = i;
+    while(j < n && bad(j)) j++;
+    const len   = j - i;
+    const left  = (i > 0) ? out[i-1] : null;   // already processed (good or interpolated)
+    const right = (j < n) ? vals[j]  : null;   // next good value
+    if(len <= maxGap && left != null && right != null) {
+      for(let k = i; k < j; k++) { const t = (k - i + 1) / (len + 1); out[k] = left + t * (right - left); }
+    } else {
+      if(len > maxGap) gapFrames += len;       // only flag genuinely long dropouts
+      const hold = (left != null) ? left : right;
+      if(hold != null) for(let k = i; k < j; k++) out[k] = hold;
+    }
+    i = j;
+  }
+  return { filled: out, gapFrames };
+}
+
 function _fillGaps(arr) {
   const out = [...arr];
   // Forward fill
@@ -9176,6 +9219,7 @@ function renderCaptureQuality() {
     }
 
     if(sdRej > 0) items.push({ok:'warn', text: sdRej + ' stride(s) rejected as outliers before averaging (robust median used)'});
+    if((window._interpGapFrames || 0) > 0) items.push({ok:'warn', text: window._interpGapFrames + ' low-visibility landmark frame(s) too long to interpolate (dropout) - affected angles less reliable'});
     if(items.length === 0) return '';
 
     const pct = maxScore > 0 ? score / maxScore : 0;
