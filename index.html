@@ -1577,6 +1577,7 @@ function startFrameExtraction(file, vid) {
   window_primaryPhaseSelection = null;
   window._denseAnglesFrames = null;
   window._fusionDisagree = {}; // v0.15.0: per-landmark MP/MoveNet disagreement (max across fusion frames)
+  window._tapeRefinedCount = 0; // v0.15.0: # landmarks refined from tape blobs this analysis
   window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
   window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
 
@@ -8052,9 +8053,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const kneePeaks     = strideDetails.map(s=>s.peakKneeFlex).filter(v=>v!=null);
   const hipExtensions = strideDetails.map(s=>s.hipAtToeoff).filter(v=>v!=null);
 
-  const _durStat       = robustStat(durations);
-  const avgDuration    = _durStat.v != null ? _durStat.v : mean(durations);
-  const strideOutliersRejected = _durStat.rejected; // v0.15.0: duration-based outlier strides
+  // v0.15.0: cadence is a RATE -- its correct statistic is the MEAN inter-stride interval,
+  // not the median (a few naturally-longer strides legitimately raise the mean). Use a
+  // trimmed mean: reject only GROSS artifacts (>40% off the median = merged / half strides),
+  // then average the rest. Preserves natural variability and matches validated cadence.
+  const _durMed        = median(durations);
+  const _durKept       = durations.filter(d => Math.abs(d - _durMed) <= 0.40 * _durMed);
+  const strideOutliersRejected = durations.length - _durKept.length;
+  const avgDuration    = _durKept.length ? mean(_durKept) : mean(durations);
   let cadenceSpm    = Math.round(60 / avgDuration * 2);
   let cadenceStride = Math.round(60 / avgDuration);
   // v0.14.0: Cadence sanity check. Human running cadence ranges from ~140 spm (slow jog)
@@ -9143,7 +9149,7 @@ function renderCaptureQuality() {
     }
 
     maxScore += 1;
-    if(tapeCount > 0) { score += 1; items.push({ok:'good', text:'Tape markers detected — marked joints are pixel-accurate'}); }
+    if((window._tapeRefinedCount || 0) > 0) { score += 1; items.push({ok:'good', text:'Tape markers detected — marked joints are pixel-accurate'}); }
     else              {             items.push({ok:'warn', text:'No tape markers detected — joint positions are model estimates. Tape gives pixel-accurate landmarks'}); }
 
     // v0.15.0: disagreement comes from the gallery FUSION pass (MP vs MoveNet), recorded
@@ -9933,6 +9939,7 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
 
       if(bestBlob) {
         used.add(bestBi);
+        if(typeof window !== 'undefined') window._tapeRefinedCount = (window._tapeRefinedCount || 0) + 1; // v0.15.0: tape-detected signal
         const origConf = prior.visibility ?? 0;
         merged[tgt.idx] = {
           ...prior,
