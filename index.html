@@ -3075,6 +3075,27 @@ function startFrameExtraction(file, vid) {
                   });
                   vid.pause();
 
+                  // v0.15.0: playback capture lags real-time and skips frames, collapsing
+                  // several phases onto one decoded frame (duplicated gallery frames, worse at
+                  // high fps). Re-seek any target whose captured frame drifted >45ms so each
+                  // phase gets its own distinct frame. No-op when playback landed cleanly.
+                  for(const _tgt of _reextTargets) {
+                    const _bad = !_tgt.captured || _tgt.actualTime === null
+                              || Math.abs(_tgt.actualTime - _tgt.time) > 0.045;
+                    if(_bad) {
+                      try {
+                        const _b64 = await seekCapture(vid, _tgt.time);
+                        if(_b64) {
+                          if(!_tgt.captured) _reextOK++;
+                          _tgt.captured = true;
+                          _tgt.b64 = _b64;
+                          _tgt.actualTime = vid.currentTime;
+                          console.log(`  Frame ${_tgt.idx+1} [${_tgt.label}]: re-seeked (playback drift) -> ${vid.currentTime.toFixed(3)}s`);
+                        }
+                      } catch(_e) { /* keep playback frame */ }
+                    }
+                  }
+
                 } else {
                   // ── Strategy B: sequential seeks with double-rAF (fallback) ──
                   console.log('  Using sequential seeks with double-rAF (requestVideoFrameCallback unavailable)');
