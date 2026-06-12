@@ -2943,6 +2943,7 @@ function startFrameExtraction(file, vid) {
               window._denseAnglesFrames = quickFused.map((lms, fi) => ({
                 landmarks: lms,
                 phase: asgn[fi] || null,
+                t: (typeof frames !== 'undefined' && frames[fi]) ? frames[fi].t : (fi / Math.max(1, quickFused.length - 1)),
               }));
             }
           }
@@ -5055,6 +5056,124 @@ async function runMediaPipeOnFrames(frames) {
 }
 
 // Draw skeleton with confidence-based rendering (solid=confident, dashed=estimated)
+// ── v0.15.0: Motion Replay — interactive skeleton-overlay player + WebM export ──
+// Plays the primary clip on a canvas with the dense-scan skeleton drawn on top, with
+// play/pause, scrub, slow-mo speed buttons, and a MediaRecorder "Download video" (WebM).
+// Fully additive; gated and wrapped so it never affects analysis.
+function buildMotionPlayer(anchorEl) {
+  try {
+    if(!anchorEl || !anchorEl.parentNode) return;
+    var srcUrl = window._primaryVidEl && window._primaryVidEl.src;
+    var dense = window._denseAnglesFrames;
+    if(!srcUrl || !Array.isArray(dense) || dense.length < 2) return;
+    document.querySelectorAll('.report-section._mpx-section').forEach(function(e){ e.remove(); });
+
+    var CONN = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[27,29],[29,31],[24,26],[26,28],[28,30],[30,32],[15,17],[15,19],[16,18],[16,20]];
+    var denseT = dense.map(function(f,i){ return (typeof f.t === 'number') ? f.t : i/(dense.length-1); });
+
+    var btn = 'border:1px solid var(--border);background:var(--surface);color:var(--ink);border-radius:5px;padding:5px 10px;font-size:.74rem;cursor:pointer;';
+    var section = document.createElement('div');
+    section.className = 'report-section full _mpx-section';
+    section.style.cssText = 'margin-bottom:16px;';
+    var speeds = [1,0.5,0.25,0.1].map(function(sp){ return '<button class="_mpx-spd" data-s="'+sp+'" style="'+btn+'">'+sp+'x</button>'; }).join('');
+    section.innerHTML =
+      '<div class="section-head"><span class="sh-icon">[*]</span><h3>Motion Replay - Skeleton Overlay</h3></div>' +
+      '<div class="section-body" style="padding:12px;">' +
+        '<div style="max-width:460px;margin:0 auto;"><canvas class="_mpx-canvas" style="width:100%;display:block;border-radius:6px;background:#000;"></canvas></div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;margin-top:10px;">' +
+          '<button class="_mpx-play" style="'+btn+'">Play</button>' +
+          '<input class="_mpx-seek" type="range" min="0" max="1000" value="0" style="flex:1;min-width:150px;">' +
+          '<span class="_mpx-time" style="font-size:.7rem;color:var(--muted);min-width:86px;text-align:right;">0.00 / 0.00s</span>' +
+          '<span style="font-size:.7rem;color:var(--muted);">Speed:</span>' + speeds +
+          '<button class="_mpx-dl" style="'+btn+'border-color:var(--teal);color:var(--teal);">Download video</button>' +
+        '</div>' +
+        '<div class="_mpx-status" style="font-size:.68rem;color:var(--muted);text-align:center;margin-top:6px;"></div>' +
+      '</div>';
+    anchorEl.parentNode.insertBefore(section, anchorEl);
+
+    var q = function(sel){ return section.querySelector(sel); };
+    var canvas = q('._mpx-canvas'), ctx = canvas.getContext('2d');
+    var playBtn = q('._mpx-play'), seek = q('._mpx-seek'), timeEl = q('._mpx-time'), dlBtn = q('._mpx-dl'), statusEl = q('._mpx-status');
+
+    var vid = document.createElement('video');
+    vid.src = srcUrl; vid.muted = true; vid.playsInline = true; vid.preload = 'auto';
+    vid.style.cssText = 'display:none;'; section.appendChild(vid);
+
+    function landmarksAt(prop){
+      // v0.15.0: interpolate between the two bracketing dense frames (by time) so the
+      // skeleton moves smoothly at video framerate instead of stepping ~9x/sec (which made
+      // the fast-moving legs visibly jump). denseT is in ascending frame/time order.
+      var n = denseT.length;
+      if(prop <= denseT[0]) return dense[0].landmarks;
+      if(prop >= denseT[n-1]) return dense[n-1].landmarks;
+      var hi = 1; while(hi < n && denseT[hi] < prop) hi++;
+      var lo = hi - 1;
+      var span = denseT[hi] - denseT[lo]; if(!(span > 0)) return dense[lo].landmarks;
+      var fr = (prop - denseT[lo]) / span;
+      var A = dense[lo].landmarks, B = dense[hi].landmarks;
+      if(!A) return B; if(!B) return A;
+      var m = Math.max(A.length, B.length), out = new Array(m);
+      for(var i=0;i<m;i++){
+        var a = A[i], b = B[i];
+        if(a && b){ out[i] = { x: a.x + (b.x-a.x)*fr, y: a.y + (b.y-a.y)*fr,
+          visibility: Math.min(a.visibility==null?1:a.visibility, b.visibility==null?1:b.visibility) }; }
+        else { out[i] = a || b || null; }
+      }
+      return out;
+    }
+    function sizeCanvas(){ canvas.width = vid.videoWidth || 720; canvas.height = vid.videoHeight || 1280; }
+    function vget(p){ return (p && p.visibility != null) ? p.visibility : 1; }
+    function draw(){
+      var W = canvas.width, H = canvas.height;
+      if(vid.readyState >= 2){ try { ctx.drawImage(vid, 0, 0, W, H); } catch(e){} }
+      var dur = vid.duration || 1;
+      var lm = landmarksAt((vid.currentTime||0)/dur);
+      if(lm){
+        ctx.lineWidth = Math.max(2, W/240); ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(0,229,204,0.9)';
+        for(var c=0;c<CONN.length;c++){ var A=lm[CONN[c][0]], B=lm[CONN[c][1]]; if(!A||!B) continue; if(vget(A)<0.2||vget(B)<0.2) continue; ctx.beginPath(); ctx.moveTo(A.x*W,A.y*H); ctx.lineTo(B.x*W,B.y*H); ctx.stroke(); }
+        for(var i=0;i<lm.length;i++){ var p=lm[i]; if(!p||vget(p)<0.2) continue; ctx.beginPath(); ctx.fillStyle = i<11 ? '#ffeb3b' : (i%2===0 ? '#fbbf24' : '#00e5cc'); ctx.arc(p.x*W,p.y*H,Math.max(2.5,W/130),0,Math.PI*2); ctx.fill(); }
+      }
+    }
+    function f2(t){ return (t||0).toFixed(2); }
+    function ui(){ var dur=vid.duration||0; if(document.activeElement!==seek) seek.value = dur ? String(Math.round((vid.currentTime/dur)*1000)) : '0'; timeEl.textContent = f2(vid.currentTime)+' / '+f2(dur)+'s'; playBtn.textContent = vid.paused ? 'Play' : 'Pause'; }
+    var raf = 0;
+    function loop(){ draw(); ui(); if(!vid.paused && !vid.ended) raf = requestAnimationFrame(loop); }
+
+    vid.addEventListener('loadedmetadata', function(){ sizeCanvas(); draw(); ui(); });
+    vid.addEventListener('seeked', function(){ draw(); ui(); });
+    vid.addEventListener('ended', function(){ cancelAnimationFrame(raf); ui(); });
+    playBtn.onclick = function(){ if(vid.paused){ vid.play(); raf = requestAnimationFrame(loop); } else { vid.pause(); cancelAnimationFrame(raf); } ui(); };
+    seek.oninput = function(){ var dur = vid.duration||0; vid.currentTime = (seek.value/1000)*dur; };
+    var spd = section.querySelectorAll('._mpx-spd');
+    spd.forEach(function(b){ b.onclick = function(){ vid.playbackRate = parseFloat(b.dataset.s); spd.forEach(function(x){ x.style.fontWeight='400'; x.style.borderColor='var(--border)'; }); b.style.fontWeight='700'; b.style.borderColor='var(--teal)'; }; });
+
+    dlBtn.onclick = async function(){
+      if(typeof MediaRecorder === 'undefined' || !canvas.captureStream){ statusEl.textContent = 'Video export is not supported in this browser.'; return; }
+      try {
+        dlBtn.disabled = true; statusEl.textContent = 'Recording overlay (plays through once at normal speed)...';
+        vid.pause(); vid.playbackRate = 1; vid.currentTime = 0;
+        await new Promise(function(r){ vid.addEventListener('seeked', r, {once:true}); });
+        var stream = canvas.captureStream(30);
+        var mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+        var rec = new MediaRecorder(stream, { mimeType: mime });
+        var chunks = []; rec.ondataavailable = function(e){ if(e.data && e.data.size) chunks.push(e.data); };
+        var stopped = new Promise(function(r){ rec.onstop = r; });
+        rec.start();
+        await vid.play();
+        (function recLoop(){ draw(); if(!vid.paused && !vid.ended) requestAnimationFrame(recLoop); })();
+        await new Promise(function(r){ vid.addEventListener('ended', r, {once:true}); });
+        rec.stop(); await stopped;
+        var blob = new Blob(chunks, { type:'video/webm' });
+        var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'MotionRx_overlay.webm'; document.body.appendChild(a); a.click(); a.remove();
+        statusEl.textContent = 'Saved MotionRx_overlay.webm';
+      } catch(err){ statusEl.textContent = 'Recording failed: ' + ((err && err.message) || err); }
+      finally { dlBtn.disabled = false; }
+    };
+
+    if(vid.readyState >= 1){ sizeCanvas(); draw(); ui(); }
+  } catch(e){ console.warn('[MotionPlayer] skipped:', e); }
+}
+
 function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase=null) {
   // Swing phases: heel (29/30) and toe (31/32) landmarks are unreliable —
   // the foot is in the air, plantarflexed, and often occluded by the contralateral leg.
@@ -12613,6 +12732,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       }
 
       document.getElementById('framesSection').style.display='block';
+      try { buildMotionPlayer(document.getElementById('framesSection')); } catch(_e){ console.warn('[MotionPlayer]', _e); }
       // Update section title based on view mode
       const titleEl = document.getElementById('framesSectionTitle');
       if(titleEl) {
