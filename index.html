@@ -723,6 +723,11 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             <div style="background:var(--navy);padding:4px 10px;font-size:.68rem;font-weight:600;color:#fff;letter-spacing:.05em;text-transform:uppercase;">
               Blob Detection Preview — gold circles = detected, cross = assigned to landmark</div>
             <canvas id="tapeTestCanvas" style="width:100%;display:block;"></canvas>
+            <div id="tapeCalibControls" style="display:none;padding:9px 11px;background:#0f172a;color:#cbd5e1;font-size:.72rem;line-height:1.55;">
+              <strong style="color:#fff;">&#127919; Calibrate to your tape:</strong> if a marker isn't detected, click a colour below, then click directly on that tape in the image above. Detection then locks onto your exact tape colour &amp; lighting &mdash; and catches it in shadow.
+              <div id="tapeCalibBtns" style="display:flex;gap:8px;margin-top:7px;flex-wrap:wrap;"></div>
+              <div id="tapeCalibState" style="margin-top:7px;"></div>
+            </div>
           </div>
           <div style="padding:9px 13px;background:var(--teal-light);border-radius:6px;font-size:.73rem;color:var(--teal);line-height:1.65;">
             💡 <strong>Placement guide —</strong>
@@ -9668,6 +9673,73 @@ async function refineFootLandmarks(imageBase64, coarseLandmarks) {
 // onto a preview canvas inside the tape config card. Lets the clinician verify
 // that tape colors are being detected before committing to a full analysis.
 //
+// ── Click-to-Calibrate Tape Sampling (v0.15.0) ────────────────────────
+// Lets the clinician click their actual tape in the preview to lock detection onto its
+// true colour + brightness — fixes both missed (shadowed) markers and skin/face false
+// positives that one global threshold can't separate. Persisted in localStorage.
+function _saveTapeCalib() {
+  try { localStorage.setItem('motionrx_tapeCalib', JSON.stringify(window._tapeCalibration || {})); } catch(e) {}
+}
+function _armTapeSample(color) {
+  window._tapeSampleArmed = color;
+  const cv = document.getElementById('tapeTestCanvas');
+  if(cv) cv.style.cursor = 'crosshair';
+  const st = document.getElementById('tapeTestStatus');
+  if(st) { st.innerHTML = '\uD83D\uDC46 Click directly on the <strong>' + color + '</strong> tape in the image above.'; st.style.color = 'var(--navy)'; }
+}
+function _sampleTapeHSV(nx, ny) {
+  const cl = window._tapeTestClean; if(!cl) return null;
+  const W = cl.width, H = cl.height, d = cl.data;
+  const cx = Math.round(nx*W), cy = Math.round(ny*H), R = 5;
+  const hs=[], ss=[], vs=[];
+  for(let y=cy-R; y<=cy+R; y++) for(let x=cx-R; x<=cx+R; x++) {
+    if(x<0||y<0||x>=W||y>=H) continue;
+    const i=(y*W+x)*4, r=d[i]/255, g=d[i+1]/255, b=d[i+2]/255;
+    const mx=Math.max(r,g,b), mn=Math.min(r,g,b), df=mx-mn;
+    let h=0, sv=mx>0?df/mx:0, vv=mx;
+    if(df>0){ if(mx===r)h=60*(((g-b)/df)%6); else if(mx===g)h=60*((b-r)/df+2); else h=60*((r-g)/df+4); if(h<0)h+=360; }
+    hs.push(h); ss.push(sv); vs.push(vv);
+  }
+  if(!hs.length) return null;
+  const med = a => { const z=[...a].sort((p,q)=>p-q); return z[Math.floor(z.length/2)]; };
+  return {h:med(hs), s:med(ss), v:med(vs)};
+}
+function _tapeCanvasClick(ev) {
+  const color = window._tapeSampleArmed;
+  const cv = document.getElementById('tapeTestCanvas');
+  if(!color || !cv) return;
+  const rect = cv.getBoundingClientRect();
+  const nx = (ev.clientX - rect.left)/rect.width;
+  const ny = (ev.clientY - rect.top)/rect.height;
+  const hsv = _sampleTapeHSV(nx, ny);
+  const st = document.getElementById('tapeTestStatus');
+  if(!hsv) { if(st){ st.textContent = '⚠️ Could not sample that point — run the test again first.'; } return; }
+  window._tapeCalibration = window._tapeCalibration || {};
+  window._tapeCalibration[color] = {h:Math.round(hsv.h*10)/10, s:Math.round(hsv.s*100)/100, v:Math.round(hsv.v*100)/100, hTol:16};
+  _saveTapeCalib();
+  window._tapeSampleArmed = null;
+  cv.style.cursor = 'default';
+  _renderTapeCalibState();
+  runTapeDetectionTest();
+}
+function _clearTapeCalib(color) {
+  if(window._tapeCalibration) delete window._tapeCalibration[color];
+  _saveTapeCalib();
+  _renderTapeCalibState();
+  runTapeDetectionTest();
+}
+function _renderTapeCalibState() {
+  const el = document.getElementById('tapeCalibState');
+  if(!el) return;
+  const cal = window._tapeCalibration || {};
+  const keys = Object.keys(cal).filter(k => cal[k] && cal[k].h != null);
+  if(!keys.length) { el.innerHTML = '<span style="color:#94a3b8;">No calibration yet — using built-in neon thresholds.</span>'; return; }
+  el.innerHTML = keys.map(k => {
+    const c = cal[k];
+    return '✅ <strong style="color:#fff;">' + k + '</strong> calibrated <span style="color:#94a3b8;">(H' + Math.round(c.h) + ' S' + Math.round(c.s*100) + ' V' + Math.round(c.v*100) + ')</span> <button type="button" onclick="_clearTapeCalib(\'' + k + '\')" style="padding:1px 7px;margin-right:10px;background:#334155;color:#cbd5e1;border:none;border-radius:4px;font-size:.66rem;cursor:pointer;">clear</button>';
+  }).join(' ');
+}
+
 async function runTapeDetectionTest() {
   const btn    = document.getElementById('tapeTestBtn');
   const status = document.getElementById('tapeTestStatus');
@@ -9716,6 +9788,7 @@ async function runTapeDetectionTest() {
     const ctx = cv.getContext('2d');
     ctx.drawImage(img, 0, 0);
     const W = img.naturalWidth, H = img.naturalHeight;
+    window._tapeTestClean = ctx.getImageData(0, 0, W, H); // v0.15.0: clean pixels for click-to-calibrate
 
     const DRAW_COLORS = {
       orange:'#ff8c00', green:'#00e676', yellow:'#ffee00',
@@ -9814,6 +9887,22 @@ async function runTapeDetectionTest() {
     ctx.fillText(`${colorLabels.join('  ·  ')}${roiNote}`, 8, Math.max(22, H/22));
 
     preview.style.display = 'block';
+    // v0.15.0: wire up click-to-calibrate controls
+    try {
+      const calCtl = document.getElementById('tapeCalibControls');
+      const calBtns = document.getElementById('tapeCalibBtns');
+      if(calCtl && calBtns) {
+        calCtl.style.display = 'block';
+        const uniqCols = [...new Set([tc.colorA, tc.colorB].filter(Boolean).map(c=>c.color))];
+        const SW = {orange:'#ff8c00',green:'#00e676',yellow:'#ffee00',blue:'#00b0ff',pink:'#ff4081',red:'#ff1744',white:'#ffffff'};
+        calBtns.innerHTML = uniqCols.map(c =>
+          '<button type="button" onclick="_armTapeSample(\'' + c + '\')" style="padding:5px 11px;background:' + (SW[c]||'#888') + ';color:#111;border:none;border-radius:5px;font-size:.72rem;font-weight:700;cursor:pointer;">🎯 Sample ' + c + '</button>'
+        ).join('');
+        _renderTapeCalibState();
+        cv.onclick = _tapeCanvasClick;
+        cv.style.cursor = window._tapeSampleArmed ? 'crosshair' : 'default';
+      }
+    } catch(e) { console.warn('[TapeCalib] UI wiring failed', e); }
     const zeroColors = [tc.colorA, tc.colorB].filter((c,ci) => c && colorLabels[ci]?.includes(': 0'));
     const zeroHints = zeroColors.map(c =>
       `${c.color} = 0: check (1) tape is below clothing hem and facing camera, ` +
@@ -9895,7 +9984,7 @@ async function detectColorBlobs(imageBase64, colorName, minPixels = 15, maxPixel
   // HSV match functions — neon tape has high saturation and value, making it
   // robust even under variable gym/field lighting.
   const HSV = {
-    orange: (h,s,v) => (h>=14&&h<=40)   && s>0.62 && v>0.52, // neon: high S eliminates skin (S<0.55)
+    orange: (h,s,v,r,g,b) => (h>=12&&h<=42) && s>0.50 && v>0.40 && b < 0.55*r, // v0.15.0 lighting-robust: lower S/V floors catch shadowed/dim foot tape; low blue-vs-red rejects skin/face
     green:  (h,s,v) => (h>=72&&h<=145)  && s>0.45 && v>0.28, // relaxed slightly for indoor flat lighting
     yellow: (h,s,v) => (h>=40&&h<=70)   && s>0.60 && v>0.55,
     blue:   (h,s,v) => (h>=192&&h<=255) && s>0.50 && v>0.20,
@@ -9903,7 +9992,29 @@ async function detectColorBlobs(imageBase64, colorName, minPixels = 15, maxPixel
     red:    (h,s,v) => (h>=338||h<=12)  && s>0.60 && v>0.35,
     white:  (h,s,v) => v>0.85 && s<0.15,
   };
-  const matchFn = HSV[colorName];
+  // v0.15.0: click-to-calibrate override — if the clinician sampled their actual tape,
+  // match a tight hue window around it with relaxed S/V floors (so the SAME tape is still
+  // caught in shadow). Falls back to the built-in neon thresholds otherwise.
+  if(typeof window !== 'undefined' && window._tapeCalibration === undefined) {
+    try { window._tapeCalibration = JSON.parse(localStorage.getItem('motionrx_tapeCalib') || '{}'); }
+    catch(e) { window._tapeCalibration = {}; }
+  }
+  const cal = (typeof window !== 'undefined') ? (window._tapeCalibration || {})[colorName] : null;
+  let matchFn;
+  if(cal && cal.h != null) {
+    const hT = cal.hTol != null ? cal.hTol : 16;
+    const sMin = Math.max(0.30, (cal.s || 0) - 0.28);
+    const vMin = Math.max(0.22, (cal.v || 0) - 0.34);
+    const orangeish = cal.h >= 10 && cal.h <= 46;
+    matchFn = (h,s,v,r,g,b) => {
+      let dh = Math.abs(h - cal.h); if(dh > 180) dh = 360 - dh;
+      if(dh > hT || s < sMin || v < vMin) return false;
+      if(orangeish && b >= 0.6*r) return false; // skin guard for orange-range calibrations
+      return true;
+    };
+  } else {
+    matchFn = HSV[colorName];
+  }
   if(!matchFn) return [];
 
   return new Promise(resolve => {
@@ -9932,7 +10043,7 @@ async function detectColorBlobs(imageBase64, colorName, minPixels = 15, maxPixel
             else            h = 60*((r-g)/d+4);
             if(h < 0) h += 360;
           }
-          mask[y*W+x] = matchFn(h, s, v) ? 1 : 0;
+          mask[y*W+x] = matchFn(h, s, v, r, g, b) ? 1 : 0;
         }
       }
 
