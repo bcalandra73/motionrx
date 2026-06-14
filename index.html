@@ -1578,6 +1578,7 @@ function startFrameExtraction(file, vid) {
   window._denseAnglesFrames = null;
   window._fusionDisagree = {}; // v0.15.0: per-landmark MP/MoveNet disagreement (max across fusion frames)
   window._tapeRefinedCount = 0; // v0.15.0: # landmarks refined from tape blobs this analysis
+  window._tapeRefinedIdx = new Set(); // v0.15.0: which landmark indices were tape-refined (per-metric provenance)
   window._interpGapFrames = 0; // v0.15.0: lower-body frames in uninterpolable gaps
   window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
   window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
@@ -10123,7 +10124,7 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
 
       if(bestBlob) {
         used.add(bestBi);
-        if(typeof window !== 'undefined') window._tapeRefinedCount = (window._tapeRefinedCount || 0) + 1; // v0.15.0: tape-detected signal
+        if(typeof window !== 'undefined') { window._tapeRefinedCount = (window._tapeRefinedCount || 0) + 1; (window._tapeRefinedIdx || (window._tapeRefinedIdx = new Set())).add(tgt.idx); } // v0.15.0: tape signal + which landmark
         const origConf = prior.visibility ?? 0;
         merged[tgt.idx] = {
           ...prior,
@@ -12896,16 +12897,27 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
             }
           }
 
+          // v0.15.0: low-confidence metrics are SHOWN (value + why it's thin), never hidden;
+          // rendered amber with NO normal/abnormal flag and excluded from headline findings/LSI.
+          const FOOT_IDX = [27,28,29,30,31,32];
+          const footTapeMissing = !(window._tapeRefinedIdx && FOOT_IDX.some(i => window._tapeRefinedIdx.has(i)));
+          const lcReason = (v) => {
+            const _b = [(v.count||0)+' frame'+((v.count===1)?'':'s')];
+            if((v.count||0) >= 3 && v.hitRate != null && v.hitRate < 40) _b.push('tracked in '+v.hitRate+'% of frames');
+            if(/Pronation|Ankle|Foot|Valgus|Pelvic/i.test(label) && footTapeMissing) _b.push('foot tape not detected');
+            return _b.join(' · ');
+          };
+          const lcCell = (v, val) => '<span class="val" style="color:var(--amber)" title="Low-confidence: shown for reference, not used in findings">'+val+'°</span> <span class="ref">⚠ low confidence</span><br><span class="ref">'+lcReason(v)+' — not used in findings</span>';
           const confNote = (hitRate) => hitRate != null
             ? `<span class="ref" title="Only ${hitRate}% of frames produced this measurement">⚠ ${hitRate}% frames</span>`
             : '';
           const lCell = !lv ? '—'
             : lLowConf
-              ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(lv.hitRate)}<br><span class="ref">insufficient data (${lv.count} frames)</span>`
+              ? lcCell(lv, lVal)
               : `<span class="val ${lFlag}">${lVal}°</span>${peakNote}<br><span class="ref">avg ${lv.avg}°, range ${lv.min}°–${lv.max}°</span>`;
           const rCell = !rv ? (R ? '—' : '<span class="ref">bilateral</span>')
             : rLowConf
-              ? `<span class="val" style="color:var(--muted)">N/A</span>${confNote(rv.hitRate)}<br><span class="ref">insufficient data (${rv.count} frames)</span>`
+              ? lcCell(rv, rVal)
               : `<span class="val ${rFlag}">${rVal}°</span>${peakNote}<br><span class="ref">avg ${rv.avg}°, range ${rv.min}°–${rv.max}°</span>`;
           tableHtml += `<tr>
             <td style="font-weight:600">${label}</td>
