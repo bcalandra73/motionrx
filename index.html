@@ -11343,13 +11343,17 @@ async function runDenseDynamicPass(movement, vidEl, dur, cameraViewLocal, status
   // Run MediaPipe on all dense frames
   const mpResults = await runMediaPipeOnFrames(denseFrames);
 
+  // v0.15.0 (#16): extend the per-person anatomical / segment-length plausibility pass to the
+  // dense scan (previously gallery-only). Clamps mistracked knees/ankles/hips against the
+  // person's median segment lengths BEFORE foot + tape refinement place the feet precisely on top.
+  let _denseRaw = mpResults.map(raw => raw ? (raw.poseLandmarks ?? raw) : null);
+  try { _denseRaw = applySegmentConstraints(_denseRaw, cameraViewLocal); } catch(e){ console.warn('[DensePlausibility]', e); }
+
   // Apply foot landmark refinement + tape marker refinement to each frame
   const refinedLandmarks = [];
   for(let i = 0; i < denseFrames.length; i++) {
-    const raw = mpResults[i];
-    if(!raw) { refinedLandmarks.push(null); continue; }
-    // refineFootLandmarks expects a landmarks ARRAY, not the full result object
-    const rawLms = raw.poseLandmarks ?? raw; // unwrap if needed
+    const rawLms = _denseRaw[i];
+    if(!rawLms) { refinedLandmarks.push(null); continue; }
     let refined = await refineFootLandmarks(denseFrames[i].imageData, rawLms);
     if(tapeConfig) refined = await applyTapeRefinement(denseFrames[i].imageData, refined, tapeConfig);
     refinedLandmarks.push(refined);
@@ -12222,10 +12226,12 @@ async function runAnalysis() {
             const secMpRes = await runMediaPipeOnFrames(secDenseFrames);
             // Apply tape (no crop refinement — geometry different from primary)
             const secTapeCfg = readTapeConfig();
+            // v0.15.0 (#16): segment-length plausibility on the dense posterior scan too, before tape.
+            let _secRaw = secMpRes.map(raw => raw ? (raw.poseLandmarks ?? raw) : null);
+            try { _secRaw = applySegmentConstraints(_secRaw, cameraView2); } catch(e){ console.warn('[DensePlausibility 3b]', e); }
             const secDenseLms = [];
             for(let i = 0; i < secDenseFrames.length; i++) {
-              // runMediaPipeOnFrames returns {poseLandmarks:[...]} objects — extract the array
-              let lms = secMpRes[i]?.poseLandmarks ?? secMpRes[i] ?? null;
+              let lms = _secRaw[i];
               if(lms && secTapeCfg) lms = await applyTapeRefinement(secDenseFrames[i].imageData, lms, secTapeCfg);
               secDenseLms.push(lms);
             }
@@ -12692,6 +12698,7 @@ Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
 {
   "score": <integer 1-10>,
   "score_summary": "<one-sentence overall assessment>",
+  "score_rationale": "<2-4 sentences stating WHY the score is this number: name the specific measured factors that LOWERED it (cite the angles / asymmetries / timing) and the strengths that kept it up. Be concrete and transparent so the clinician sees exactly what drove the score.>",
   "findings": [
     { "priority": "high|medium|positive", "title": "<short title>", "detail": "<specific observation referencing measured angles${barStats ? ' and/or bar drift' : ''} where possible>" }
   ],
@@ -12733,6 +12740,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         const r = {};
         const sm = raw.match(/"score"\s*:\s*(\d+)/); if(sm) r.score=parseInt(sm[1]);
         const sum = raw.match(/"score_summary"\s*:\s*"([^"]+)"/); if(sum) r.score_summary=sum[1];
+        const ratM = raw.match(/"score_rationale"\s*:\s*"((?:[^"\\]|\\[\s\S])*?)"/); if(ratM) r.score_rationale=ratM[1].replace(/\\n/g,'\n');
         const bioM = raw.match(/"biomechanical_analysis"\s*:\s*"((?:[^"\\]|\\[\s\S])*?)"/);
         if(bioM) r.biomechanical_analysis = bioM[1].replace(/\\n/g,'\n');
         const clinM = raw.match(/"clinical_impressions"\s*:\s*"((?:[^"\\]|\\[\s\S])*?)"/);
@@ -13574,6 +13582,10 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     </div>` : '';
 
   document.getElementById('reportGrid').innerHTML=`
+    ${r.score_rationale ? `<div class="report-section full">
+      <div class="section-head"><span class="sh-icon">📊</span><h3>Why This Score${score!=null?': '+score+'/10':''}</h3></div>
+      <div class="section-body"><div class="narrative">${narrativeHtml(r.score_rationale)}</div></div>
+    </div>` : ''}
     <div class="report-section">
       <div class="section-head"><span class="sh-icon">🔍</span><h3>Key Findings</h3></div>
       <div class="section-body">${findings}</div>
