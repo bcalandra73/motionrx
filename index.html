@@ -13460,6 +13460,17 @@ function _buildBaselineSectionHtml(r, movement, aggregated) {
 }
 
 
+// v0.15.0 (#24): build a transparent score rationale from the findings when the model omits one.
+function _synthScoreWhy(r){
+  const f = (r && r.findings) || [];
+  const neg = f.filter(x=>x && (x.priority==='high'||x.priority==='medium')).map(x=>x.title).filter(Boolean);
+  const pos = f.filter(x=>x && x.priority==='positive').map(x=>x.title).filter(Boolean);
+  if(!neg.length && !pos.length) return (r && r.score_summary) ? r.score_summary : '';
+  let s = '';
+  if(neg.length) s += 'Points deducted for: ' + neg.join('; ') + '. ';
+  if(pos.length) s += 'Strengths supporting the score: ' + pos.join('; ') + '.';
+  return s.trim();
+}
 function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) {
   const score = r.score||null;
   window._lastScore = score; // for session comparison snapshot
@@ -13581,10 +13592,11 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       </div>
     </div>` : '';
 
+  const _scoreWhy = r.score_rationale || _synthScoreWhy(r);
   document.getElementById('reportGrid').innerHTML=`
-    ${r.score_rationale ? `<div class="report-section full">
+    ${_scoreWhy ? `<div class="report-section full" id="scoreWhySection">
       <div class="section-head"><span class="sh-icon">📊</span><h3>Why This Score${score!=null?': '+score+'/10':''}</h3></div>
-      <div class="section-body"><div class="narrative">${narrativeHtml(r.score_rationale)}</div></div>
+      <div class="section-body"><div class="score-why-text" style="font-size:.82rem;line-height:1.65;color:var(--text);">${esc(_scoreWhy)}</div></div>
     </div>` : ''}
     <div class="report-section">
       <div class="section-head"><span class="sh-icon">🔍</span><h3>Key Findings</h3></div>
@@ -14956,6 +14968,16 @@ async function exportPDF() {
         ftLines.forEach((l, li) => doc.text(l, ML+7, y+6+li*4.8));
         y += ftH + 8;
       }
+    }
+
+    // ════════════════════════════════════════════════
+    // WHY THIS SCORE
+    // ════════════════════════════════════════════════
+    const whyEl = document.querySelector('#scoreWhySection .score-why-text');
+    if(whyEl && whyEl.textContent && whyEl.textContent.trim()) {
+      guard(SECTION_HEAD_H+20);
+      sectionHead('Why This Score');
+      bodyText(whyEl.textContent.trim());
     }
 
     // ════════════════════════════════════════════════
