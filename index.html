@@ -10220,36 +10220,88 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
     };
     const RADIUS = 0.15; // base — may be widened per-landmark below
 
-    for(const tgt of targets) {
-      const prior = merged[tgt.idx];
-      if(!prior) continue;
-
-      let bestBlob = null, bestDist = Infinity, bestBi = -1;
+    // v0.15.0 — global-minimum assignment (was confidence-ordered greedy). Build every
+    // (target,blob) pair within radius, then commit the smallest distances first so a noisy
+    // high-confidence prior can't steal another landmark's blob (the ankle/heel/toe swap).
+    const pairs = [];
+    targets.forEach((tgt, ti) => {
+      const prior = merged[tgt.idx]; if(!prior) return;
+      const r = isProjectedPrior(tgt.idx) ? 0.25 : RADIUS;
       blobs.forEach((blob, bi) => {
-        if(used.has(bi)) return;
         const dx = blob.x - prior.x, dy = blob.y - prior.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
-        const r = isProjectedPrior(tgt.idx) ? 0.25 : RADIUS;
-        if(dist < r && dist < bestDist) { bestDist = dist; bestBlob = blob; bestBi = bi; }
+        if(dist < r) pairs.push({ ti, bi, dist });
       });
+    });
+    pairs.sort((a, b) => a.dist - b.dist);
+    const assignedT = new Map(); // ti -> bi
+    for(const p of pairs) {
+      if(assignedT.has(p.ti) || used.has(p.bi)) continue;
+      assignedT.set(p.ti, p.bi);
+      used.add(p.bi);
+    }
 
-      if(bestBlob) {
-        used.add(bestBi);
-        if(typeof window !== 'undefined') { window._tapeRefinedCount = (window._tapeRefinedCount || 0) + 1; (window._tapeRefinedIdx || (window._tapeRefinedIdx = new Set())).add(tgt.idx); } // v0.15.0: tape signal + which landmark
+    // v0.15.0 — foot-triad geometry correction. The ankle must sit above heel & toe, and the
+    // heel/toe fore-aft order must match the MediaPipe priors. If swapping two foot assignments
+    // reduces anatomical violation, keep the swap. Knee is excluded (geometry only constrains feet).
+    const footSlot = {};
+    targets.forEach((t, ti) => { if(t.loc==='ankle'||t.loc==='heel'||t.loc==='toe') footSlot[t.loc] = ti; });
+    const blobOf  = (ti) => assignedT.has(ti) ? blobs[assignedT.get(ti)] : null;
+    const priorOf = (ti) => merged[targets[ti].idx];
+    const footViolation = () => {
+      const aTi=footSlot.ankle, hTi=footSlot.heel, tTi=footSlot.toe;
+      const a=aTi!=null?blobOf(aTi):null, h=hTi!=null?blobOf(hTi):null, t=tTi!=null?blobOf(tTi):null;
+      let v=0;
+      if(a&&h && a.y > h.y+0.01) v++;   // ankle below heel = anatomically impossible
+      if(a&&t && a.y > t.y+0.01) v++;   // ankle below toe  = anatomically impossible
+      const pT=tTi!=null?priorOf(tTi):null, pH=hTi!=null?priorOf(hTi):null;
+      if(h&&t&&pT&&pH){ const expToeLeft = pT.x < pH.x; if((t.x < h.x) !== expToeLeft) v++; }
+      return v;
+    };
+    const footTis = Object.values(footSlot);
+    if(footTis.length >= 2){
+      for(let iter=0; iter<3; iter++){
+        const base = footViolation();
+        if(base === 0) break;
+        let did = false;
+        for(let i=0;i<footTis.length && !did;i++) for(let j=i+1;j<footTis.length && !did;j++){
+          const a=footTis[i], b=footTis[j];
+          const A=assignedT.has(a)?assignedT.get(a):null, B=assignedT.has(b)?assignedT.get(b):null;
+          if(B!=null) assignedT.set(a,B); else assignedT.delete(a);
+          if(A!=null) assignedT.set(b,A); else assignedT.delete(b);
+          if(footViolation() < base){ did=true; }
+          else {
+            if(A!=null) assignedT.set(a,A); else assignedT.delete(a);
+            if(B!=null) assignedT.set(b,B); else assignedT.delete(b);
+          }
+        }
+        if(!did) break;
+      }
+    }
+
+    // commit the resolved assignments
+    targets.forEach((tgt, ti) => {
+      const prior = merged[tgt.idx];
+      if(!prior) return;
+      if(assignedT.has(ti)) {
+        const bestBlob = blobs[assignedT.get(ti)];
+        const dx = bestBlob.x - prior.x, dy = bestBlob.y - prior.y;
+        const bestDist = Math.sqrt(dx*dx + dy*dy);
+        if(typeof window !== 'undefined') { window._tapeRefinedCount = (window._tapeRefinedCount || 0) + 1; (window._tapeRefinedIdx || (window._tapeRefinedIdx = new Set())).add(tgt.idx); }
         const origConf = prior.visibility ?? 0;
         merged[tgt.idx] = {
           ...prior,
-          x:          bestBlob.x,
-          y:          bestBlob.y,
+          x: bestBlob.x,
+          y: bestBlob.y,
           visibility: Math.max(origConf, 0.88),
-          presence:   Math.max(prior?.presence ?? 0, 0.88), // tape blob = physically confirmed → boost presence too
+          presence:   Math.max(prior?.presence ?? 0, 0.88),
           source:     `tape-${colorConf.color}(was-${origConf.toFixed(2)},d=${bestDist.toFixed(3)},px=${bestBlob.pixelCount})`,
         };
-        console.log(`[TapeRefine] LM${tgt.idx}(${tgt.loc}) ← ${colorConf.color} blob @(${bestBlob.x.toFixed(3)},${bestBlob.y.toFixed(3)}) dist=${bestDist.toFixed(3)} px=${bestBlob.pixelCount}`);
+        console.log(`[TapeRefine] LM${tgt.idx}(${tgt.loc}) <- ${colorConf.color} blob @(${bestBlob.x.toFixed(3)},${bestBlob.y.toFixed(3)}) dist=${bestDist.toFixed(3)} px=${bestBlob.pixelCount}`);
       } else {
         console.log(`[TapeRefine] LM${tgt.idx}(${tgt.loc}): no ${colorConf.color} blob within radius — keeping MP estimate`);
       }
-    }
+    });
   };
 
   if(tapeConfig.colorA) await processColor(tapeConfig.colorA);
@@ -12308,6 +12360,9 @@ async function runAnalysis() {
     // For shoulder/elbow flexion: always report peak (max) — avg includes start position at 0°
     const isShoulderOrElbow = /Shoulder (Flexion|Abduction)|Elbow Flexion/.test(k);
     const dispVal = isShoulderOrElbow ? v.max : gaitDisplayVal(k, v, movement);
+    // v0.15.0 HARD GATE: send low-confidence metrics to the model WITHOUT a number so it cannot
+    // headline them (the value still appears in the on-screen table for the clinician).
+    if(v.lowConfidence) return `${k}: INSUFFICIENT DATA (only ${v.count||0} frame(s)) — DO NOT report as a finding or use for footwear/clinical recommendations`;
     const peakNote = isShoulderOrElbow ? ' [peak ROM]'
       : ((dispVal === v.max || dispVal === v.min) && dispVal !== v.avg) ? ' [peak]' : '';
     const viewNote = (hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : '') + (v.lowConfidence ? ' [LOW CONFIDENCE: only '+(v.count||0)+' frame(s) - do NOT report this as a definitive finding]' : '');
@@ -12515,10 +12570,13 @@ ${(() => {
   const checked = document.getElementById('includeFootwear')?.checked !== false; // default true
   if(!isRun || !checked) return '';
   // Collect available biomechanical signals for footwear classification
-  const pronL = aggregated['Left Pronation']?.avg ?? null;
-  const pronR = aggregated['Right Pronation']?.avg ?? null;
-  const hipAddL = aggregated['Left Hip Adduction']?.avg ?? null;
-  const hipAddR = aggregated['Right Hip Adduction']?.avg ?? null;
+  // v0.15.0 HARD GATE: never feed low-confidence pronation/adduction into the footwear classifier.
+  const _lcF = (k) => !aggregated[k] || aggregated[k].lowConfidence === true;
+  const pronL = _lcF('Left Pronation')  ? null : (aggregated['Left Pronation']?.avg ?? null);
+  const pronR = _lcF('Right Pronation') ? null : (aggregated['Right Pronation']?.avg ?? null);
+  const hipAddL = _lcF('Left Hip Adduction')  ? null : (aggregated['Left Hip Adduction']?.avg ?? null);
+  const hipAddR = _lcF('Right Hip Adduction') ? null : (aggregated['Right Hip Adduction']?.avg ?? null);
+  const pronThin = pronL == null && pronR == null;
   const fs = window_strideMetrics?.fsConsensus || 'unknown';
   const stepAsym = window_strideMetrics?.stepLengthAsymPct ?? null;
   const shoe = document.getElementById('shoeType')?.value || '';
@@ -12543,7 +12601,7 @@ Based on the following biomechanical data, add a "footwear_recommendation" field
 Also comment on whether current footwear is appropriate or mismatched.
 
 Biomechanical data for classification:
-  ${lines2}`;
+  ${lines2}${pronThin ? '\n\nIMPORTANT: Pronation is unavailable or low-confidence (insufficient frames / foot tape not detected). Do NOT classify as STABILITY or MOTION CONTROL on the basis of pronation. Base the recommendation on foot-strike pattern and cadence, default to NEUTRAL unless other signals clearly indicate otherwise, and state that any pronation-based recommendation requires a manual foot assessment.' : ''}`;
 })()}
 
 MOVEMENT-SPECIFIC NORMS: Use the following reference ranges for ${movement} when interpreting angles:
