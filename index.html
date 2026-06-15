@@ -12264,6 +12264,28 @@ async function runAnalysis() {
                 }
               });
               console.log('[DensePass3b] Secondary dense pass: ' + secCurves.length + ' frames, upgraded ' + sec_upgraded + ' metrics');
+              // v0.15.0 — recover pronation from dense posterior STANCE frames. computePronation
+              // already stance-gates on ankle height and clamps implausible angles, so each value
+              // is a clean calcaneal-eversion sample. Pooling these (typically 10-15 frames) gives a
+              // reliable bilateral pronation where the 3 phase-restricted gallery frames could not.
+              ['Left Pronation','Right Pronation'].forEach(k => {
+                const vals = secCurves.map(c => c.angles[k]).filter(v => v != null && isFinite(v));
+                if(!vals.length) return;
+                const sorted = [...vals].sort((a,b)=>a-b);
+                const median = Math.round(sorted[Math.floor(sorted.length/2)]);
+                const galleryN = aggregated2[k]?.count || 0;
+                const total = vals.length + galleryN;
+                aggregated2[k] = {
+                  min: Math.min(...vals, aggregated2[k]?.min ?? Infinity),
+                  max: Math.max(...vals, aggregated2[k]?.max ?? -Infinity),
+                  avg: median,
+                  count: total,
+                  hitRate: Math.round(100 * vals.length / secCurves.length),
+                  lowConfidence: total < 3,
+                  source: 'dense-posterior-stance',
+                };
+                console.log(`[PronDense] ${k}: ${median}deg from ${vals.length} dense stance frames (range ${Math.min(...vals)}-${Math.max(...vals)}deg), pooled n=${total}`);
+              });
             }
           }
         }
@@ -12578,10 +12600,12 @@ ${(() => {
     if(rADF_raw != null && rADF == null) console.warn(`[DensePrompt] Right ankle DF ${rADF_raw}° outside −5 to 35° range — suppressed from prompt`);
     const lPron = getPeak('Left Pronation',  true);
     const rPron = getPeak('Right Pronation', true);
-    if(lADF!=null) lines.push(`Left ankle DF (dense refined): ${lADF}° (foot-refinement applied)`);
-    if(rADF!=null) lines.push(`Right ankle DF (dense refined): ${rADF}°`);
-    if(lPron!=null) lines.push(`Left pronation (dense): ${lPron}°`);
-    if(rPron!=null) lines.push(`Right pronation (dense): ${rPron}°`);
+    // v0.15.0: gate these dense lines by the same low-confidence flags as the table, so a
+    // flagged far-leg ankle/pronation value can't leak into the model's reasoning here.
+    if(lADF!=null && !aggregated['Left Ankle Dorsiflexion']?.lowConfidence)  lines.push(`Left ankle DF (dense refined): ${lADF}° (foot-refinement applied)`);
+    if(rADF!=null && !aggregated['Right Ankle Dorsiflexion']?.lowConfidence) lines.push(`Right ankle DF (dense refined): ${rADF}°`);
+    if(lPron!=null && !aggregated['Left Pronation']?.lowConfidence)  lines.push(`Left pronation (dense): ${lPron}°`);
+    if(rPron!=null && !aggregated['Right Pronation']?.lowConfidence) lines.push(`Right pronation (dense): ${rPron}°`);
     lines.push('Ankle values from dense pass have improved foot landmark precision from multi-scale crop refinement — prefer these over 8-frame estimates. Pronation values come from phase-accurate gallery frames (contact+loading+midstance only) and may not appear in the dense pass.');
   }
 
@@ -13323,6 +13347,111 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
   }
 }
 
+// ── Regression Baseline (v0.15.0) ─────────────────────────────────────────────
+// Save a clip's key metrics as a known-good baseline, then diff future runs of the
+// same clip against it so code changes (e.g. the MediaPipe migration) are measured,
+// not eyeballed. Keyed per-clip in localStorage by the same id used for corrections.
+const _BASELINE_PREFIX = 'motionrx_baseline_v1_';
+const _BASELINE_METRICS = [
+  'Left Hip Flexion','Right Hip Flexion','Left Knee Flexion','Right Knee Flexion',
+  'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion','Left Hip Adduction','Right Hip Adduction',
+  'Left Knee Valgus','Right Knee Valgus','Left Pronation','Right Pronation','Trunk Lean','Pelvic Drop',
+];
+function _baselineKey() { return _BASELINE_PREFIX + (window._currentCorrKey || 'adhoc'); }
+function _baselineLoad() { try { return JSON.parse(localStorage.getItem(_baselineKey()) || 'null'); } catch(e){ return null; } }
+function _baselineSnapshot(r, movement, aggregated) {
+  const m = {};
+  _BASELINE_METRICS.forEach(k => {
+    const a = aggregated[k]; if(!a) return;
+    const v = gaitDisplayVal(k, a, movement);
+    if(v == null || !isFinite(v)) return;
+    m[k] = { v: Math.round(v), lc: a.lowConfidence === true, n: a.count ?? null };
+  });
+  const sm = (typeof window_strideMetrics !== 'undefined' && window_strideMetrics) ? window_strideMetrics : {};
+  return {
+    clip: window._currentCorrKey || null, movement, date: new Date().toISOString().slice(0,10),
+    score: (r && r.score != null) ? r.score : null, metrics: m,
+    stride: {
+      cadenceSpm: sm.cadenceSpm ?? null, gcPct: sm.gcPct ?? null, floatPct: sm.floatPct ?? null,
+      stepLengthAsymPct: sm.stepLengthAsymPct ?? null, strideLengthM: sm.strideLengthM ?? null,
+      fsConsensus: sm.fsConsensus ?? null,
+    },
+  };
+}
+function _baselineSaveCurrent() {
+  if(!window._curBaselineSnapshot) return;
+  try { localStorage.setItem(_baselineKey(), JSON.stringify(window._curBaselineSnapshot)); } catch(e){ console.warn('[Baseline] save failed', e); }
+  _baselineRerender();
+}
+function _baselineClear() { try { localStorage.removeItem(_baselineKey()); } catch(e){} _baselineRerender(); }
+function _baselineRerender() {
+  const host = document.getElementById('baselineSection');
+  const ctx = window._curReportCtx;
+  if(host && ctx) host.outerHTML = _buildBaselineSectionHtml(ctx.r, ctx.movement, ctx.aggregated);
+}
+function _baselineRow(label, base, cur, tol, unit) {
+  if(base == null && cur == null) return '';
+  const d = (base != null && cur != null) ? (cur - base) : null;
+  const flagged = d != null && Math.abs(d) > tol;
+  const dStr = d == null ? '—' : (d > 0 ? '+' : '') + (Math.round(d*10)/10) + (unit||'');
+  const color = d == null ? 'var(--muted)' : flagged ? '#dc2626' : '#16a34a';
+  const icon = d == null ? '·' : flagged ? '⚠' : '✓';
+  return '<tr>'
+    + '<td style="padding:3px 8px;">'+label+'</td>'
+    + '<td style="padding:3px 8px;text-align:right;color:var(--muted);">'+(base==null?'—':base+(unit||''))+'</td>'
+    + '<td style="padding:3px 8px;text-align:right;font-weight:600;">'+(cur==null?'—':cur+(unit||''))+'</td>'
+    + '<td style="padding:3px 8px;text-align:right;color:'+color+';font-weight:600;white-space:nowrap;">'+icon+' '+dStr+'</td>'
+    + '</tr>';
+}
+function _buildBaselineSectionHtml(r, movement, aggregated) {
+  let cur = null;
+  try { cur = _baselineSnapshot(r, movement, aggregated); } catch(e){ console.warn('[Baseline] snapshot', e); }
+  window._curBaselineSnapshot = cur;
+  window._curReportCtx = { r, movement, aggregated };
+  const base = _baselineLoad();
+  const saveBtn = '<button type="button" onclick="_baselineSaveCurrent()" style="padding:6px 14px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:.74rem;font-weight:600;cursor:pointer;">📌 '+(base?'Update':'Save')+' baseline for this clip</button>';
+  const clearBtn = base ? '<button type="button" onclick="_baselineClear()" style="padding:6px 12px;margin-left:8px;background:#e5e7eb;color:#374151;border:none;border-radius:6px;font-size:.74rem;cursor:pointer;">Clear</button>' : '';
+  let body;
+  if(!base) {
+    body = '<div style="font-size:.78rem;color:var(--muted);line-height:1.6;">No baseline saved for this clip yet. Once you are confident this analysis is correct, save it as the baseline — future runs of the same clip are diffed against it so regressions show at a glance (e.g. after the MediaPipe migration).</div>';
+  } else {
+    const ANGLE_TOL = 3;
+    let rows = '', flagged = 0;
+    if(base.score != null && cur && cur.score != null && Math.abs(cur.score - base.score) > 1) flagged++;
+    rows += _baselineRow('Movement Quality (/10)', base.score, cur ? cur.score : null, 1, '');
+    _BASELINE_METRICS.forEach(k => {
+      const b = base.metrics && base.metrics[k] ? base.metrics[k].v : null;
+      const c = cur && cur.metrics && cur.metrics[k] ? cur.metrics[k].v : null;
+      if(b == null && c == null) return;
+      if(b != null && c != null && Math.abs(c - b) > ANGLE_TOL) flagged++;
+      rows += _baselineRow(k, b, c, ANGLE_TOL, '°');
+    });
+    const sb = base.stride || {}, sc = (cur && cur.stride) || {};
+    [['Cadence','cadenceSpm',4,' spm'],['Ground contact','gcPct',4,'%'],['Float','floatPct',5,'%'],
+     ['Step asymmetry','stepLengthAsymPct',4,'%'],['Stride length','strideLengthM',0.1,' m']].forEach(function(row){
+      const lab=row[0], key=row[1], tol=row[2], unit=row[3];
+      const b = sb[key]==null?null:Math.round(sb[key]*10)/10;
+      const c = sc[key]==null?null:Math.round(sc[key]*10)/10;
+      if(b == null && c == null) return;
+      if(b != null && c != null && Math.abs(c - b) > tol) flagged++;
+      rows += _baselineRow(lab, b, c, tol, unit);
+    });
+    const summary = flagged === 0
+      ? '<span style="color:#16a34a;font-weight:600;">✓ All metrics within tolerance of baseline (saved '+base.date+').</span>'
+      : '<span style="color:#dc2626;font-weight:600;">⚠ '+flagged+' metric'+(flagged>1?'s':'')+' changed beyond tolerance vs baseline (saved '+base.date+').</span>';
+    body = '<div style="font-size:.76rem;margin-bottom:8px;">'+summary+'</div>'
+      + '<table style="width:100%;border-collapse:collapse;font-size:.75rem;">'
+      + '<tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">'
+      + '<td style="padding:3px 8px;">Metric</td><td style="padding:3px 8px;text-align:right;">Baseline</td>'
+      + '<td style="padding:3px 8px;text-align:right;">Current</td><td style="padding:3px 8px;text-align:right;">Change</td></tr>'
+      + rows + '</table>';
+  }
+  return '<div class="report-section full" id="baselineSection">'
+    + '<div class="section-head"><span class="sh-icon">📊</span><h3>Regression Baseline</h3></div>'
+    + '<div class="section-body"><div style="margin-bottom:10px;">'+saveBtn+clearBtn+'</div>'+body+'</div></div>';
+}
+
+
 function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) {
   const score = r.score||null;
   window._lastScore = score; // for session comparison snapshot
@@ -13465,7 +13594,8 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     <div class="report-section">
       <div class="section-head"><span class="sh-icon">🗣</span><h3>Patient Education</h3></div>
       <div class="section-body">${edu}</div>
-    </div>`;
+    </div>
+    ${(()=>{ try { return _buildBaselineSectionHtml(r, movement, aggregated); } catch(e){ console.warn('[Baseline]', e); return ''; } })()}`;
 }
 
 function renderRaw(text, movement) {
@@ -15188,37 +15318,4 @@ window.addEventListener('unhandledrejection', e => {
       </div>
     </div>
     <div class="guide-tip">
-      <div class="guide-icon">🦘</div>
-      <div class="guide-tip-text">
-        <strong>Countermovement Jump (CMJ)</strong>
-        <span>Standing bilateral jump — rapidly descend then jump maximally. No box required. Assesses reactive neuromuscular power and landing symmetry. Standard athlete monitoring tool. Also used to measure fatigue-related landing quality changes.</span>
-      </div>
-    </div>
-    <div class="guide-tip">
-      <div class="guide-icon">🦵</div>
-      <div class="guide-tip-text">
-        <strong>Single-Leg Landing</strong>
-        <span>Step or drop off a surface and land on one limb. Direct simulation of the ACL injury mechanism (sudden deceleration, single-leg loading). Highest clinical challenge. Asymmetry in landing strategy is the primary return-to-sport risk indicator. Requires 120fps+ for reliable contact detection.</span>
-      </div>
-    </div>
-    <div class="guide-tip">
-      <div class="guide-icon">🏃</div>
-      <div class="guide-tip-text">
-        <strong>Tuck Jump</strong>
-        <span>Bilateral jump bringing both knees to the chest. Myer et al. Tuck Jump Assessment (TJA) — 10-item observational checklist. Standard ACL risk screen, particularly validated for female athletes. Key observations: knee valgus, foot separation, asymmetric arm swing, landing stiffness.</span>
-      </div>
-    </div>
-    <div class="guide-tip" style="border-bottom:none;">
-      <div class="guide-icon">↔️</div>
-      <div class="guide-tip-text">
-        <strong>Triple Hop for Distance</strong>
-        <span>Three consecutive maximal single-leg hops for maximum distance. Limb Symmetry Index (LSI) standard: LSI &gt;90% is the typical return-to-sport threshold. Record both limbs. MotionRx measures landing mechanics on each contact; distance must be measured manually and entered in clinical notes.</span>
-      </div>
-    </div>
-
-    <button class="guide-close" onclick="document.getElementById('jumpProtocolModal').classList.remove('open')">Got it</button>
-  </div>
-</div>
-
-</body>
-</html>
+      <div class="
