@@ -1584,6 +1584,7 @@ function startFrameExtraction(file, vid) {
   window._fusionDisagree = {}; // v0.15.0: per-landmark MP/MoveNet disagreement (max across fusion frames)
   window._tapeRefinedCount = 0; // v0.15.0: # landmarks refined from tape blobs this analysis
   window._tapeRefinedIdx = new Set(); // v0.15.0: which landmark indices were tape-refined (per-metric provenance)
+  window._tapeRefinedCounts = {}; // v0.15.0: per-landmark tape-detection counts (near vs far foot reliability)
   window._interpGapFrames = 0; // v0.15.0: lower-body frames in uninterpolable gaps
   window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
   window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
@@ -7447,6 +7448,8 @@ function asiToPromptText(aggregated, movement) {
     const L = aggregated[p.left];
     const R = aggregated[p.right];
     if(!L || !R) return;
+    if(/running|gait|walk/i.test(movement) && /Shoulder/.test(p.label)) return; // v0.15.0: arm swing is not a clinical asymmetry in running
+    if(L.lowConfidence || R.lowConfidence) return; // v0.15.0: don't report an asymmetry when one side is unreliable
     const lDisp = gaitDisplayVal(p.left, L, movement);
     const rDisp = gaitDisplayVal(p.right, R, movement);
     const lsi = calcLSI(lDisp, rDisp, p.minMag);
@@ -10287,7 +10290,7 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
         const bestBlob = blobs[assignedT.get(ti)];
         const dx = bestBlob.x - prior.x, dy = bestBlob.y - prior.y;
         const bestDist = Math.sqrt(dx*dx + dy*dy);
-        if(typeof window !== 'undefined') { window._tapeRefinedCount = (window._tapeRefinedCount || 0) + 1; (window._tapeRefinedIdx || (window._tapeRefinedIdx = new Set())).add(tgt.idx); }
+        if(typeof window !== 'undefined') { window._tapeRefinedCount = (window._tapeRefinedCount || 0) + 1; (window._tapeRefinedIdx || (window._tapeRefinedIdx = new Set())).add(tgt.idx); window._tapeRefinedCounts = window._tapeRefinedCounts || {}; window._tapeRefinedCounts[tgt.idx] = (window._tapeRefinedCounts[tgt.idx]||0)+1; }
         const origConf = prior.visibility ?? 0;
         merged[tgt.idx] = {
           ...prior,
@@ -12281,6 +12284,20 @@ async function runAnalysis() {
   const SAGITTAL_ANGLES = ['Hip Flexion','Knee Flexion','Ankle Dorsiflexion','Trunk Lean','Elbow Flexion','Shoulder Flexion'];
   const FRONTAL_ANGLES  = ['Hip Abduction','Hip Adduction','Knee Valgus','Pelvic Tilt','Pelvic Drop','Trunk Lateral Lean','Shoulder Abduction','Pronation'];
 
+  // v0.15.0 — far-foot reliability gate. In a single side view the far leg's foot is
+  // occluded; if its tape was detected far less than the near leg's, its ankle/pronation
+  // are unreliable. Flag them low-confidence so the table, findings prompt and LSI all treat
+  // them as such — stops a near-vs-far tracking gap being reported as a real L/R asymmetry.
+  (function _flagFarFootReliability(){
+    const c = (typeof window!=='undefined' && window._tapeRefinedCounts) ? window._tapeRefinedCounts : null;
+    if(!c) return;
+    const leftFoot  = (c[27]||0)+(c[29]||0)+(c[31]||0);
+    const rightFoot = (c[28]||0)+(c[30]||0)+(c[32]||0);
+    const mark = (keys) => keys.forEach(k => { if(aggregated[k]) aggregated[k].lowConfidence = true; });
+    if(leftFoot  > 0 && rightFoot < 0.4*leftFoot)  mark(['Right Ankle Dorsiflexion','Right Pronation']);
+    if(rightFoot > 0 && leftFoot  < 0.4*rightFoot) mark(['Left Ankle Dorsiflexion','Left Pronation']);
+  })();
+
   let mergedAggregated = {...aggregated};
   let mergeNotes = [];
 
@@ -12362,7 +12379,7 @@ async function runAnalysis() {
     const dispVal = isShoulderOrElbow ? v.max : gaitDisplayVal(k, v, movement);
     // v0.15.0 HARD GATE: send low-confidence metrics to the model WITHOUT a number so it cannot
     // headline them (the value still appears in the on-screen table for the clinician).
-    if(v.lowConfidence) return `${k}: INSUFFICIENT DATA (only ${v.count||0} frame(s)) — DO NOT report as a finding or use for footwear/clinical recommendations`;
+    if(v.lowConfidence) return `${k}: LOW CONFIDENCE / unreliable measurement — DO NOT report as a finding or use for footwear/clinical recommendations`;
     const peakNote = isShoulderOrElbow ? ' [peak ROM]'
       : ((dispVal === v.max || dispVal === v.min) && dispVal !== v.avg) ? ' [peak]' : '';
     const viewNote = (hasDualView && mergeNotes.some(n=>n.startsWith(k)) ? ' [frontal view]' : hasDualView ? ' [sagittal view]' : '') + (v.lowConfidence ? ' [LOW CONFIDENCE: only '+(v.count||0)+' frame(s) - do NOT report this as a definitive finding]' : '');
