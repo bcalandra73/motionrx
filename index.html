@@ -12291,11 +12291,19 @@ async function runAnalysis() {
   (function _flagFarFootReliability(){
     const c = (typeof window!=='undefined' && window._tapeRefinedCounts) ? window._tapeRefinedCounts : null;
     if(!c) return;
-    const leftFoot  = (c[27]||0)+(c[29]||0)+(c[31]||0);
-    const rightFoot = (c[28]||0)+(c[30]||0)+(c[32]||0);
-    const mark = (keys) => keys.forEach(k => { if(aggregated[k]) aggregated[k].lowConfidence = true; });
-    if(leftFoot  > 0 && rightFoot < 0.4*leftFoot)  mark(['Right Ankle Dorsiflexion','Right Pronation']);
-    if(rightFoot > 0 && leftFoot  < 0.4*rightFoot) mark(['Left Ankle Dorsiflexion','Left Pronation']);
+    const mark = (k) => { if(aggregated[k]) aggregated[k].lowConfidence = true; };
+    const TH = 0.5; // a foot joint tape-tracked < 50% as often as its mirror is unreliable
+    // Key each metric on the landmark it depends on: ankle DF on the ankle marker (27/28),
+    // pronation/calcaneal eversion on the heel marker (29/30). A well-tracked heel must not
+    // mask a poorly-tracked ankle (or vice versa) the way summing the whole foot did.
+    const la=c[27]||0, ra=c[28]||0, lh=c[29]||0, rh=c[30]||0;
+    if(la>0 && ra < TH*la) mark('Right Ankle Dorsiflexion');
+    if(ra>0 && la < TH*ra) mark('Left Ankle Dorsiflexion');
+    if(lh>0 && rh < TH*lh) mark('Right Pronation');
+    if(rh>0 && lh < TH*rh) mark('Left Pronation');
+    try { console.log(`[FarFoot] ankle tape L${la}/R${ra}  heel tape L${lh}/R${rh}  -> flagged low-conf: `+
+      (['Right Ankle Dorsiflexion','Left Ankle Dorsiflexion','Right Pronation','Left Pronation']
+        .filter(k=>aggregated[k]&&aggregated[k].lowConfidence).join(', ') || 'none')); } catch(e){}
   })();
 
   let mergedAggregated = {...aggregated};
