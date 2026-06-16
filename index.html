@@ -12646,7 +12646,7 @@ ${(() => {
   ].filter(Boolean).join('\n  ');
   return `
 FOOTWEAR RECOMMENDATION REQUEST:
-Based on the following biomechanical data, add a "footwear_recommendation" field to your JSON response with a short clinical footwear recommendation (2-4 sentences). Classify the runner into ONE of these categories and explain why:
+Based on the following biomechanical data, add a "footwear_recommendation" field to your JSON response with a short clinical footwear recommendation (2-6 sentences). Classify the runner into ONE primary category and explain why:
   1. NEUTRAL — Good arch control, low pronation, midfoot/forefoot strike → neutral cushioned shoe (e.g. Brooks Ghost, New Balance 1080)
   2. STABILITY — Mild-moderate overpronation, medial collapse risk → medial post or guide rail shoe (e.g. Brooks Adrenaline, ASICS Kayano)
   3. MOTION CONTROL — Significant bilateral overpronation (>10°), flat foot, heavy heel strike → motion control shoe (e.g. Brooks Beast, ASICS Gel-Kayano MC)
@@ -12654,6 +12654,8 @@ Based on the following biomechanical data, add a "footwear_recommendation" field
   5. MAXIMALIST — Good mechanics but high impact patterns, heel strike, rehabilitation context → maximalist cushion shoe (e.g. Hoka Clifton, ON Cloudmonster)
 
 Also comment on whether current footwear is appropriate or mismatched.
+
+When the signals fall BETWEEN two adjacent categories (borderline/mild values — e.g. pronation 8-11°, or mixed indicators), do NOT silently pick one. Give the PRIMARY recommendation, then add an "Alternative:" sentence framing the trade-off conditionally: the runner could go MORE corrective (the higher-support option) for immediate control, OR stay LESS corrective (the lower-support option) PROVIDED they address the specific deficit driving the borderline finding — name it concretely (e.g. hip-abductor strength, crossover/midline control, ankle dorsiflexion mobility, calf/posterior-tibialis strength) — and note footwear should be re-evaluated after that work. When the signals clearly fit one category, give a single confident recommendation with no alternative.
 
 Biomechanical data for classification:
   ${lines2}${pronThin ? '\n\nIMPORTANT: Pronation is unavailable or low-confidence (insufficient frames / foot tape not detected). Do NOT classify as STABILITY or MOTION CONTROL on the basis of pronation. Base the recommendation on foot-strike pattern and cadence, default to NEUTRAL unless other signals clearly indicate otherwise, and state that any pronation-based recommendation requires a manual foot assessment.' : ''}`;
