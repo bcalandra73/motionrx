@@ -13462,6 +13462,76 @@ function _buildBaselineSectionHtml(r, movement, aggregated) {
 }
 
 
+// ── Deterministic Running Quality Score (v0.15.0 #29) ─────────────────────────
+// Computes the 0-10 movement quality score from MEASURED metrics with fixed,
+// literature-informed weights, so a given score means the same thing across
+// patients and across re-assessments (independent of the AI model). Two tiers:
+//  Tier 1 (injury-risk, heaviest): factors peer-reviewed lit ties to running injury
+//    — overstride/braking, dynamic knee valgus, contralateral pelvic drop (Bramah 2018),
+//      crossover/hip adduction (Noehren/ITBS), limb asymmetry.
+//  Tier 2 (economy/efficiency, second): cadence, vertical oscillation, stride-time
+//    variability, trunk lean. Pronation carries minimal weight (weak injury evidence).
+// GCT/float are intentionally excluded (unreliable until #26). Low-confidence metrics
+// (confidence-gated) are skipped so a flagged far-leg value can't drag the score.
+function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv){
+  sm = sm || {};
+  const ded = [], str = [];
+  const mv = (k) => { const a = aggregated[k]; if(!a || a.lowConfidence) return null; const v = gdv(k, a, movement); return (v==null || !isFinite(v)) ? null : v; };
+  const worstOf = (a,b) => { const xs=[a,b].filter(v=>v!=null); return xs.length ? Math.max(...xs) : null; };
+  const add = (pts,label,tier) => ded.push({pts,label,tier});
+
+  // ── Tier 1: injury-risk ──
+  const grade = sm.overstrideGrade, shin = sm.shinAngleAtContactDeg;
+  const shinNote = (shin!=null) ? ` (shin ${Math.round(shin)}°)` : '';
+  if(grade==='severe' || (shin!=null && shin>25))       add(-2.0, `severe overstride${shinNote}`, 'injury');
+  else if(grade==='moderate' || (shin!=null && shin>20)) add(-1.0, `moderate overstride${shinNote}`, 'injury');
+  else if(grade==='mild' || (shin!=null && shin>15))     add(-0.5, `mild overstride${shinNote}`, 'injury');
+  else if(grade || shin!=null)                           str.push('no overstride');
+
+  const valg = worstOf(mv('Left Knee Valgus'), mv('Right Knee Valgus'));
+  if(valg!=null){ if(valg>8) add(-2.0,`knee valgus ${Math.round(valg)}°`,'injury'); else if(valg>5) add(-1.0,`knee valgus ${Math.round(valg)}°`,'injury'); else str.push(`controlled knee valgus (${Math.round(valg)}°)`); }
+
+  const pd = mv('Pelvic Drop');
+  if(pd!=null){ if(pd>8) add(-2.0,`pelvic drop ${Math.round(pd)}°`,'injury'); else if(pd>5) add(-1.0,`pelvic drop ${Math.round(pd)}°`,'injury'); else str.push(`pelvic stability (drop ${Math.round(pd)}°)`); }
+
+  const hipAdd = worstOf(mv('Left Hip Adduction'), mv('Right Hip Adduction'));
+  if(hipAdd!=null){ if(hipAdd>12) add(-1.5,`crossover / hip adduction ${Math.round(hipAdd)}°`,'injury'); else if(hipAdd>10) add(-1.0,`crossover / hip adduction ${Math.round(hipAdd)}°`,'injury'); else if(hipAdd>8) add(-0.5,`borderline hip adduction ${Math.round(hipAdd)}°`,'injury'); }
+
+  const asym = worstOf((worstAsymPct!=null?worstAsymPct:null), (sm.stepLengthAsymPct!=null?sm.stepLengthAsymPct:null));
+  if(asym!=null){ if(asym>=15) add(-1.5,`limb asymmetry ${Math.round(asym)}%`,'injury'); else if(asym>=10) add(-0.75,`limb asymmetry ${Math.round(asym)}%`,'injury'); }
+
+  // ── Tier 2: economy / efficiency ──
+  const cad = sm.cadenceSpm;
+  if(cad!=null){ if(cad<160) add(-1.0,`low cadence ${Math.round(cad)} spm`,'economy'); else if(cad<168) add(-0.5,`cadence ${Math.round(cad)} spm (sub-optimal)`,'economy'); else str.push(`cadence ${Math.round(cad)} spm`); }
+
+  const vo = sm.verticalOscillationCm;
+  if(vo!=null){ if(vo>12) add(-1.0,`high vertical oscillation ${vo}cm`,'economy'); else if(vo>=10) add(-0.5,`vertical oscillation ${vo}cm`,'economy'); }
+
+  const cv = sm.cvStridePct;
+  if(cv!=null){ if(cv>8) add(-0.75,`stride-time variability ${Math.round(cv)}%`,'economy'); else if(cv>5) add(-0.5,`stride-time variability ${Math.round(cv)}%`,'economy'); }
+
+  const tl = mv('Trunk Lean');
+  if(tl!=null){ if(tl<5 || tl>15) add(-0.5,`trunk lean ${Math.round(tl)}° (outside 5-15°)`,'economy'); else str.push(`trunk lean ${Math.round(tl)}°`); }
+
+  // ── Pronation: weak injury link in literature -> minimal, only if reliably measured ──
+  const pron = worstOf(mv('Left Pronation'), mv('Right Pronation'));
+  if(pron!=null && pron>10) add(-0.5,`overpronation ${Math.round(pron)}°`,'injury');
+
+  const totalNeg = ded.reduce((s,d)=>s+d.pts,0);
+  let score = Math.max(1, Math.min(10, Math.round(10 + totalNeg)));
+  return { score, total: Math.round(-totalNeg*10)/10, deductions: ded, strengths: str };
+}
+function _scoreBreakdownText(det){
+  const inj = det.deductions.filter(d=>d.tier==='injury');
+  const eco = det.deductions.filter(d=>d.tier==='economy');
+  let s = `Computed ${det.score}/10 (started at 10, −${det.total.toFixed(1)} total).`;
+  if(inj.length) s += ' Injury-risk deductions: ' + inj.map(d=>`${d.pts.toFixed(1)} ${d.label}`).join('; ') + '.';
+  if(eco.length) s += ' Efficiency deductions: ' + eco.map(d=>`${d.pts.toFixed(1)} ${d.label}`).join('; ') + '.';
+  if(!inj.length && !eco.length) s += ' No penalised findings.';
+  if(det.strengths.length) s += ' Strengths (no penalty): ' + det.strengths.join('; ') + '.';
+  return s;
+}
+
 // v0.15.0 (#24): build a transparent score rationale from the findings when the model omits one.
 function _synthScoreWhy(r){
   const f = (r && r.findings) || [];
@@ -13474,9 +13544,10 @@ function _synthScoreWhy(r){
   return s.trim();
 }
 function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) {
-  const score = r.score||null;
+  let score = r.score||null;
   window._lastScore = score; // for session comparison snapshot
-  const sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
+  let sc = !score?'':score>=7?'score-good':score>=5?'score-warn':'score-poor';
+  let _scoreBreakdown = null;
   const highCount = (r.findings||[]).filter(f=>f.priority==='high').length;
   const isRunningSideView = /running|gait|walk/i.test(movement) && cameraView === 'side';
   // Per-pair normal ranges for the "both within normal" check.
@@ -13525,6 +13596,17 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     const a = calcAsymmetryPct(lDisp, rDisp, p.minMag);
     if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; }
   });
+  // v0.15.0 (#29): deterministic running score replaces the AI-judged score so a given number
+  // means the same thing across patients and re-assessments (model-independent).
+  if(/running|gait|walk/i.test(movement)) {
+    try {
+      const _det = computeRunningQualityScore(aggregated, (typeof window_strideMetrics!=='undefined'?window_strideMetrics:{}), movement, worstAsymPct, gaitDisplayVal);
+      if(_det && _det.score != null) {
+        score = _det.score; _scoreBreakdown = _det; window._lastScore = score;
+        sc = score>=7?'score-good':score>=5?'score-warn':'score-poor';
+      }
+    } catch(e) { console.warn('[DetScore]', e); }
+  }
   const asiTileFlag = worstAsymPct < 10 ? 'score-good' : worstAsymPct < 15 ? 'score-warn' : 'score-poor';
   const asiTile = worstAsymLabel ? `
     <div class="score-tile">
@@ -13594,7 +13676,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       </div>
     </div>` : '';
 
-  const _scoreWhy = r.score_rationale || _synthScoreWhy(r);
+  const _scoreWhy = _scoreBreakdown ? _scoreBreakdownText(_scoreBreakdown) : (r.score_rationale || _synthScoreWhy(r));
   document.getElementById('reportGrid').innerHTML=`
     ${_scoreWhy ? `<div class="report-section full" id="scoreWhySection">
       <div class="section-head"><span class="sh-icon">📊</span><h3>Why This Score${score!=null?': '+score+'/10':''}</h3></div>
@@ -15343,15 +15425,4 @@ window.addEventListener('unhandledrejection', e => {
       <div class="guide-icon">📦</div>
       <div class="guide-tip-text">
         <strong>Drop Jump — 45cm box</strong>
-        <span>Higher-demand version for competitive athletes. The increased drop height amplifies valgus tendencies, making it more sensitive for ACL risk stratification. Use after the 30cm screen shows compensations worth further stress-testing.</span>
-      </div>
-    </div>
-    <div class="guide-tip">
-      <div class="guide-icon">⬆️</div>
-      <div class="guide-tip-text">
-        <strong>Drop Vertical Jump (DVJ)</strong>
-        <span>Drop from box then immediately perform a maximal vertical jump. Combines eccentric loading with explosive concentric demand. Used in the Hewett et al. ACL injury prediction research. Key metric: knee abduction angle and moment at initial contact.</span>
-      </div>
-    </div>
-    <div class="guide-tip">
-      <div class="
+   
