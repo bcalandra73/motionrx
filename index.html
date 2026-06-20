@@ -8215,6 +8215,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       durationS, gcPct, floatPct, peakKneeFlex, hipAtToeoff, footStrike,
       stepAsymProxy, startIdx, endIdx, toeoffIdx,
       kneeContactIncluded,
+      oppKneeContactIncluded: oppKAtContact, // trailing-leg knee at contralateral IC (leg recovery)
     };
   }).filter(Boolean);
 
@@ -8323,6 +8324,23 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     ? Math.round(robustStat(kneeContactFlexVals).v)
     : null;
   console.log(`[StrideEngine] Knee flex at contact: ${kneeFlexAtContact ?? 'suppressed'} (${kneeContactFlexVals.length}/${strideDetails.length} strides valid, reliable=${_kcfReliable})`);
+
+  // ── Back (trailing-leg) knee flexion at contact — "leg recovery" ──────────
+  // At lead-foot strike, the trailing leg is early in swing/recovery. A more
+  // FLEXED trailing knee = a tighter, more efficient leg cycle; a near-straight
+  // ("open") trailing knee = restricted recovery, longer lever, higher cost
+  // (Ochy frames this as "back knee too open"). Convert included→flexion (180−).
+  // CAVEAT: at contralateral contact the trailing leg is the FAR (camera-side-
+  // opposite) limb in a lateral view, so this reading is inherently lower
+  // confidence than the lead-knee metric. Wider physiological clamp (0–140°).
+  const backKneeFlexAll = strideDetails
+    .map(s => s.oppKneeContactIncluded != null ? Math.round(180 - s.oppKneeContactIncluded) : null);
+  const backKneeFlexVals = backKneeFlexAll.filter(v => v != null && v >= 0 && v <= 140);
+  const _bkfReliable = backKneeFlexVals.length >= Math.ceil(strideDetails.length * 0.5);
+  const backKneeFlexAtContact = (_bkfReliable && backKneeFlexVals.length > 0)
+    ? Math.round(robustStat(backKneeFlexVals).v)
+    : null;
+  console.log(`[StrideEngine] Back (trailing) knee flex at contact: ${backKneeFlexAtContact ?? 'suppressed'} (${backKneeFlexVals.length}/${strideDetails.length} strides valid, reliable=${_bkfReliable})`);
 
   // Hip extension at toe-off: use median for robustness, clamp to physiological range
   // Normal: 10–25°. Values >30° suggest toeoffIdx landed on wrong frame.
@@ -8633,6 +8651,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // Kinematics
     peakKneeFlex:     avgPeakKnee,
     kneeFlexAtContact,             // degrees of flexion at initial contact (5–20° norm)
+    backKneeFlexAtContact,         // trailing-leg knee flexion at contralateral IC (leg recovery; far-leg = lower conf)
     hipExtAtToeoff:   avgHipExt,
     fsConsensus,
     stepLengthAsymPct: stepLengthAsym,
@@ -8924,6 +8943,14 @@ function renderStrideMetrics(metrics, aggregated={}) {
            metrics.kneeFlexAtContact <= 30 ? 'Elevated — forefoot/midfoot pattern' :
                                              '⚠️ High — guarding or compensation',
       flag: metrics.kneeFlexAtContact < 5 || metrics.kneeFlexAtContact > 30 ? 'warn' : 'ok',
+    }] : []),
+    ...(metrics.backKneeFlexAtContact != null ? [{
+      label:'Back Knee at Contact',
+      value: metrics.backKneeFlexAtContact+'°',
+      unit:'trailing-leg recovery',
+      sub: metrics.backKneeFlexAtContact < 35 ? 'Open trailing leg — restricted recovery (less efficient leg cycle)' :
+           'Trailing leg folding into recovery — screening metric (far-leg, lower confidence)',
+      flag: 'ok', // screening only — not gated/scored pending norm calibration
     }] : []),
     ...(metrics.hipExtAtToeoff != null ? [{
       label:'Hip Ext at Toe-off',
@@ -12519,7 +12546,8 @@ RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete st
 - Ground contact: ${window_strideMetrics.gcPct!=null ? (window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' + (window_strideMetrics.gcPct < 30 ? ' [LIKELY UNDER-DETECTED, below typical range - do NOT praise as efficient; treat GCT and float as low-confidence]' : '')) : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
 - Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics.hasFloat ? (window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' + (window_strideMetrics.floatPct > 40 ? ' [IMPLAUSIBLY HIGH for a sub-elite pace - likely derived from an under-detected GCT; do NOT report as a finding]' : '')) : '0% detected (may indicate shuffle-run or 30fps limitation)') : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
 - Foot strike pattern: ${window_strideMetrics.fsConsensus} (${window_strideMetrics.fsConsensus==='heel'?'higher impact, consider midfoot cues':window_strideMetrics.fsConsensus==='midfoot'?'optimal pattern':'forefoot strike'})
-${window_strideMetrics.kneeFlexAtContact!=null ? `- Knee flexion at initial contact: ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})` : ''}
+${window_strideMetrics.kneeFlexAtContact!=null ? `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})` : ''}
+${window_strideMetrics.backKneeFlexAtContact!=null ? `- Trailing-leg (back) knee flexion at contact: ${window_strideMetrics.backKneeFlexAtContact}° — leg-recovery/leg-cycle screening metric; a more flexed trailing knee = tighter, more efficient recovery, a near-straight ("open") trailing knee = restricted recovery. NOTE: trailing leg is the far limb in lateral view → treat as lower-confidence context, do not headline.` : ''}
 ${window_strideMetrics.stepLengthAsymPct!=null ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)` : ''}
 ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
@@ -13413,6 +13441,75 @@ function _baselineRow(label, base, cur, tol, unit) {
     + '<td style="padding:3px 8px;text-align:right;color:'+color+';font-weight:600;white-space:nowrap;">'+icon+' '+dStr+'</td>'
     + '</tr>';
 }
+// ── Scientific references / evidence basis ───────────────────────────────────
+// Curated, peer-reviewed sources behind the metrics MotionRx reports. Shown so
+// clinicians (and patients) can see the literature the norms/thresholds rest on.
+// Only the groups relevant to the captured movement are rendered.
+function _referenceData(movement) {
+  const isRun = /run/i.test(movement || '');
+  const methodology = {
+    area: 'Gait-event detection (methodology)',
+    refs: [
+      'Zeni JA Jr, Richards JG, Higginson JS. Two simple methods for determining gait events during treadmill and overground walking using kinematic data. Gait Posture. 2008;27(4):710–714.'
+    ]
+  };
+  if(!isRun) return [methodology];
+  return [
+    {
+      area: 'Cadence / step rate & stride length',
+      refs: [
+        'Heiderscheit BC, Chumanov ES, Michalski MP, Wille CM, Ryan MB. Effects of step rate manipulation on joint mechanics during running. Med Sci Sports Exerc. 2011;43(2):296–302.',
+        'Schubert AG, Kempf J, Heiderscheit BC. Influence of stride frequency and length on running mechanics: a systematic review. Sports Health. 2014;6(3):210–217.'
+      ]
+    },
+    {
+      area: 'Overstride, footstrike & impact loading',
+      refs: [
+        'Lieberman DE, Venkadesan M, Werbel WA, et al. Foot strike patterns and collision forces in habitually barefoot versus shod runners. Nature. 2010;463(7280):531–535.',
+        'Bramah C, Preece SJ, Gill N, Herrington L. Is there a pathological gait associated with common soft tissue running injuries? Am J Sports Med. 2018;46(12):3023–3031.'
+      ]
+    },
+    {
+      area: 'Contralateral pelvic drop & hip adduction (ITB, PFP)',
+      refs: [
+        'Noehren B, Davis I, Hamill J. Prospective study of the biomechanical factors associated with iliotibial band syndrome. Clin Biomech. 2007;22(9):951–956.',
+        'Noehren B, Pohl MB, Sanchez Z, Cunningham T, Lattermann C. Proximal and distal kinematics in female runners with patellofemoral pain. Clin Biomech. 2012;27(4):366–371.'
+      ]
+    },
+    {
+      area: 'Vertical oscillation, leg recovery & running economy',
+      refs: [
+        'Moore IS. Is there an economical running technique? A review of modifiable biomechanical factors affecting running economy. Sports Med. 2016;46(6):793–807.',
+        'Folland JP, Allen SJ, Black MI, Handsaker JC, Forrester SE. Running technique is an important component of running economy and performance. Med Sci Sports Exerc. 2017;49(7):1412–1423.'
+      ]
+    },
+    {
+      area: 'Foot pronation / rearfoot motion',
+      refs: [
+        'Nielsen RO, Buist I, Parner ET, et al. Foot pronation is not associated with increased injury risk in novice runners wearing a neutral shoe: a 1-year prospective cohort study. Br J Sports Med. 2014;48(6):440–447.'
+      ]
+    },
+    methodology
+  ];
+}
+function _buildReferencesSectionHtml(movement) {
+  let groups;
+  try { groups = _referenceData(movement); } catch(e){ console.warn('[Refs]', e); return ''; }
+  if(!groups || !groups.length) return '';
+  const body = groups.map(g =>
+    '<div style="margin-bottom:10px;">'
+    + '<div style="font-weight:600;font-size:.78rem;color:var(--text);margin-bottom:3px;">'+esc(g.area)+'</div>'
+    + '<ul style="margin:0;padding-left:18px;">'
+    + g.refs.map(rf => '<li style="font-size:.72rem;line-height:1.5;color:var(--muted);margin-bottom:3px;">'+esc(rf)+'</li>').join('')
+    + '</ul></div>'
+  ).join('');
+  return '<div class="report-section full" id="referencesSection">'
+    + '<div class="section-head"><span class="sh-icon">📚</span><h3>Scientific Basis &amp; References</h3></div>'
+    + '<div class="section-body">'
+    + '<div style="font-size:.72rem;color:var(--muted);font-style:italic;margin-bottom:10px;">Norms and thresholds used in this report are grounded in the peer-reviewed literature below. Values are screening estimates from 2-D video, not laboratory measures.</div>'
+    + body
+    + '</div></div>';
+}
 function _buildBaselineSectionHtml(r, movement, aggregated) {
   let cur = null;
   try { cur = _baselineSnapshot(r, movement, aggregated); } catch(e){ console.warn('[Baseline] snapshot', e); }
@@ -13703,6 +13800,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       <div class="section-head"><span class="sh-icon">🗣</span><h3>Patient Education</h3></div>
       <div class="section-body">${edu}</div>
     </div>
+    ${(()=>{ try { return _buildReferencesSectionHtml(movement); } catch(e){ console.warn('[Refs]', e); return ''; } })()}
     ${(()=>{ try { return _buildBaselineSectionHtml(r, movement, aggregated); } catch(e){ console.warn('[Baseline]', e); return ''; } })()}`;
 }
 
@@ -15157,6 +15255,27 @@ async function exportPDF() {
         doc.setFont('helvetica','normal'); doc.setFontSize(8.5); setColor(C.teal);
         lines.forEach((l,li)=>doc.text(l,ML+5,y+6+li*4.8));
         y+=boxH+3;
+      });
+    }
+
+    // ════════════════════════════════════════════════
+    // SCIENTIFIC BASIS & REFERENCES
+    // ════════════════════════════════════════════════
+    const refGroups = [...document.querySelectorAll('#referencesSection .section-body > div')]
+      .filter(d => d.querySelector('ul'));
+    if(refGroups.length > 0) {
+      guard(SECTION_HEAD_H + 20);
+      sectionHead('Scientific Basis & References');
+      refGroups.forEach(g => {
+        const area = g.querySelector('div')?.textContent?.trim() || '';
+        const refs = [...g.querySelectorAll('li')].map(li => li.textContent.trim()).filter(Boolean);
+        if(area) {
+          guard(8);
+          doc.setFont('helvetica','bold'); doc.setFontSize(7.5); setColor(C.navy);
+          doc.text(area, ML+2, y); y += 5;
+        }
+        refs.forEach(rf => bodyText(rf, C.muted, 7, 5));
+        y += 1;
       });
     }
 
