@@ -13594,7 +13594,22 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   const hipAdd = worstOf(mv('Left Hip Adduction'), mv('Right Hip Adduction'));
   if(hipAdd!=null){ if(hipAdd>12) add(-1.5,`crossover / hip adduction ${Math.round(hipAdd)}°`,'injury'); else if(hipAdd>10) add(-1.0,`crossover / hip adduction ${Math.round(hipAdd)}°`,'injury'); else if(hipAdd>8) add(-0.5,`borderline hip adduction ${Math.round(hipAdd)}°`,'injury'); }
 
-  const asym = worstOf((worstAsymPct!=null?worstAsymPct:null), (sm.stepLengthAsymPct!=null?sm.stepLengthAsymPct:null));
+  // Limb asymmetry (robust): driven by spatiotemporal + sagittal-kinematic asymmetry only.
+  // Frontal screening metrics (pronation, valgus, hip adduction) are deliberately EXCLUDED —
+  // they already carry their own deductions, and their small absolute magnitudes inflate %
+  // asymmetry (e.g. pronation 10° vs 13° = 23%, which previously drove a spurious -1.5 here).
+  // A meaningful absolute L/R gap is required before an asymmetry counts. NOTE: worstAsymPct
+  // (the headline-tile value) is intentionally NOT used for the score for this reason.
+  const _asymPct = (l, r, minAbs) => {
+    if(l==null || r==null) return null;
+    const hi = Math.max(Math.abs(l), Math.abs(r));
+    if(hi < minAbs || Math.abs(l - r) < minAbs) return null; // below this, % is calibration noise
+    return Math.round(Math.abs(l - r) / hi * 100);
+  };
+  const _stepAsym = (sm.stepLengthAsymPct != null) ? Math.round(sm.stepLengthAsymPct) : null;
+  const _kneeAsym = _asymPct(mv('Left Knee Flexion'), mv('Right Knee Flexion'), 8);
+  const _hipAsym  = _asymPct(mv('Left Hip Flexion'),  mv('Right Hip Flexion'),  6);
+  const asym = worstOf(worstOf(_stepAsym, _kneeAsym), _hipAsym);
   if(asym!=null){ if(asym>=15) add(-1.5,`limb asymmetry ${Math.round(asym)}%`,'injury'); else if(asym>=10) add(-0.75,`limb asymmetry ${Math.round(asym)}%`,'injury'); }
 
   // ── Tier 2: economy / efficiency ──
@@ -13609,6 +13624,13 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
 
   const tl = mv('Trunk Lean');
   if(tl!=null){ if(tl<5 || tl>15) add(-0.5,`trunk lean ${Math.round(tl)}° (outside 5-15°)`,'economy'); else str.push(`trunk lean ${Math.round(tl)}°`); }
+
+  // Trailing-leg recovery (back knee at contact): an "open" (under-flexed) trailing knee = a
+  // looser, less economical leg cycle. LIGHT/conservative — far-leg measurement, and recovery
+  // flexion is speed-dependent (less heel recovery is normal at slow paces), so only a clearly
+  // open recovery is penalised. Thresholds are tunable. (89° in the Natasha clip → no penalty.)
+  const bk = sm.backKneeFlexAtContact;
+  if(bk!=null){ if(bk<50) add(-0.5,`open trailing-leg recovery (${Math.round(bk)}° back-knee)`,'economy'); else if(bk<65) add(-0.25,`slightly open trailing-leg recovery (${Math.round(bk)}°)`,'economy'); }
 
   // ── Pronation: weak injury link in literature -> minimal, only if reliably measured ──
   const pron = worstOf(mv('Left Pronation'), mv('Right Pronation'));
