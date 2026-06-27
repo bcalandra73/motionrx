@@ -2753,17 +2753,20 @@ function startFrameExtraction(file, vid) {
                     const _stancePct = _sDur / _strideDurFrac;
                     console.log(`[Zeni2008] Stance check: ${Math.round(_stancePct*100)}% (raw TO=${_toFrac.toFixed(3)}, IC=${_icFrac.toFixed(3)}, nextIC=${_nextIcFrac.toFixed(3)})`);
 
-                    // Validate stance %: running stance norm is 38-45% of stride.
-                    // Sparse frame density (~110ms/frame) causes TO detection errors.
-                    // Correction: clamp to 40% (too short) or 41% (too long).
-                    if(_stancePct < 0.35) {
-                      const _correctedTo = _icFrac + 0.40 * _strideDurFrac;
-                      console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% < 35% — correcting TO to 40% (${_correctedTo.toFixed(3)})`);
+                    // Validate stance %: the acceptable stance band scales with running speed (#35).
+                    // Running stance is ~38-45% at moderate pace but genuinely LONGER at a slow jog
+                    // (low/no flight) — clamping a real 50% slow-jog stance to 41% compresses the
+                    // swing phases and skews the gallery frame labels. Use the speed band's window.
+                    // Sparse frame density (~110ms/frame) still causes TO detection errors, so we
+                    // only correct when stance falls OUTSIDE the band-appropriate range.
+                    const _sb2 = _runSpeedBand();
+                    if(_stancePct < _sb2.stanceMin) {
+                      const _correctedTo = _icFrac + (_sb2.stanceMin + 0.05) * _strideDurFrac;
+                      console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% < ${Math.round(_sb2.stanceMin*100)}% (${_sb2.band} band) — correcting TO to ${Math.round((_sb2.stanceMin+0.05)*100)}% (${_correctedTo.toFixed(3)})`);
                       _sDur = _correctedTo - _icFrac;
-                    } else if(_stancePct > 0.45) {
-                      // Stance > 45%: TO detected too late. Cap at 41%.
-                      const _correctedTo = _icFrac + 0.41 * _strideDurFrac;
-                      console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% > 45% — correcting TO to 41% (${_toFrac.toFixed(3)} → ${_correctedTo.toFixed(3)})`);
+                    } else if(_stancePct > _sb2.stanceMax) {
+                      const _correctedTo = _icFrac + (_sb2.stanceMax - 0.04) * _strideDurFrac;
+                      console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% > ${Math.round(_sb2.stanceMax*100)}% (${_sb2.band} band) — correcting TO to ${Math.round((_sb2.stanceMax-0.04)*100)}% (${_toFrac.toFixed(3)} → ${_correctedTo.toFixed(3)})`);
                       _sDur = _correctedTo - _icFrac;
                     }
                     // CRITICAL: use corrected TO fraction (icFrac + sDur) for ALL swing phase
@@ -12531,6 +12534,7 @@ ${(() => {
   const lines = [];
   if(surf)   lines.push(`Running surface: ${surf}`);
   if(sp)     lines.push(`Treadmill speed: ${sp} ${su}`);
+  if(sp){ try { const _sbP=_runSpeedBand(); if(_sbP.band!=='moderate') lines.push(`Pace band: ${_sbP.label}${_sbP.mph?` (~${_sbP.mph.toFixed(1)} mph)`:''} — interpret cadence, overstride/shin angle, stance %, and vertical oscillation RELATIVE to this pace. At a ${_sbP.label} pace, ${_sbP.band==='slow'?'lower cadence, a larger shin angle, a longer stance with little flight, and more vertical bounce are expected and should not be flagged as inefficiencies on their own':'higher cadence and shorter stance are expected'}.`); } catch(e){} }
   if(inc)    lines.push(`Treadmill incline: ${inc}%`);
   if(shoe)   lines.push(`Shoe type: ${shoe}`);
   if(exp)    lines.push(`Running experience: ${exp}`);
@@ -13570,6 +13574,37 @@ function _buildBaselineSectionHtml(r, movement, aggregated) {
 //    variability, trunk lean. Pronation carries minimal weight (weak injury evidence).
 // GCT/float are intentionally excluded (unreliable until #26). Low-confidence metrics
 // (confidence-gated) are skipped so a flagged far-leg value can't drag the score.
+// ── Running speed band (v0.16, #35) ──────────────────────────────────────────
+// Several running metrics are speed-dependent: at slow paces low cadence, a larger
+// shin/overstride angle, a longer stance with little flight, more vertical bounce,
+// and a less-folded leg recovery are all NORMAL. This helper reads the entered
+// run/treadmill speed and returns the band + per-band thresholds so the score and
+// the phase engine can interpret those metrics in context. Unknown speed → 'moderate'
+// (neutral). The MODERATE band reproduces the pre-#35 fixed thresholds exactly, so
+// baselines for typical-pace clips are unchanged; only slow/fast clips are adjusted.
+// Bands (mph): slow < 5.5  ·  moderate 5.5–8.5  ·  fast > 8.5.
+function _runSpeedBand(mphArg){
+  let mph = (mphArg!=null && isFinite(mphArg) && mphArg>0) ? mphArg : null;
+  if(mph==null){
+    try {
+      const raw = parseFloat(document.getElementById('treadmillSpeed')?.value || '');
+      const unit = document.getElementById('speedUnit')?.value || 'mph';
+      if(!isNaN(raw) && raw>0){
+        if(unit==='mph')      mph = raw;
+        else if(unit==='kph') mph = raw * 0.621371;
+        else                  mph = raw * 2.23694; // m/s
+      }
+    } catch(e) {}
+  }
+  let band = 'moderate';
+  if(mph!=null){ if(mph < 5.5) band='slow'; else if(mph > 8.5) band='fast'; }
+  const T = {
+    slow:     { cadHard:148, cadSoft:156, shinSevere:30, shinMod:24, shinMild:18, stanceMin:0.40, stanceMax:0.55, voSoft:11, voHard:13, bkOpen:45, bkSlight:58 },
+    moderate: { cadHard:160, cadSoft:168, shinSevere:25, shinMod:20, shinMild:15, stanceMin:0.35, stanceMax:0.45, voSoft:10, voHard:12, bkOpen:50, bkSlight:65 },
+    fast:     { cadHard:166, cadSoft:174, shinSevere:22, shinMod:18, shinMild:14, stanceMin:0.32, stanceMax:0.42, voSoft:10, voHard:12, bkOpen:55, bkSlight:70 },
+  }[band];
+  return { band, mph, label: band==='slow'?'slow jog':band, ...T };
+}
 function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv){
   sm = sm || {};
   const ded = [], str = [];
@@ -13577,13 +13612,22 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   const worstOf = (a,b) => { const xs=[a,b].filter(v=>v!=null); return xs.length ? Math.max(...xs) : null; };
   const add = (pts,label,tier) => ded.push({pts,label,tier});
 
+  // Speed band (#35): contextualizes the speed-dependent thresholds below.
+  const _sb = _runSpeedBand(sm.speedMps!=null ? sm.speedMps*2.23694 : null);
+
   // ── Tier 1: injury-risk ──
-  const grade = sm.overstrideGrade, shin = sm.shinAngleAtContactDeg;
+  // Shin-angle thresholds relax at slow paces (the foot lands further ahead when jogging slowly).
+  // The grade trigger is also downgraded one notch in the slow band, since overstride grading is
+  // computed without speed context. For Natasha (shin 40°) this still reads severe — 40° is extreme
+  // at any pace — but borderline slow-pace clips are no longer over-penalised.
+  const shin = sm.shinAngleAtContactDeg;
+  let grade = sm.overstrideGrade;
+  if(_sb.band==='slow') grade = grade==='severe'?'moderate' : grade==='moderate'?'mild' : grade==='mild'?null : grade;
   const shinNote = (shin!=null) ? ` (shin ${Math.round(shin)}°)` : '';
-  if(grade==='severe' || (shin!=null && shin>25))       add(-2.0, `severe overstride${shinNote}`, 'injury');
-  else if(grade==='moderate' || (shin!=null && shin>20)) add(-1.0, `moderate overstride${shinNote}`, 'injury');
-  else if(grade==='mild' || (shin!=null && shin>15))     add(-0.5, `mild overstride${shinNote}`, 'injury');
-  else if(grade || shin!=null)                           str.push('no overstride');
+  if(grade==='severe' || (shin!=null && shin>_sb.shinSevere))    add(-2.0, `severe overstride${shinNote}`, 'injury');
+  else if(grade==='moderate' || (shin!=null && shin>_sb.shinMod)) add(-1.0, `moderate overstride${shinNote}`, 'injury');
+  else if(grade==='mild' || (shin!=null && shin>_sb.shinMild))    add(-0.5, `mild overstride${shinNote}`, 'injury');
+  else if(sm.overstrideGrade || shin!=null)                       str.push('no overstride');
 
   const valg = worstOf(mv('Left Knee Valgus'), mv('Right Knee Valgus'));
   if(valg!=null){ if(valg>8) add(-2.0,`knee valgus ${Math.round(valg)}°`,'injury'); else if(valg>5) add(-1.0,`knee valgus ${Math.round(valg)}°`,'injury'); else str.push(`controlled knee valgus (${Math.round(valg)}°)`); }
@@ -13612,12 +13656,12 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   const asym = worstOf(worstOf(_stepAsym, _kneeAsym), _hipAsym);
   if(asym!=null){ if(asym>=15) add(-1.5,`limb asymmetry ${Math.round(asym)}%`,'injury'); else if(asym>=10) add(-0.75,`limb asymmetry ${Math.round(asym)}%`,'injury'); }
 
-  // ── Tier 2: economy / efficiency ──
+  // ── Tier 2: economy / efficiency ── (cadence/vert-osc thresholds scale with speed band)
   const cad = sm.cadenceSpm;
-  if(cad!=null){ if(cad<160) add(-1.0,`low cadence ${Math.round(cad)} spm`,'economy'); else if(cad<168) add(-0.5,`cadence ${Math.round(cad)} spm (sub-optimal)`,'economy'); else str.push(`cadence ${Math.round(cad)} spm`); }
+  if(cad!=null){ if(cad<_sb.cadHard) add(-1.0,`low cadence ${Math.round(cad)} spm`,'economy'); else if(cad<_sb.cadSoft) add(-0.5,`cadence ${Math.round(cad)} spm (sub-optimal for ${_sb.label} pace)`,'economy'); else str.push(`cadence ${Math.round(cad)} spm`); }
 
   const vo = sm.verticalOscillationCm;
-  if(vo!=null){ if(vo>12) add(-1.0,`high vertical oscillation ${vo}cm`,'economy'); else if(vo>=10) add(-0.5,`vertical oscillation ${vo}cm`,'economy'); }
+  if(vo!=null){ if(vo>_sb.voHard) add(-1.0,`high vertical oscillation ${vo}cm`,'economy'); else if(vo>=_sb.voSoft) add(-0.5,`vertical oscillation ${vo}cm`,'economy'); }
 
   const cv = sm.cvStridePct;
   if(cv!=null){ if(cv>8) add(-0.75,`stride-time variability ${Math.round(cv)}%`,'economy'); else if(cv>5) add(-0.5,`stride-time variability ${Math.round(cv)}%`,'economy'); }
@@ -13630,7 +13674,7 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   // flexion is speed-dependent (less heel recovery is normal at slow paces), so only a clearly
   // open recovery is penalised. Thresholds are tunable. (89° in the Natasha clip → no penalty.)
   const bk = sm.backKneeFlexAtContact;
-  if(bk!=null){ if(bk<50) add(-0.5,`open trailing-leg recovery (${Math.round(bk)}° back-knee)`,'economy'); else if(bk<65) add(-0.25,`slightly open trailing-leg recovery (${Math.round(bk)}°)`,'economy'); }
+  if(bk!=null){ if(bk<_sb.bkOpen) add(-0.5,`open trailing-leg recovery (${Math.round(bk)}° back-knee)`,'economy'); else if(bk<_sb.bkSlight) add(-0.25,`slightly open trailing-leg recovery (${Math.round(bk)}°)`,'economy'); }
 
   // ── Pronation: weak injury link in literature -> minimal, only if reliably measured ──
   const pron = worstOf(mv('Left Pronation'), mv('Right Pronation'));
@@ -13638,12 +13682,13 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
 
   const totalNeg = ded.reduce((s,d)=>s+d.pts,0);
   let score = Math.max(1, Math.min(10, Math.round(10 + totalNeg)));
-  return { score, total: Math.round(-totalNeg*10)/10, deductions: ded, strengths: str };
+  return { score, total: Math.round(-totalNeg*10)/10, deductions: ded, strengths: str, speedBand: _sb.band, speedMph: _sb.mph };
 }
 function _scoreBreakdownText(det){
   const inj = det.deductions.filter(d=>d.tier==='injury');
   const eco = det.deductions.filter(d=>d.tier==='economy');
   let s = `Computed ${det.score}/10 (started at 10, −${det.total.toFixed(1)} total).`;
+  if(det.speedBand && det.speedBand!=='moderate') s += ` Pace: ${det.speedBand==='slow'?'slow jog':det.speedBand}${det.speedMph?` (${det.speedMph.toFixed(1)} mph)`:''} — speed-dependent norms (cadence, overstride, stance, bounce) adjusted accordingly.`;
   if(inj.length) s += ' Injury-risk deductions: ' + inj.map(d=>`${d.pts.toFixed(1)} ${d.label}`).join('; ') + '.';
   if(eco.length) s += ' Efficiency deductions: ' + eco.map(d=>`${d.pts.toFixed(1)} ${d.label}`).join('; ') + '.';
   if(!inj.length && !eco.length) s += ' No penalised findings.';
