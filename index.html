@@ -8744,7 +8744,7 @@ function classifyRunningArchetype(sm, aggregated) {
   if(!sm) return null;
   const cadence    = sm.cadenceSpm ?? null; // null = unreliable; cadence-based scoring is skipped below
   const vo         = sm.verticalOscillationCm ?? null;
-  const overstride = sm.overstrideGrade ?? 'none';
+  const overstride = (_overstrideSeverity(sm) ?? 'none'); // #37: shared severity — matches the score
   const shinAngle  = sm.shinAngleAtContactDeg ?? null;
   const footStrike = sm.fsConsensus ?? 'unknown';
   const hipExt     = sm.hipExtAtToeoff ?? null;
@@ -13605,6 +13605,25 @@ function _runSpeedBand(mphArg){
   }[band];
   return { band, mph, label: band==='slow'?'slow jog':band, ...T };
 }
+
+// Single source of truth for overstride severity (#37): reconciles the distance-based grade
+// (overstrideGrade) with the band-aware shin angle, so the deterministic score and the archetype
+// card always agree. Returns 'none' | 'mild' | 'moderate' | 'severe', or null when no data.
+// Uses floor-of-mean: grade AND shin must concur to reach a level, so a single high shin reading
+// no longer over-calls "severe" (e.g. Brian at 7mph: grade moderate + shin 29° → moderate, not
+// severe). Shin thresholds are speed-band-aware, so this is also speed-contextual.
+function _overstrideSeverity(sm, sb){
+  if(!sm) return null;
+  sb = sb || _runSpeedBand(sm.speedMps!=null ? sm.speedMps*2.23694 : null);
+  const RANK = {none:0, mild:1, moderate:2, severe:3};
+  const NAME = ['none','mild','moderate','severe'];
+  const ranks = [];
+  if(sm.overstrideGrade && RANK[sm.overstrideGrade]!=null) ranks.push(RANK[sm.overstrideGrade]);
+  const shin = sm.shinAngleAtContactDeg;
+  if(shin!=null) ranks.push(shin>sb.shinSevere?3 : shin>sb.shinMod?2 : shin>sb.shinMild?1 : 0);
+  if(!ranks.length) return null;
+  return NAME[Math.floor(ranks.reduce((a,b)=>a+b,0) / ranks.length)];
+}
 function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv){
   sm = sm || {};
   const ded = [], str = [];
@@ -13616,18 +13635,16 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   const _sb = _runSpeedBand(sm.speedMps!=null ? sm.speedMps*2.23694 : null);
 
   // ── Tier 1: injury-risk ──
-  // Shin-angle thresholds relax at slow paces (the foot lands further ahead when jogging slowly).
-  // The grade trigger is also downgraded one notch in the slow band, since overstride grading is
-  // computed without speed context. For Natasha (shin 40°) this still reads severe — 40° is extreme
-  // at any pace — but borderline slow-pace clips are no longer over-penalised.
+  // Overstride severity comes from the SHARED determination (#37) — same value the archetype card
+  // shows — so the two never disagree. It reconciles the distance-based grade with the band-aware
+  // shin angle (floor-of-mean), so a single high shin no longer over-calls "severe".
   const shin = sm.shinAngleAtContactDeg;
-  let grade = sm.overstrideGrade;
-  if(_sb.band==='slow') grade = grade==='severe'?'moderate' : grade==='moderate'?'mild' : grade==='mild'?null : grade;
+  const _ovr = _overstrideSeverity(sm, _sb);
   const shinNote = (shin!=null) ? ` (shin ${Math.round(shin)}°)` : '';
-  if(grade==='severe' || (shin!=null && shin>_sb.shinSevere))    add(-2.0, `severe overstride${shinNote}`, 'injury');
-  else if(grade==='moderate' || (shin!=null && shin>_sb.shinMod)) add(-1.0, `moderate overstride${shinNote}`, 'injury');
-  else if(grade==='mild' || (shin!=null && shin>_sb.shinMild))    add(-0.5, `mild overstride${shinNote}`, 'injury');
-  else if(sm.overstrideGrade || shin!=null)                       str.push('no overstride');
+  if(_ovr==='severe')        add(-2.0, `severe overstride${shinNote}`, 'injury');
+  else if(_ovr==='moderate') add(-1.0, `moderate overstride${shinNote}`, 'injury');
+  else if(_ovr==='mild')     add(-0.5, `mild overstride${shinNote}`, 'injury');
+  else if(_ovr==='none')     str.push('no overstride');
 
   const valg = worstOf(mv('Left Knee Valgus'), mv('Right Knee Valgus'));
   if(valg!=null){ if(valg>8) add(-2.0,`knee valgus ${Math.round(valg)}°`,'injury'); else if(valg>5) add(-1.0,`knee valgus ${Math.round(valg)}°`,'injury'); else str.push(`controlled knee valgus (${Math.round(valg)}°)`); }
