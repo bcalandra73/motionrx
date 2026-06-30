@@ -6,23 +6,32 @@
 <title>MotionRx — Clinical Motion Analysis</title>
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300;400;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 <!-- MediaPipe Tasks Vision — loaded dynamically via initMediaPipe() with multi-CDN fallback -->
-<!-- Static pre-load attempt: fires immediately, before app JS. If successful, probeTasksVisionNamespace() will find it. -->
-<script crossorigin="anonymous">
-(function() {
-  function tryLoad(urls, i) {
-    if(i >= urls.length) return;
-    var s = document.createElement('script');
-    s.src = urls[i];
-    s.crossOrigin = 'anonymous';
-    s.onload = function() { console.log('[MP-preload] Loaded: ' + urls[i]); };
-    s.onerror = function() { tryLoad(urls, i + 1); };
-    document.head.appendChild(s);
-  }
-  tryLoad([
-    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.js',
-    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js',
-  ], 0);
-})();
+<!-- MediaPipe tasks-vision pre-load (v0.16, #MP-hardening).
+     Warms the ESM module — the proven-working load path — early, across FOUR independent CDN
+     mirrors (jsdelivr, unpkg, esm.sh) so a single CDN outage can't white-screen the app. The
+     old classic-script `vision_bundle.js` path was removed: that file does not exist at those
+     paths, so it 404'd on every load and only the ESM import was actually keeping the app alive.
+     Result is cached on window._mpVisionPromise for initMediaPipe() to await/reuse. -->
+<script type="module">
+  window._mpVisionSources = [
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm',
+    'https://unpkg.com/@mediapipe/tasks-vision@0.10.21?module',
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm',
+    'https://esm.sh/@mediapipe/tasks-vision@0.10.21',
+  ];
+  window._mpVisionPromise = (async () => {
+    for(const url of window._mpVisionSources) {
+      try {
+        const m = await import(url);
+        if(m && m.PoseLandmarker && m.FilesetResolver) {
+          console.log('[MP-preload] tasks-vision ready from', url);
+          return { PoseLandmarker: m.PoseLandmarker, FilesetResolver: m.FilesetResolver };
+        }
+      } catch(e) { console.warn('[MP-preload] source unavailable:', url, e && e.message); }
+    }
+    console.warn('[MP-preload] all ESM sources failed — initMediaPipe will retry / use legacy');
+    return null;
+  })();
 </script>
 <!-- Legacy @mediapipe/pose loaded on-demand inside initMediaPipeLegacyFallback() only if new API fails -->
 <script src="https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js" crossorigin="anonymous" onerror="(function(){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';s.crossOrigin='anonymous';document.head.appendChild(s);})()"></script>
@@ -1347,52 +1356,51 @@ async function initMediaPipe() {
   // ── Attempt 1: Check if tasks-vision bundle already loaded (via <script> tag) ──
   let ns = probeTasksVisionNamespace();
 
-  // ── Attempt 2: ES module dynamic import ──────────────────────────────────
-  // This is the PROVEN working method — bypasses CORS restrictions that block
-  // UMD script tag injection. Runs in parallel with a 15s timeout.
+  // ── Attempt 2: ES module dynamic import (the PROVEN working path) ─────────
+  // Reuses the warm-up started in <head> (window._mpVisionPromise) if it resolved; otherwise
+  // runs the import here, walking the same multi-CDN mirror list (jsdelivr → unpkg → esm.sh) so
+  // no single CDN outage can break loading. Bounded by a 25s overall timeout.
   if(!ns) {
     badge.textContent = '⏳ Loading pose model...';
     console.log('[PoseLandmarker] Trying ES module import (primary method)...');
+    const SOURCES = (typeof window !== 'undefined' && window._mpVisionSources) || [
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm',
+      'https://unpkg.com/@mediapipe/tasks-vision@0.10.21?module',
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm',
+      'https://esm.sh/@mediapipe/tasks-vision@0.10.21',
+    ];
+    const importChain = (async () => {
+      // 1) reuse the head warm-up if it already succeeded
+      try {
+        const warm = (typeof window !== 'undefined' && window._mpVisionPromise) ? await window._mpVisionPromise : null;
+        if(warm?.PoseLandmarker && warm?.FilesetResolver) return warm;
+      } catch(e) { /* warm-up failed; fall through to fresh attempts */ }
+      // 2) fresh import, mirror by mirror
+      for(const url of SOURCES) {
+        try {
+          const m = await import(url);
+          if(m?.PoseLandmarker && m?.FilesetResolver) { console.log('[PoseLandmarker] loaded from', url); return m; }
+        } catch(e) { console.warn('[PoseLandmarker] source failed:', url, e && e.message); }
+      }
+      throw new Error('All ES module sources failed');
+    })();
     try {
       const mod = await Promise.race([
-        // jsdelivr /+esm endpoint has better CORS support for GitHub Pages than unpkg
-        Promise.any([
-          import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm'),
-          import('https://unpkg.com/@mediapipe/tasks-vision@0.10.21?module'),
-          import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm'),
-        ]).catch(() => { throw new Error('All ES module sources failed'); }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))
+        importChain,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 25000))
       ]);
       if(mod?.PoseLandmarker && mod?.FilesetResolver) {
         ns = { PoseLandmarker: mod.PoseLandmarker, FilesetResolver: mod.FilesetResolver };
         console.log('[PoseLandmarker] ES module import succeeded');
       }
     } catch(e) {
-      console.warn('[PoseLandmarker] ES module import failed:', e.message, '— trying CDN scripts');
+      console.warn('[PoseLandmarker] ES module import failed:', e.message, '— falling back to legacy');
     }
   }
 
-  // ── Attempt 3: UMD script tag injection (fallback if ES module fails) ────
-  if(!ns) {
-    const TASKS_VISION_CDNS = [
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.js',
-      'https://unpkg.com/@mediapipe/tasks-vision@0.10.21/vision_bundle.js',
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js',
-      'https://unpkg.com/@mediapipe/tasks-vision@0.10.14/vision_bundle.js',
-    ];
-    for(const cdnUrl of TASKS_VISION_CDNS) {
-      badge.textContent = '⏳ Trying CDN...';
-      console.log('[PoseLandmarker] Trying script CDN:', cdnUrl);
-      const ok = await injectFallbackCDN(cdnUrl);
-      if(ok) {
-        ns = probeTasksVisionNamespace();
-        if(ns) { console.log('[PoseLandmarker] Bundle loaded from:', cdnUrl); break; }
-      }
-      console.warn('[PoseLandmarker] CDN failed:', cdnUrl);
-    }
-  }
-
-  // ── If all CDN attempts fail: fall back to legacy MediaPipe Pose ──────────
+  // ── If all ESM mirrors fail: fall back to legacy MediaPipe Pose ───────────
+  // (The old classic-script `vision_bundle.js` fallback was removed — that path 404'd on every
+  //  load, so it never actually provided a fallback; legacy Pose is the real safety net.)
   if(!ns) {
     console.warn('[PoseLandmarker] All CDN attempts failed — using legacy MediaPipe Pose');
     await initMediaPipeLegacyFallback();
