@@ -1850,6 +1850,8 @@ function startFrameExtraction(file, vid) {
                 lKneeX: lK?.x ?? null,  // for shin angle
                 lAnkXFull: lA?.x ?? null, // already captured as lAnkX
                 lKneeY: lK?.y ?? null,   // for shin angle
+                rKneeX: rK?.x ?? null,  // for shin angle (REF=R side, #36)
+                rKneeY: rK?.y ?? null,  // for shin angle (REF=R side, #36)
                 // v0.14.0: per-side visibility for camera-near detection
                 lHipVis:  lms[23]?.visibility ?? 0,
                 lKneeVis: lms[25]?.visibility ?? 0,
@@ -8616,33 +8618,37 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   }
 
   // ── Shin Angle at Initial Contact ──────────────────────────────────────────
-  // Angle of the tibia (knee → ankle vector) from vertical at initial contact.
-  // Positive = forward shin lean (foot ahead of knee = overstriding indicator).
-  // Normal at contact: 5–15° forward. >20° = significant overstriding / braking force risk.
-  // Computed per contact event, averaged.
+  // Angle of the tibia (knee → ankle vector) from vertical at initial contact, measured on the
+  // REFERENCE (camera-near) leg at ITS OWN contacts. Normal at contact: 5–15° forward;
+  // >20° = significant overstriding / braking risk.
+  // #36 FIX: previously this looped BOTH legs' contacts but always read the LEFT leg's knee/ankle,
+  // so at every right contact it measured the trailing/swing left shin — inflating the average
+  // (e.g. Jen read 44° alongside 179 spm cadence, which is biomechanically contradictory). Now it
+  // uses the ref-leg contacts with the ref-leg's own landmarks, and takes the MEDIAN across strides
+  // for robustness to single-frame outliers.
   let shinAngleAtContactDeg = null;
   {
     const shinAngles = [];
-    const allCI = [...lContactIdxs, ...rContactIdxs];
-    allCI.forEach(ci => {
+    refContacts.forEach(ci => {
       const f = perFrameData[ci];
       if(!f) return;
-      // Use the leg that matches the contact side
-      const kneeY = f.lKneeY; // note: we added lKneeY in perFrame
-      const ankY  = f.lAnkY;
-      const kneeX = f.lKneeX;
-      const ankX  = f.lAnkX;
+      const kneeY = REF==='L' ? f.lKneeY : f.rKneeY;
+      const ankY  = REF==='L' ? f.lAnkY  : f.rAnkY;
+      const kneeX = REF==='L' ? f.lKneeX : f.rKneeX;
+      const ankX  = REF==='L' ? f.lAnkX  : f.rAnkX;
       if(kneeY==null||ankY==null||kneeX==null||ankX==null) return;
       const dy = ankY - kneeY; // positive = ankle below knee (correct anatomy)
-      const dx = ankX - kneeX; // positive = ankle forward/right of knee
+      const dx = ankX - kneeX; // horizontal knee→ankle offset
       if(dy < 0.01) return;    // shin pointing up = bad landmark
-      // Angle from vertical: atan2(horizontal offset, vertical extent)
       const angle = Math.atan2(Math.abs(dx), dy) * 180 / Math.PI;
       if(angle >= 0 && angle < 60) shinAngles.push(angle); // sanity range
     });
     if(shinAngles.length >= 2) {
-      shinAngleAtContactDeg = Math.round(shinAngles.reduce((s,v)=>s+v,0)/shinAngles.length);
+      shinAngles.sort((a,b) => a - b);
+      const mid = Math.floor(shinAngles.length / 2);
+      shinAngleAtContactDeg = Math.round(shinAngles.length % 2 ? shinAngles[mid] : (shinAngles[mid-1] + shinAngles[mid]) / 2);
     }
+    console.log(`[StrideEngine] Shin angle at contact: ${shinAngleAtContactDeg ?? 'n/a'}° (median of ${shinAngles.length} ${REF}-leg contacts)`);
   }
 
   return {
@@ -11987,6 +11993,22 @@ async function runAnalysis() {
           }
         });
 
+        // #36 — reconcile the stride-metrics "Peak Knee Flex" KPI with the dense/tape-refined
+        // joint-table value so the report shows ONE knee-flexion number (the KPI, from MoveNet,
+        // under-reads deep swing flexion — e.g. 84° while the table reads 118°/122°). Also stops a
+        // falsely-low peak from wrongly tripping the "shuffler" archetype. Display = 180 − included min.
+        try {
+          const _pk = ['Left Knee Flexion','Right Knee Flexion']
+            .map(k => aggregated[k]?.min).filter(v => v != null && isFinite(v)).map(v => 180 - v);
+          if(_pk.length && typeof window_strideMetrics === 'object' && window_strideMetrics) {
+            const _densePeak = Math.round(Math.max(..._pk));
+            if(_densePeak > 0 && _densePeak <= 160 && Math.abs((window_strideMetrics.peakKneeFlex ?? 0) - _densePeak) >= 5) {
+              console.log(`[KneeReconcile] Peak knee flex KPI ${window_strideMetrics.peakKneeFlex}° → ${_densePeak}° (matched to dense joint-table)`);
+              window_strideMetrics.peakKneeFlex = _densePeak;
+            }
+          }
+        } catch(e) { console.warn('[KneeReconcile]', e); }
+
         // ── Trunk lean gallery override ──────────────────────────────────────
         // Problem: the 128-frame MoveNet dense aggregation averages trunk lean across
         // the full gait cycle — including swing phases where the trunk approaches
@@ -12330,6 +12352,46 @@ async function runAnalysis() {
                 };
                 console.log(`[PronDense] ${k}: ${median}deg from ${vals.length} dense stance frames (range ${Math.min(...vals)}-${Math.max(...vals)}deg), pooled n=${total}`);
               });
+
+              // #36 — Contralateral pelvic drop: PEAK-per-direction from the dense posterior frames.
+              // Previously reported as a whole-cycle AVERAGE magnitude (~1°), which washes out the
+              // transient single-leg-stance drop and loses its direction. Pelvic obliquity oscillates
+              // (it drops toward the swing side at each stance), so the average hides real drops — Jen
+              // read "1° / stable" despite a visible left drop at right contact. Take the robust peak in
+              // each direction instead. Convention (from extractAngles): _pelvicDropSide 'left' = left
+              // hip lower = LEFT pelvis drops (→ occurs during RIGHT stance → RIGHT hip-abductor
+              // insufficiency); 'right' = right pelvis drops (→ LEFT stance → LEFT abductor).
+              (() => {
+                const leftDrops = [], rightDrops = [];
+                secCurves.forEach(c => {
+                  const mag = c.angles['Pelvic Drop'], side = c.angles['_pelvicDropSide'];
+                  if(mag == null || !isFinite(mag)) return;
+                  if(side === 'left')       leftDrops.push(mag);
+                  else if(side === 'right') rightDrops.push(mag);
+                });
+                const robustPeak = (arr) => {
+                  if(arr.length < 2) return null;
+                  const s = [...arr].sort((a,b)=>a-b);
+                  return Math.round(s[Math.floor((s.length - 1) * 0.9)]); // 90th pct — robust to one spiking frame
+                };
+                const leftPeak = robustPeak(leftDrops);    // left pelvis drops  → RIGHT abductor
+                const rightPeak = robustPeak(rightDrops);  // right pelvis drops → LEFT  abductor
+                if(leftPeak == null && rightPeak == null) return;
+                const peakMag = Math.max(leftPeak ?? 0, rightPeak ?? 0);
+                const dropSide = (leftPeak ?? 0) >= (rightPeak ?? 0) ? 'left' : 'right';
+                const totalN = leftDrops.length + rightDrops.length;
+                aggregated2['Pelvic Drop'] = {
+                  min: 0, max: peakMag, avg: peakMag, // report/scoring value = the PEAK, not the average
+                  count: totalN,
+                  hitRate: Math.round(100 * totalN / secCurves.length),
+                  lowConfidence: totalN < 3,
+                  source: 'dense-posterior-peak',
+                  dropSide, leftPeak, rightPeak,
+                };
+                window._pelvicDropInfo = { peakMag, dropSide, leftPeak, rightPeak,
+                  abductor: dropSide === 'left' ? 'right' : 'left' };
+                console.log(`[PelvicDrop] peak L-side ${leftPeak ?? 'n/a'}° (→R abductor) · R-side ${rightPeak ?? 'n/a'}° (→L abductor) — reporting ${peakMag}° (${dropSide}-side drop → ${dropSide==='left'?'right':'left'} glute-med), n=${totalN}`);
+              })();
             }
           }
         }
@@ -12472,6 +12534,7 @@ ${notes ? `CLINICAL NOTES: ${notes}` : ''}
 ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
+${(window._pelvicDropInfo && window._pelvicDropInfo.peakMag >= 4) ? `PELVIC DROP DIRECTION (#36): peak contralateral pelvic drop is ${window._pelvicDropInfo.peakMag}° with the ${window._pelvicDropInfo.dropSide.toUpperCase()} pelvis dropping — this occurs during ${window._pelvicDropInfo.dropSide==='left'?'RIGHT':'LEFT'} single-leg stance and implicates the ${window._pelvicDropInfo.abductor.toUpperCase()} hip abductor (gluteus medius). Attribute the abductor weakness to the ${window._pelvicDropInfo.abductor.toUpperCase()} side and target strengthening there.${window._pelvicDropInfo.leftPeak!=null&&window._pelvicDropInfo.rightPeak!=null?` (L-side drop ${window._pelvicDropInfo.leftPeak}°, R-side drop ${window._pelvicDropInfo.rightPeak}°.)`:''}` : ''}
 ${(() => {
   try {
     var fd = window._fusionDisagree || {};
