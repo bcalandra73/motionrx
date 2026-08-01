@@ -3493,6 +3493,11 @@ function captureFrameFromVideo(vid) {
     const scale = Math.min(1, 800/Math.max(w,h));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(w*scale); canvas.height = Math.round(h*scale);
+    // #36 diagnostic: frame is captured at NATIVE aspect (not square-padded), so normalized
+    // landmark x (over width) and y (over height) are on different physical scales. Any angle that
+    // mixes horizontal & vertical (shin-from-vertical, overstride distance, thigh-from-vertical) is
+    // distorted unless corrected by this ratio. Store it so the stride engine can report the effect.
+    window._videoAspect = w / h;
     canvas.getContext('2d').drawImage(vid,0,0,canvas.width,canvas.height);
     const b64 = canvas.toDataURL('image/jpeg',0.82).split(',')[1];
     return (b64 && b64.length > 300) ? b64 : null;
@@ -8607,7 +8612,11 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
         const medLegFrac = legFracs[Math.floor(legFracs.length/2)];
         const cmPerFrac  = medLegFrac > 0 ? legLenCm / medLegFrac : null;
         if(cmPerFrac) {
-          overstrideDistCm = Math.round(Math.abs(meanOffset) * cmPerFrac);
+          // #36: aspect-correct the horizontal offset (normalized over WIDTH) to the same scale as
+          // cmPerFrac (derived from a vertical leg length, normalized over HEIGHT). Without this,
+          // portrait video inflates the overstride distance. offset × (width/height) × cmPerFrac.
+          const _oaspect = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
+          overstrideDistCm = Math.round(Math.abs(meanOffset) * _oaspect * cmPerFrac);
           // Threshold: <5cm = none, 5-15cm = mild, 15-25cm = moderate, >25cm = severe
           overstrideGrade = overstrideDistCm < 5  ? 'none'
                           : overstrideDistCm < 15 ? 'mild'
@@ -8628,7 +8637,8 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // for robustness to single-frame outliers.
   let shinAngleAtContactDeg = null;
   {
-    const shinAngles = [];
+    const _aspect = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
+    const shinAngles = [], shinCorrected = [];
     refContacts.forEach(ci => {
       const f = perFrameData[ci];
       if(!f) return;
@@ -8641,14 +8651,20 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       const dx = ankX - kneeX; // horizontal knee→ankle offset
       if(dy < 0.01) return;    // shin pointing up = bad landmark
       const angle = Math.atan2(Math.abs(dx), dy) * 180 / Math.PI;
-      if(angle >= 0 && angle < 60) shinAngles.push(angle); // sanity range
+      if(angle >= 0 && angle < 60) {
+        shinAngles.push(angle);
+        // #36 diagnostic: aspect-corrected shin. dx is normalized over WIDTH, dy over HEIGHT,
+        // so the true angle-from-vertical scales dx by (width/height). Logged for comparison only —
+        // NOT yet applied to the score, pending confirmation of filming orientation.
+        shinCorrected.push(Math.atan2(Math.abs(dx) * _aspect, dy) * 180 / Math.PI);
+      }
     });
-    if(shinAngles.length >= 2) {
-      shinAngles.sort((a,b) => a - b);
-      const mid = Math.floor(shinAngles.length / 2);
-      shinAngleAtContactDeg = Math.round(shinAngles.length % 2 ? shinAngles[mid] : (shinAngles[mid-1] + shinAngles[mid]) / 2);
-    }
-    console.log(`[StrideEngine] Shin angle at contact: ${shinAngleAtContactDeg ?? 'n/a'}° (median of ${shinAngles.length} ${REF}-leg contacts)`);
+    const _med = (arr) => { if(arr.length < 2) return null; const s=[...arr].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return Math.round(s.length%2 ? s[m] : (s[m-1]+s[m])/2); };
+    const _rawShin = _med(shinAngles);
+    // #36 APPLIED: the aspect-corrected value is the reported one (portrait video inflates the raw
+    // from-vertical angle; correcting scales the horizontal component by width/height).
+    shinAngleAtContactDeg = _med(shinCorrected) ?? _rawShin;
+    console.log(`[StrideEngine] Shin angle at contact: ${shinAngleAtContactDeg ?? 'n/a'}° (aspect-corrected; raw ${_rawShin ?? 'n/a'}°, aspect=${_aspect.toFixed(3)}, median of ${shinAngles.length} ${REF}-leg contacts)`);
   }
 
   return {
