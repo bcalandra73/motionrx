@@ -6674,15 +6674,18 @@ function extractAngles(lm, view='side', movement='') {
     // We report the MAGNITUDE of pelvic tilt as a bilateral value.
     // Normal: < 5°  |  Mild: 5–10°  |  Significant: > 10°
     if(lHipF && rHipF) {
-      const hipDx = rHipF.x - lHipF.x;
+      // #36: aspect-correct the horizontal (hip width is normalized over WIDTH; the vertical drop
+      // over HEIGHT). Pelvic drop is an angle-FROM-HORIZONTAL, so portrait video DEFLATES it —
+      // opposite of the shin. Scaling hipDx by width/height puts both axes on the same scale.
+      const _asp = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
+      const hipDx = (rHipF.x - lHipF.x) * _asp;
       const hipDy = rHipF.y - lHipF.y; // positive = right hip lower in image
       const pelvicTiltDeg = Math.round(Math.abs(Math.atan2(Math.abs(hipDy), Math.abs(hipDx)) * 180 / Math.PI));
-      // Only report if hips are a reasonable distance apart (avoids degenerate frames)
       const hipDist = Math.hypot(hipDx, hipDy);
-      if(hipDist > 0.05) { // hips must be >5% of frame width apart
+      if(hipDist > 0.03) {
         angles['Pelvic Drop'] = pelvicTiltDeg;
-        // Also store which side drops for clinical context
-        angles['_pelvicDropSide'] = hipDy > 0.01 ? 'right' : hipDy < -0.01 ? 'left' : 'neutral';
+        // Direction by sign of the vertical offset; smaller neutral band so subtle drops still classify.
+        angles['_pelvicDropSide'] = hipDy > 0.004 ? 'right' : hipDy < -0.004 ? 'left' : 'neutral';
       }
     }
 
@@ -12392,6 +12395,8 @@ async function runAnalysis() {
                 };
                 const leftPeak = robustPeak(leftDrops);    // left pelvis drops  → RIGHT abductor
                 const rightPeak = robustPeak(rightDrops);  // right pelvis drops → LEFT  abductor
+                const _neutral = secCurves.length - leftDrops.length - rightDrops.length;
+                console.log(`[PelvicDrop] signal: L-side ${leftDrops.length} frames, R-side ${rightDrops.length}, neutral ${_neutral} (of ${secCurves.length}); peaks L=${leftPeak ?? 'n/a'}° R=${rightPeak ?? 'n/a'}°`);
                 if(leftPeak == null && rightPeak == null) return;
                 const peakMag = Math.max(leftPeak ?? 0, rightPeak ?? 0);
                 const dropSide = (leftPeak ?? 0) >= (rightPeak ?? 0) ? 'left' : 'right';
