@@ -12555,7 +12555,7 @@ ${notes ? `CLINICAL NOTES: ${notes}` : ''}
 ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
-${(window._pelvicDropInfo && window._pelvicDropInfo.peakMag >= 4) ? `PELVIC DROP DIRECTION (#36): peak contralateral pelvic drop is ${window._pelvicDropInfo.peakMag}° with the ${window._pelvicDropInfo.dropSide.toUpperCase()} pelvis dropping — this occurs during ${window._pelvicDropInfo.dropSide==='left'?'RIGHT':'LEFT'} single-leg stance and implicates the ${window._pelvicDropInfo.abductor.toUpperCase()} hip abductor (gluteus medius). Attribute the abductor weakness to the ${window._pelvicDropInfo.abductor.toUpperCase()} side and target strengthening there.${window._pelvicDropInfo.leftPeak!=null&&window._pelvicDropInfo.rightPeak!=null?` (L-side drop ${window._pelvicDropInfo.leftPeak}°, R-side drop ${window._pelvicDropInfo.rightPeak}°.)`:''}` : ''}
+${(window._pelvicDropInfo && window._pelvicDropInfo.peakMag >= 4) ? `PELVIC DROP DIRECTION (#36): peak contralateral pelvic drop is ${window._pelvicDropInfo.peakMag}° with the ${window._pelvicDropInfo.dropSide.toUpperCase()} pelvis dropping during ${window._pelvicDropInfo.dropSide==='left'?'RIGHT':'LEFT'} single-leg stance, pointing to the ${window._pelvicDropInfo.abductor.toUpperCase()} hip abductor (gluteus medius). ${window._pelvicDropInfo.peakMag <= 6 ? `NOTE: at ${window._pelvicDropInfo.peakMag}° this is BORDERLINE (upper edge of normal) — frame it as a monitor/screening point on the ${window._pelvicDropInfo.abductor.toUpperCase()} side, NOT a definitive deficit.` : `Attribute the abductor weakness to the ${window._pelvicDropInfo.abductor.toUpperCase()} side and target strengthening there.`} This is measured from limited posterior-view frames (2-D screening), so it likely UNDER-represents the true drop rather than over-stating it.${window._pelvicDropInfo.leftPeak!=null&&window._pelvicDropInfo.rightPeak!=null?` (L-side ${window._pelvicDropInfo.leftPeak}°, R-side ${window._pelvicDropInfo.rightPeak}°.)`:''}` : ''}
 ${(() => {
   try {
     var fd = window._fusionDisagree || {};
@@ -13742,7 +13742,10 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   if(valg!=null){ if(valg>8) add(-2.0,`knee valgus ${Math.round(valg)}°`,'injury'); else if(valg>5) add(-1.0,`knee valgus ${Math.round(valg)}°`,'injury'); else str.push(`controlled knee valgus (${Math.round(valg)}°)`); }
 
   const pd = mv('Pelvic Drop');
-  if(pd!=null){ if(pd>8) add(-2.0,`pelvic drop ${Math.round(pd)}°`,'injury'); else if(pd>5) add(-1.0,`pelvic drop ${Math.round(pd)}°`,'injury'); else str.push(`pelvic stability (drop ${Math.round(pd)}°)`); }
+  // Pelvic drop is now a PEAK contralateral value (#36). >8 significant, 5-8 mild. A borderline
+  // 4-5° is neither penalised nor praised (avoids the report calling a drop the narrative flags as
+  // Trendelenburg a "strength"); only a clearly-controlled ≤3° counts as a stability strength.
+  if(pd!=null){ if(pd>8) add(-2.0,`pelvic drop ${Math.round(pd)}°`,'injury'); else if(pd>5) add(-1.0,`pelvic drop ${Math.round(pd)}°`,'injury'); else if(pd<=3) str.push(`pelvic stability (drop ${Math.round(pd)}°)`); }
 
   const hipAdd = worstOf(mv('Left Hip Adduction'), mv('Right Hip Adduction'));
   if(hipAdd!=null){ if(hipAdd>12) add(-1.5,`crossover / hip adduction ${Math.round(hipAdd)}°`,'injury'); else if(hipAdd>10) add(-1.0,`crossover / hip adduction ${Math.round(hipAdd)}°`,'injury'); else if(hipAdd>8) add(-0.5,`borderline hip adduction ${Math.round(hipAdd)}°`,'injury'); }
