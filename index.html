@@ -8700,6 +8700,8 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     stridesDetected:  strideCycles.length,
     strideOutliersRejected,
     refSide:          REF,
+    cameraNearLeg:    _cameraNearLeg,   // #36 far-leg gate: near = well-tracked, far = occluded in lateral view
+    facesLeft:        _facesLeft,
     fps:              fps,
     bestStrideFrameRange: bestStride ? [bestStride.startIdx, bestStride.endIdx] : null,
     bestStrideDetails: bestStride,
@@ -12433,25 +12435,52 @@ async function runAnalysis() {
   const SAGITTAL_ANGLES = ['Hip Flexion','Knee Flexion','Ankle Dorsiflexion','Trunk Lean','Elbow Flexion','Shoulder Flexion'];
   const FRONTAL_ANGLES  = ['Hip Abduction','Hip Adduction','Knee Valgus','Pelvic Tilt','Pelvic Drop','Trunk Lateral Lean','Shoulder Abduction','Pronation'];
 
-  // v0.15.0 — far-foot reliability gate. In a single side view the far leg's foot is
-  // occluded; if its tape was detected far less than the near leg's, its ankle/pronation
-  // are unreliable. Flag them low-confidence so the table, findings prompt and LSI all treat
-  // them as such — stops a near-vs-far tracking gap being reported as a real L/R asymmetry.
-  (function _flagFarFootReliability(){
+  // v0.16.0 — far-SIDE reliability gate (#36). In the lateral view the far leg is
+  // occluded, so its sagittal metrics (knee flexion, ankle DF) are noisier than the near
+  // leg's even when frame counts look fine — a near-vs-far tracking gap then masquerades as
+  // a real L/R asymmetry (e.g. a phantom knee-flexion LSI). Two mechanisms:
+  //   1. Tape-count evidence: a foot joint tracked much less than its mirror is unreliable.
+  //   2. Known far-leg identity from the stride engine: the far leg's occlusion-sensitive
+  //      sagittal metrics are screening-grade. Frontal metrics (adduction/valgus/pronation)
+  //      are only additionally gated on a single-view run — in a dual view they come from the
+  //      posterior camera (which sees both sides) and keep their own frame-count gate.
+  (function _flagFarSideReliability(){
+    const mark = (k, why) => { if(aggregated[k]){ aggregated[k].lowConfidence = true; if(why) aggregated[k].lowConfReason = why; } };
+
+    // ── 1. Tape-count evidence (foot joints) ──────────────────────────────────
     const c = (typeof window!=='undefined' && window._tapeRefinedCounts) ? window._tapeRefinedCounts : null;
-    if(!c) return;
-    const mark = (k) => { if(aggregated[k]) aggregated[k].lowConfidence = true; };
-    const TH = 0.5; // a foot joint tape-tracked < 50% as often as its mirror is unreliable
-    // Key each metric on the landmark it depends on: ankle DF on the ankle marker (27/28),
-    // pronation/calcaneal eversion on the heel marker (29/30). A well-tracked heel must not
-    // mask a poorly-tracked ankle (or vice versa) the way summing the whole foot did.
-    const la=c[27]||0, ra=c[28]||0, lh=c[29]||0, rh=c[30]||0;
-    if(la>0 && ra < TH*la) mark('Right Ankle Dorsiflexion');
-    if(ra>0 && la < TH*ra) mark('Left Ankle Dorsiflexion');
-    if(lh>0 && rh < TH*lh) mark('Right Pronation');
-    if(rh>0 && lh < TH*rh) mark('Left Pronation');
-    try { console.log(`[FarFoot] ankle tape L${la}/R${ra}  heel tape L${lh}/R${rh}  -> flagged low-conf: `+
-      (['Right Ankle Dorsiflexion','Left Ankle Dorsiflexion','Right Pronation','Left Pronation']
+    const la=c?c[27]||0:0, ra=c?c[28]||0:0, lh=c?c[29]||0:0, rh=c?c[30]||0:0;
+    if(c){
+      const TH = 0.7; // v0.16.0: loosened 0.5→0.7 — a clearly-sparse far foot (e.g. 38 vs 70 = 0.54) must not squeak through
+      if(la>0 && ra < TH*la) mark('Right Ankle Dorsiflexion','far/occluded foot — sparse tape');
+      if(ra>0 && la < TH*ra) mark('Left Ankle Dorsiflexion','far/occluded foot — sparse tape');
+      if(lh>0 && rh < TH*lh) mark('Right Pronation','far/occluded foot — sparse tape');
+      if(rh>0 && lh < TH*rh) mark('Left Pronation','far/occluded foot — sparse tape');
+    }
+
+    // ── 2. Known far-leg identity (from stride engine) ────────────────────────
+    const near = (typeof window_strideMetrics!=='undefined' && window_strideMetrics && window_strideMetrics.cameraNearLeg) || null;
+    const far  = near==='L' ? 'R' : near==='R' ? 'L' : null;
+    const sideWord = far==='L' ? 'Left' : far==='R' ? 'Right' : null;
+    // A frontal secondary view (posterior/front) independently measures both sides.
+    const hasFrontalSecondary = (typeof hasDualView!=='undefined' && hasDualView) &&
+      ((typeof cameraView2!=='undefined' && (cameraView2==='posterior' || cameraView2==='front')) ||
+       (typeof cameraView !=='undefined' && (cameraView ==='posterior' || cameraView ==='front')));
+    if(sideWord){
+      // Sagittal metrics only ever come from the lateral view → far side is occlusion-limited. Always screening-grade.
+      mark(`${sideWord} Knee Flexion`,   'far/occluded leg (lateral view) — screening-grade');
+      mark(`${sideWord} Ankle Dorsiflexion`, 'far/occluded leg (lateral view) — screening-grade');
+      // Frontal metrics: only gate when there is NO posterior/front view to measure them properly.
+      if(!hasFrontalSecondary){
+        mark(`${sideWord} Hip Adduction`, 'far/occluded leg, no frontal view — screening-grade');
+        mark(`${sideWord} Knee Valgus`,   'far/occluded leg, no frontal view — screening-grade');
+        mark(`${sideWord} Pronation`,     'far/occluded leg, no frontal view — screening-grade');
+      }
+    }
+
+    try { console.log(`[FarSide] near=${near||'?'} far=${far||'?'} frontalSecondary=${hasFrontalSecondary} | tape ankle L${la}/R${ra} heel L${lh}/R${rh} -> gated: `+
+      (['Left Knee Flexion','Right Knee Flexion','Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
+        'Left Hip Adduction','Right Hip Adduction','Left Knee Valgus','Right Knee Valgus','Left Pronation','Right Pronation']
         .filter(k=>aggregated[k]&&aggregated[k].lowConfidence).join(', ') || 'none')); } catch(e){}
   })();
 
@@ -13254,6 +13283,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           const FOOT_IDX = [27,28,29,30,31,32];
           const footTapeMissing = !(window._tapeRefinedIdx && FOOT_IDX.some(i => window._tapeRefinedIdx.has(i)));
           const lcReason = (v) => {
+            // v0.16.0: an identity-based far-leg gate can flag a well-sampled metric, so lead
+            // with the stored reason (occlusion) rather than a misleading high frame count.
+            if(v.lowConfReason) return v.lowConfReason;
             const _b = [(v.count||0)+' frame'+((v.count===1)?'':'s')];
             if((v.count||0) >= 3 && v.hitRate != null && v.hitRate < 40) _b.push('tracked in '+v.hitRate+'% of frames');
             if(/Pronation|Ankle|Foot|Valgus|Pelvic/i.test(label) && footTapeMissing) _b.push('foot tape not detected');
