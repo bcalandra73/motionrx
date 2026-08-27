@@ -1593,6 +1593,7 @@ function startFrameExtraction(file, vid) {
   window._tapeRefinedCount = 0; // v0.15.0: # landmarks refined from tape blobs this analysis
   window._tapeRefinedIdx = new Set(); // v0.15.0: which landmark indices were tape-refined (per-metric provenance)
   window._tapeRefinedCounts = {}; // v0.15.0: per-landmark tape-detection counts (near vs far foot reliability)
+  window._ankleDfLogN = 0; // v0.16.0: rate-limit the [AnkleDF] raw-vs-corrected diagnostic to ~10 lines/run
   window._interpGapFrames = 0; // v0.15.0: lower-body frames in uninterpolable gaps
   window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
   window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
@@ -6631,32 +6632,55 @@ function extractAngles(lm, view='side', movement='') {
 
   // Ankle DF is a sagittal-plane metric — only valid from side view.
   // From frontal/posterior, knee→ankle→toe angle is a frontal-plane projection and meaningless.
+  //
+  // v0.16.0 ASPECT CORRECTION — calcAngle runs on normalized coords (x÷width, y÷height).
+  // In portrait video (aspect = w/h < 1) the horizontal axis is exaggerated ~1/aspect×,
+  // which distorts this shank(vertical)-vs-foot(horizontal) angle exactly as it distorted
+  // shin angle before we corrected it (that fix moved shin 44°→28°). Ankle DF uses 2D
+  // calcAngle on purpose (foot depth in worldLandmarks is unreliable), so it can't lean on
+  // the 3D path that protects knee/hip flexion — it needs the correction applied directly.
+  // Scale x by aspect to put both axes on a common physical scale before measuring.
+  const _dfAsp = (typeof window!=='undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
+  const _ascaleP = (p) => ({ x: p.x * _dfAsp, y: p.y });
+  const _dfAngle = (kneeLM, ankleLM, distalLM) => {
+    const raw = calcAngle(_ascaleP(kneeLM), _ascaleP(ankleLM), _ascaleP(distalLM));
+    return raw == null ? null : raw - 90;
+  };
+  // Rate-limited diagnostic (≤10 lines/run): shows raw vs aspect-corrected DF, the distal
+  // landmark used, and the heel-based vs toe-based value so a heel/toe flip is visible.
+  const _dfLog = (side, kneeLM, ankleLM, pick, heelLM, toeLM, df) => {
+    try {
+      if(typeof window==='undefined') return;
+      if((window._ankleDfLogN||0) >= 10) return;
+      window._ankleDfLogN = (window._ankleDfLogN||0) + 1;
+      const rawUnc = calcAngle(kneeLM, ankleLM, pick.lm);
+      const heelDf = heelLM ? _dfAngle(kneeLM, ankleLM, heelLM) : null;
+      const toeDf  = toeLM  ? _dfAngle(kneeLM, ankleLM, toeLM)  : null;
+      console.log(`[AnkleDF] ${side} src=${pick.src} corrected=${df!=null?df+'°':'clamped'} (uncorrected ${rawUnc!=null?(rawUnc-90)+'°':'n/a'}, aspect=${_dfAsp.toFixed(3)}) | heel-based=${heelDf!=null?heelDf+'°':'n/a'} toe-based=${toeDf!=null?toeDf+'°':'n/a'}`);
+    } catch(e){}
+  };
   if(!isFrontalView) {
   if(lKneeP && lAnkleP && lDistalPick && !worldZReject(lAnkleP, lKneeP)) {
-    const raw = calcAngle(lKneeP, lAnkleP, lDistalPick.lm);
-    if(raw != null) {
-      const df = raw - 90;
-      // Running stance clamp: −15° to +35°
-      // Values below −15° (>15° PF at stance) are tracking artefacts at running speed.
-      // Push-off PF in swing can reach −30° but those frames are excluded at aggregation.
-      // The old −35° clamp was too permissive — allowing artefactual deep PF into averages.
-      if(df >= -15 && df <= 35) {
-        angles['Left Ankle Dorsiflexion'] = df;
-        angles['_lAnkleSrc'] = lDistalPick.src;
-        angles['_lAnkleConf'] = Math.round(combinedConf(lDistalPick.lm) * 100);
-      }
+    const df = _dfAngle(lKneeP, lAnkleP, lDistalPick.lm);
+    // Running stance clamp: −15° to +35°
+    // Values below −15° (>15° PF at stance) are tracking artefacts at running speed.
+    // Push-off PF in swing can reach −30° but those frames are excluded at aggregation.
+    // The old −35° clamp was too permissive — allowing artefactual deep PF into averages.
+    if(df != null && df >= -15 && df <= 35) {
+      angles['Left Ankle Dorsiflexion'] = df;
+      angles['_lAnkleSrc'] = lDistalPick.src;
+      angles['_lAnkleConf'] = Math.round(combinedConf(lDistalPick.lm) * 100);
     }
+    _dfLog('L', lKneeP, lAnkleP, lDistalPick, lHeelLM, lToeLM, (df!=null && df>=-15 && df<=35) ? df : null);
   }
   if(rKneeP && rAnkleP && rDistalPick && !worldZReject(rAnkleP, rKneeP)) {
-    const raw = calcAngle(rKneeP, rAnkleP, rDistalPick.lm);
-    if(raw != null) {
-      const df = raw - 90;
-      if(df >= -15 && df <= 35) {
-        angles['Right Ankle Dorsiflexion'] = df;
-        angles['_rAnkleSrc'] = rDistalPick.src;
-        angles['_rAnkleConf'] = Math.round(combinedConf(rDistalPick.lm) * 100);
-      }
+    const df = _dfAngle(rKneeP, rAnkleP, rDistalPick.lm);
+    if(df != null && df >= -15 && df <= 35) {
+      angles['Right Ankle Dorsiflexion'] = df;
+      angles['_rAnkleSrc'] = rDistalPick.src;
+      angles['_rAnkleConf'] = Math.round(combinedConf(rDistalPick.lm) * 100);
     }
+    _dfLog('R', rKneeP, rAnkleP, rDistalPick, rHeelLM, rToeLM, (df!=null && df>=-15 && df<=35) ? df : null);
   }
   } // end !isFrontalView
 
