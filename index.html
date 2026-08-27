@@ -12435,15 +12435,15 @@ async function runAnalysis() {
   const SAGITTAL_ANGLES = ['Hip Flexion','Knee Flexion','Ankle Dorsiflexion','Trunk Lean','Elbow Flexion','Shoulder Flexion'];
   const FRONTAL_ANGLES  = ['Hip Abduction','Hip Adduction','Knee Valgus','Pelvic Tilt','Pelvic Drop','Trunk Lateral Lean','Shoulder Abduction','Pronation'];
 
-  // v0.16.0 — far-SIDE reliability gate (#36). In the lateral view the far leg is
-  // occluded, so its sagittal metrics (knee flexion, ankle DF) are noisier than the near
-  // leg's even when frame counts look fine — a near-vs-far tracking gap then masquerades as
-  // a real L/R asymmetry (e.g. a phantom knee-flexion LSI). Two mechanisms:
-  //   1. Tape-count evidence: a foot joint tracked much less than its mirror is unreliable.
-  //   2. Known far-leg identity from the stride engine: the far leg's occlusion-sensitive
-  //      sagittal metrics are screening-grade. Frontal metrics (adduction/valgus/pronation)
-  //      are only additionally gated on a single-view run — in a dual view they come from the
-  //      posterior camera (which sees both sides) and keep their own frame-count gate.
+  // v0.16.0 — far-SIDE reliability gate (#36). In the lateral view the far leg is hidden
+  // behind the near leg ONLY while the legs overlap (mid-stance / mid-swing); at the phase
+  // ends it is clearly visible. So we do NOT distrust the far side wholesale — we flag its
+  // metrics only when tracking was measurably poor on this clip, so a genuine near-vs-far
+  // tracking gap can't masquerade as a real L/R asymmetry (e.g. a phantom knee-flexion LSI),
+  // while a cleanly-tracked far leg keeps its numbers. Two evidence sources:
+  //   1. Tape-count evidence (feet): a foot joint tracked much less than its mirror.
+  //   2. Far-leg quality (knee/ankle): high pose-model disagreement on the far-side landmark
+  //      (a direct occlusion signal) or a low frame hit-rate. Near leg is never gated here.
   (function _flagFarSideReliability(){
     const mark = (k, why) => { if(aggregated[k]){ aggregated[k].lowConfidence = true; if(why) aggregated[k].lowConfReason = why; } };
 
@@ -12458,29 +12458,42 @@ async function runAnalysis() {
       if(rh>0 && lh < TH*rh) mark('Left Pronation','far/occluded foot — sparse tape');
     }
 
-    // ── 2. Known far-leg identity (from stride engine) ────────────────────────
+    // ── 2. Far-leg QUALITY gate (occlusion-aware, not blanket) ────────────────
+    // The far leg is only hidden when the legs overlap (mid-stance / mid-swing); at the phase
+    // ends — heel strike, late stance, early swing, late swing — it is clearly visible and its
+    // measurements are reliable. So rather than distrust the far side wholesale, flag its
+    // sagittal metrics only when tracking was ACTUALLY poor on this clip, measured by:
+    //   (a) how much the two pose models disagreed on that far-side landmark (a direct
+    //       occlusion signal — legs overlapping corrupts one model more than the other), or
+    //   (b) a low frame hit-rate (the value dropped out on too many frames).
+    // A cleanly-tracked far leg keeps its numbers.
     const near = (typeof window_strideMetrics!=='undefined' && window_strideMetrics && window_strideMetrics.cameraNearLeg) || null;
     const far  = near==='L' ? 'R' : near==='R' ? 'L' : null;
     const sideWord = far==='L' ? 'Left' : far==='R' ? 'Right' : null;
-    // A frontal secondary view (posterior/front) independently measures both sides.
-    const hasFrontalSecondary = (typeof hasDualView!=='undefined' && hasDualView) &&
-      ((typeof cameraView2!=='undefined' && (cameraView2==='posterior' || cameraView2==='front')) ||
-       (typeof cameraView !=='undefined' && (cameraView ==='posterior' || cameraView ==='front')));
+    const fd = (typeof window!=='undefined' && window._fusionDisagree) || {};
+    const DIS_TH = 0.30;  // far-side model disagreement above this ⇒ occlusion-corrupted
+    const HIT_TH = 55;    // far-side metric present in <55% of frames ⇒ dropout-corrupted
+    let farKneeDis=null, farAnkDis=null;
     if(sideWord){
-      // Sagittal metrics only ever come from the lateral view → far side is occlusion-limited. Always screening-grade.
-      mark(`${sideWord} Knee Flexion`,   'far/occluded leg (lateral view) — screening-grade');
-      mark(`${sideWord} Ankle Dorsiflexion`, 'far/occluded leg (lateral view) — screening-grade');
-      // Frontal metrics: only gate when there is NO posterior/front view to measure them properly.
-      if(!hasFrontalSecondary){
-        mark(`${sideWord} Hip Adduction`, 'far/occluded leg, no frontal view — screening-grade');
-        mark(`${sideWord} Knee Valgus`,   'far/occluded leg, no frontal view — screening-grade');
-        mark(`${sideWord} Pronation`,     'far/occluded leg, no frontal view — screening-grade');
-      }
+      const kIdx = far==='L' ? 25 : 26;         // knee landmark
+      const aIdx = far==='L' ? 27 : 28;         // ankle landmark
+      const hIdx = far==='L' ? 29 : 30;         // heel landmark
+      farKneeDis = fd[kIdx] || 0;
+      farAnkDis  = Math.max(fd[aIdx]||0, fd[hIdx]||0);
+      const badQ = (key, dis) => {
+        const a = aggregated[key]; if(!a) return;
+        const hr = (a.hitRate!=null) ? a.hitRate : 100;
+        if(dis > DIS_TH || hr < HIT_TH){
+          mark(key, `far-leg tracking poor — pose models disagreed ${Math.round(dis*100)}% and value seen in ${hr}% of frames (mid-swing/stance occlusion)`);
+        }
+      };
+      badQ(`${sideWord} Knee Flexion`,       farKneeDis);
+      badQ(`${sideWord} Ankle Dorsiflexion`, farAnkDis);
     }
 
-    try { console.log(`[FarSide] near=${near||'?'} far=${far||'?'} frontalSecondary=${hasFrontalSecondary} | tape ankle L${la}/R${ra} heel L${lh}/R${rh} -> gated: `+
+    try { console.log(`[FarSide] near=${near||'?'} far=${far||'?'} | far-knee disagree=${farKneeDis!=null?Math.round(farKneeDis*100)+'%':'n/a'} far-ankle disagree=${farAnkDis!=null?Math.round(farAnkDis*100)+'%':'n/a'} (gate>${Math.round(DIS_TH*100)}% or hit<${HIT_TH}%) | tape ankle L${la}/R${ra} heel L${lh}/R${rh} -> gated: `+
       (['Left Knee Flexion','Right Knee Flexion','Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
-        'Left Hip Adduction','Right Hip Adduction','Left Knee Valgus','Right Knee Valgus','Left Pronation','Right Pronation']
+        'Left Pronation','Right Pronation']
         .filter(k=>aggregated[k]&&aggregated[k].lowConfidence).join(', ') || 'none')); } catch(e){}
   })();
 
