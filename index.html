@@ -6602,14 +6602,17 @@ function extractAngles(lm, view='side', movement='') {
   const lHeelLM=vHigh(29), lToeLM=vMed(31);
   const rHeelLM=vHigh(30), rToeLM=vMed(32);
 
-  // Choose distal: prefer heel (more stable in stance); fall back to toe
-  // Heel must be at or below the ankle Y (y increases downward) — guards against
-  // MediaPipe placing the heel landmark above the ankle in fast frames
+  // Choose distal landmark for the ankle DF angle (knee → ankle → distal).
+  // v0.16.0 — prefer the TOE (foot index), not the heel. The heel sits roughly directly
+  // BELOW the ankle, nearly collinear with the shank, so knee→ankle→heel is geometrically
+  // degenerate and pins near ~90° regardless of true dorsiflexion. The [AnkleDF] diagnostic
+  // confirmed this: heel-based read 43–86° (nonsense, clamped out) while toe-based read a
+  // physiological 6–46° with negatives in push-off on the same frames. The toe captures the
+  // foot's forward axis, which is what DF is actually measured against.
+  // The heel is NOT used as a fallback: a degenerate heel value could occasionally land
+  // in-range and be reported as a real DF. If the toe is unavailable we suppress that frame
+  // (the dense pass supplies plenty of toe-tracked stance frames; the far leg is gated anyway).
   const pickDistal = (ankleLM, heelLM, toeLM) => {
-    if(heelLM && ankleLM) {
-      const heelBelowAnkle = heelLM.y >= ankleLM.y - 0.04; // allow small noise
-      if(heelBelowAnkle) return {lm: heelLM, src:'heel'};
-    }
     if(toeLM) return {lm: toeLM, src:'toe'};
     return null;
   };
