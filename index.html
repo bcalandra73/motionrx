@@ -3849,6 +3849,17 @@ async function startFrameExtraction2(file, vid) {
     }
     if(frames.length > 0) {
       extractedFrames2 = frames;
+      // v0.16.0: publish the secondary phase-matched TIMES chosen here (which include
+      // Option 2's independent posterior detection) so Stage 3b re-extraction reuses them
+      // instead of recomputing at the naive fraction×duration — otherwise Stage 3b would
+      // overwrite Option 2's good frames on every analysis. Store absolute seconds + the
+      // clip duration they were computed against.
+      try {
+        window._secPhaseTimes = times.slice();
+        window._secPhaseDur   = dur;
+        console.log('[FrameExtract2] Published secondary phase times for Stage 3b reuse: ['
+          + times.map(t=>t.toFixed(2)).join(', ') + ']s (dur=' + dur.toFixed(2) + 's)');
+      } catch(e){ window._secPhaseTimes = null; }
       barFill.style.width = '100%';
       statusText.textContent = `✓ ${frames.length} frames (${
         cameraView2 === 'posterior' ? 'posterior' : cameraView2 === 'front' ? 'front' : 'side'
@@ -12205,15 +12216,25 @@ async function runAnalysis() {
         const dur2 = isFinite(tmpVid.duration) && tmpVid.duration > 0 ? tmpVid.duration : null;
         if(dur2) {
           const phSel = window_primaryPhaseSelection;
+          // v0.16.0: prefer the Option-2 phase-matched TIMES published by doExtract2 (which
+          // detected a real posterior stride) over the naive fraction×duration, which grabs
+          // an unrelated stride and is the cause of the posterior-vs-lateral mismatch. Reuse
+          // only when the stored times match this clip (same duration, same phase count).
+          const _optTimes = (window._secPhaseTimes && window._secPhaseDur
+            && Math.abs(window._secPhaseDur - dur2) < 0.25
+            && window._secPhaseTimes.length === phSel.fractions.length)
+            ? window._secPhaseTimes : null;
           const newFrames = [];
           for(let i = 0; i < phSel.fractions.length; i++) {
-            const t = Math.max(0.05, Math.min(phSel.fractions[i] * dur2, dur2 - 0.05));
+            const t = _optTimes
+              ? Math.max(0.05, Math.min(_optTimes[i], dur2 - 0.05))
+              : Math.max(0.05, Math.min(phSel.fractions[i] * dur2, dur2 - 0.05));
             const b64 = await seekCapture2(tmpVid, t);
             if(b64) newFrames.push({imageData: b64, phase: phSel.labels[i]});
           }
           if(newFrames.length >= 4) {
             extractedFrames2 = newFrames;
-            console.log(`[Analysis] Stage 3b: Re-extracted ${newFrames.length} phase-aligned frames from view2 (dur=${dur2.toFixed(2)}s)`);
+            console.log(`[Analysis] Stage 3b: Re-extracted ${newFrames.length} frames from view2 (dur=${dur2.toFixed(2)}s) — timing=${_optTimes ? 'Option 2 stride-matched' : 'naive fraction×duration (Option 2 times unavailable)'}`);
           }
         }
         URL.revokeObjectURL(objUrl);
