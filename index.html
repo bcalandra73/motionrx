@@ -1594,6 +1594,7 @@ function startFrameExtraction(file, vid) {
   window._tapeRefinedIdx = new Set(); // v0.15.0: which landmark indices were tape-refined (per-metric provenance)
   window._tapeRefinedCounts = {}; // v0.15.0: per-landmark tape-detection counts (near vs far foot reliability)
   window._ankleDfLogN = 0; // v0.16.0: rate-limit the [AnkleDF] raw-vs-corrected diagnostic to ~10 lines/run
+  window._secPhaseMatch = null; // v0.16.0: posterior phase-detection confidence for this run (drives manual-anchor prompt)
   window._interpGapFrames = 0; // v0.15.0: lower-body frames in uninterpolable gaps
   window._primaryCorrectionsMade   = false; // reset each run — set true if PT edits primary landmarks
   window._secondaryCorrectionsMade = false; // reset each run — set true if PT edits secondary landmarks
@@ -3593,20 +3594,19 @@ async function startFrameExtraction2(file, vid) {
       // completely wrong frames. Instead, scan the secondary video independently
       // to find its own best-matching frame for each phase.
       //
-      // EXCEPTION: if saved landmark corrections exist for this video key, skip
-      // Option 2 and use absolute-time conversion to preserve correction validity.
-      // Corrections store landmark positions tied to specific frame timestamps —
-      // if Option 2 picks different timestamps, those positions become invalid.
+      // v0.16.0: Independent phase detection ALWAYS runs for gait. It previously
+      // self-disabled whenever saved secondary corrections existed (to protect
+      // timestamp-tied landmark edits) — but that meant a one-time posterior edit
+      // permanently reverted every later run to the naive "fraction × duration"
+      // timing, which grabs an unrelated stride in the posterior clip and is the
+      // cause of the posterior-vs-lateral mismatch. Option 2 is deterministic on a
+      // given clip, so once corrections are re-made on Option-2 timestamps they
+      // persist; any stale corrections simply drop out via the ±60ms timestamp
+      // matcher in the corrections loader. Net: correct phase-matching wins.
       const _primVidDur = window._primaryVidEl?.duration;
       const _isGaitMvt = /running|gait|walk/i.test(movement);
-      const _existingCorr = _corrLoad(window._currentCorrKey);
-      const _hasSavedSecCorr = _existingCorr?.sec && (_existingCorr.sEd || []).some(Boolean);
 
-      // v0.13.4: Always use independent phase detection for gait movements.
-      // Dual-view videos are almost always recorded independently (async cameras),
-      // so applying the primary's phase fractions to the secondary is unreliable
-      // even when durations are similar. Synced-camera support can be added later.
-      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && _isGaitMvt && !_hasSavedSecCorr) {
+      if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && _isGaitMvt) {
         // Independent secondary analysis — find the best frame for each phase
         // by scanning 32 uniformly-spaced frames and scoring biomechanically.
         console.log(`[FrameExtract2] Option 2: independent secondary phase detection (${dur.toFixed(1)}s clip)`);
@@ -3755,7 +3755,14 @@ async function startFrameExtraction2(file, vid) {
                   _used2.add(closestI);
                 }
               });
-              console.log(`[FrameExtract2] Secondary stride-matched: cycle ${(_bestCycleStart*100).toFixed(0)}%–${(_bestCycleEnd*100).toFixed(0)}% (${(_secStrideDur*dur*1000).toFixed(0)}ms, target ${(_targetStrideDur*1000).toFixed(0)}ms)`);
+              // Confidence: how close the detected posterior stride is to the primary's
+              // stride duration. A clean match (within ~20%) = high confidence.
+              try {
+                const _durErr = Math.abs(_secStrideDur*dur - _targetStrideDur) / (_targetStrideDur||1);
+                window._secPhaseMatch = { mode:'stride-matched', confidence: _durErr <= 0.20 ? 'high' : 'medium',
+                  cycleStartFrac:_bestCycleStart, cycleEndFrac:_bestCycleEnd, durErrPct: Math.round(_durErr*100) };
+              } catch(_e){ window._secPhaseMatch = { mode:'stride-matched', confidence:'medium' }; }
+              console.log(`[FrameExtract2] Secondary stride-matched: cycle ${(_bestCycleStart*100).toFixed(0)}%–${(_bestCycleEnd*100).toFixed(0)}% (${(_secStrideDur*dur*1000).toFixed(0)}ms, target ${(_targetStrideDur*1000).toFixed(0)}ms) | confidence=${window._secPhaseMatch.confidence}`);
             } else {
               // Fallback: adaptive percentile-based scoring (better than fixed thresholds)
               const _stanceThresh = _yMed2 + _yRange2 * 0.15;
@@ -3780,7 +3787,8 @@ async function startFrameExtraction2(file, vid) {
                 });
                 if(bestI >= 0 && best >= 0) { _vizFracs2[phId] = bestT; _used2.add(bestI); }
               });
-              console.log('[FrameExtract2] Secondary fallback: adaptive percentile scoring (no stride cycle found)');
+              window._secPhaseMatch = { mode:'percentile-fallback', confidence:'low' };
+              console.log('[FrameExtract2] Secondary fallback: adaptive percentile scoring (no stride cycle found) | confidence=low — manual anchor recommended');
             }
             // Build times array using secondary vizFracs (fall back to primary conversion)
             times = primarySel.labels.map((lbl, i) => {
@@ -3799,9 +3807,11 @@ async function startFrameExtraction2(file, vid) {
               const absTime = frac * _primVidDur;
               return Math.max(0.05, Math.min(dur - 0.05, absTime));
             });
-            console.log('[FrameExtract2] Secondary scan insufficient — using absolute time conversion');
+            window._secPhaseMatch = { mode:'absolute-fallback', confidence:'low' };
+            console.log('[FrameExtract2] Secondary scan insufficient — using absolute time conversion | confidence=low — manual anchor recommended');
           }
         } catch(_secErr) {
+          window._secPhaseMatch = { mode:'error-fallback', confidence:'low' };
           console.warn('[FrameExtract2] Secondary phase detection failed:', _secErr.message);
           // Fallback to absolute time conversion
           times = _displayFracs.map(frac => {
@@ -3809,15 +3819,6 @@ async function startFrameExtraction2(file, vid) {
             return Math.max(0.05, Math.min(dur - 0.05, absTime));
           });
         }
-      } else if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && _isGaitMvt && _hasSavedSecCorr) {
-        // Saved secondary corrections exist — use absolute time conversion to preserve them.
-        // Option 2 (independent phase detection) would pick different timestamps and
-        // invalidate the saved landmark positions. Clear corrections first to enable Option 2.
-        times = _displayFracs.map(frac => {
-          const absTime = frac * _primVidDur;
-          return Math.max(0.05, Math.min(dur - 0.05, absTime));
-        });
-        console.log('[FrameExtract2] Saved secondary corrections found — preserving timestamps (clear corrections to enable Option 2)');
       } else if(_primVidDur && isFinite(_primVidDur) && _primVidDur > 0 && Math.abs(_primVidDur - dur) > 0.5) {
         // Non-gait movement with duration mismatch — absolute time conversion
         times = _displayFracs.map(frac => {
@@ -12984,7 +12985,13 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         const _posteriorPhases = new Set(['contact','midstance','toeoff','midswing']);
         const v2Frames = _isRunningPosterior
           ? annotatedFrames2.map((f, i) => {
-              const phaseId = extractedFrames2[i]?.phase?.id || extractedFrames2[i]?.phase?._baseId || '';
+              // v0.16.0: read the phase from the FRAME ITSELF, not the parallel extractedFrames2
+              // array. If a posterior phase frame failed extraction the two arrays differ in
+              // length and a parallel [i] lookup shifts every phase after the gap, keeping the
+              // wrong thumbnails (the contact/propulsion/early-swing bug). Each annotatedFrames2
+              // frame already carries its own .phase, so use that and fall back only if absent.
+              const ph = f?.phase || extractedFrames2[i]?.phase;
+              const phaseId = ph?.id || ph?._baseId || '';
               return _posteriorPhases.has(phaseId) ? f : null;
             })
           : annotatedFrames2; // all other movements: show every phase
