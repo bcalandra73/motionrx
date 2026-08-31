@@ -14629,7 +14629,10 @@ function _mountPosteriorAnchorPanel(galleryEl) {
 }
 
 async function applyPosteriorAnchor(anchorSec) {
-  if(!isFinite(anchorSec)) { alert('Set a heel-strike point first (scrub the clip, then "Set heel-strike here").'); return; }
+  // NB: isFinite(null) === true (null coerces to 0), so guard for null/non-number explicitly.
+  if(anchorSec == null || typeof anchorSec !== 'number' || !isFinite(anchorSec)) {
+    alert('Set a heel-strike point first: scrub the posterior clip to a heel strike, then click "📍 Set heel-strike here".'); return;
+  }
   const vid = window._secAnchorVid;
   const dur = (vid && isFinite(vid.duration) && vid.duration > 0) ? vid.duration
             : (window._secondaryVidEl && window._secondaryVidEl.duration) || null;
