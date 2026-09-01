@@ -11886,6 +11886,37 @@ async function runAnalysis() {
     // ── Optional Landmark Review & Correction ────────────────────────────────
     if(document.getElementById('enableLandmarkReview')?.checked && annotatedFrames.length > 0) {
       const _hasDual = hasDualView; // now safely accessible
+
+      // Compute video identity key for landmark corrections persistence
+      // Use _primaryVidEl.duration since 'dur' is not in scope here
+      const _corrDur = window._primaryVidEl?.duration;
+      window._currentCorrKey = _corrVideoKey(uploadedFile,
+        (_corrDur && isFinite(_corrDur) && _corrDur > 0) ? _corrDur : null);
+
+      // v0.16.0: restore a saved posterior heel-strike anchor for THIS clip.
+      try {
+        const _aVal = parseFloat(localStorage.getItem('mrx_secAnchor_' + window._currentCorrKey));
+        if(isFinite(_aVal)) {
+          window._secManualAnchorSec = _aVal;
+          window._secManualAnchorActive = true;
+        } else {
+          window._secManualAnchorSec = undefined;
+          window._secManualAnchorActive = false;
+        }
+      } catch(e){}
+
+      // v0.16.0: PRE-REVIEW posterior anchor step. Sync the posterior view to a stride BEFORE
+      // marking, so the review shows correctly-timed posterior frames and each frame is marked
+      // only once (no second report generation). First time on a clip it shows a scrubber with
+      // slow-mo + frame-step; if an anchor is already saved it re-applies silently. It
+      // re-extracts extractedFrames2 in place, so the secondary skeleton pass below runs on the
+      // anchored frames.
+      if(_hasDual && /running|gait|walk/i.test(movement)
+         && (cameraView2 === 'posterior' || cameraView2 === 'front')) {
+        try { await showPosteriorAnchorStep(); }
+        catch(_pae){ console.warn('[PosteriorAnchor] pre-review step failed:', _pae.message); }
+      }
+
       // ── Secondary skeleton pass for review panel ───────────────────────────
       // Run a lightweight MP pass on the secondary video frames so the PT can
       // see and correct landmarks on those frames too. This is especially important
@@ -11907,31 +11938,6 @@ async function runAnalysis() {
           _sec2Lms = null; _sec2Ann = null;
         }
       }
-
-      // Compute video identity key for landmark corrections persistence
-      // Use _primaryVidEl.duration since 'dur' is not in scope here
-      const _corrDur = window._primaryVidEl?.duration;
-      window._currentCorrKey = _corrVideoKey(uploadedFile,
-        (_corrDur && isFinite(_corrDur) && _corrDur > 0) ? _corrDur : null);
-
-      // v0.16.0: restore a saved posterior heel-strike anchor for THIS clip (persists across
-      // runs/reloads). Recompute the 8 phase times so Stage 3b uses the anchored stride.
-      try {
-        const _aVal = parseFloat(localStorage.getItem('mrx_secAnchor_' + window._currentCorrKey));
-        if(isFinite(_aVal)) {
-          window._secManualAnchorSec = _aVal;
-          window._secManualAnchorActive = true;
-          const _sd = window._secondaryVidEl?.duration;
-          if(_sd && isFinite(_sd)) {
-            const _t = _recomputeSecPhaseTimes(_aVal, _sd);
-            if(_t) { window._secPhaseTimes = _t; window._secPhaseDur = _sd; }
-          }
-          console.log('[PosteriorAnchor] Restored saved heel-strike anchor ' + _aVal.toFixed(2) + 's for this clip');
-        } else {
-          window._secManualAnchorSec = undefined;
-          window._secManualAnchorActive = false;
-        }
-      } catch(e){}
 
       const corrResult = await showLandmarkReviewPanel(
         extractedFrames, refinedLandmarks, annotatedFrames, fusedResults,
@@ -12225,9 +12231,12 @@ async function runAnalysis() {
     // ── Re-extract secondary video at phase-aligned positions ───────────────
     // Skip if PT made manual landmark corrections in the review panel —
     // re-extracting would discard the corrected annotatedFrames2.
-    // v0.16.0: a MANUAL ANCHOR overrides the skip — the anchor deliberately re-times the
-    // posterior frames, so the old-frame corrections are stale and must be re-extracted past.
-    const _skipStage3b = window._secondaryCorrectionsMade === true && window._secManualAnchorActive !== true;
+    // v0.16.0: a MANUAL ANCHOR forces a ONE-TIME re-extraction on the run it is applied
+    // (_secAnchorJustApplied), because the anchor deliberately re-times the posterior frames
+    // and the old-frame corrections are stale. On SUBSEQUENT runs the flag is false, so the
+    // normal skip applies and posterior corrections made on the anchored frames PERSIST.
+    const _skipStage3b = window._secondaryCorrectionsMade === true && window._secAnchorJustApplied !== true;
+    window._secAnchorJustApplied = false; // consume the one-time flag
     if(!_skipStage3b && window_primaryPhaseSelection && uploadedFile2) {
       try {
         const tmpVid = document.createElement('video');
@@ -13159,7 +13168,8 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           group.appendChild(viewsRow);
           gallery.appendChild(group);
         }
-        try { _mountPosteriorAnchorPanel(gallery); } catch(e){ console.warn('[PosteriorAnchor] mount failed:', e.message); }
+        /* v0.16.0: posterior anchor is now a PRE-REVIEW step (before marking); the in-report
+           panel was removed to keep the report uncluttered. */
       } else {
         // ── Single-view grid layout ──
         gallery.classList.remove('dual-view');
@@ -14661,16 +14671,25 @@ async function applyPosteriorAnchor(anchorSec) {
   window._secPhaseDur         = dur;
   window._secManualAnchorSec  = effAnchor;
   window._secManualAnchorActive = true;
+  window._secAnchorJustApplied = true;  // force a ONE-TIME posterior re-extraction this run
   window._secPhaseMatch = { mode:'manual-anchor', confidence:'manual', anchorSec: effAnchor };
   try { localStorage.setItem(_secAnchorKey(), String(effAnchor)); } catch(e){}
   console.log('[PosteriorAnchor] Applied REF-leg contact ' + effAnchor.toFixed(2) + 's → phase times ['
     + times.map(t=>t.toFixed(2)).join(', ') + ']s');
 
-  // Clear stale posterior landmark corrections (they were on mis-timed frames) so Stage 3b
-  // re-extracts instead of preserving old frames.
+  // Clear ONLY the posterior (secondary) landmark corrections — they were made on mis-timed
+  // frames and are now stale. PRESERVE the lateral (primary) corrections: the anchor never
+  // moves the lateral frames, so the PT must not have to re-mark them.
   try {
     const key = window._currentCorrKey;
-    if(key) localStorage.removeItem(CORRECTIONS_PREFIX + key);
+    if(key) {
+      const raw = localStorage.getItem(CORRECTIONS_PREFIX + key);
+      if(raw) {
+        const obj = JSON.parse(raw);
+        obj.sec = null; obj.sEd = []; obj.sTimes = null; obj.sPhases = null;
+        localStorage.setItem(CORRECTIONS_PREFIX + key, JSON.stringify(obj));
+      }
+    }
     if(_rvEdited2) _rvEdited2.fill(false);
     window._secondaryCorrectionsMade = false;
   } catch(e){}
@@ -14678,6 +14697,147 @@ async function applyPosteriorAnchor(anchorSec) {
   // Re-run the full analysis (re-opens the quick review, then regenerates the report with
   // the posterior frames re-timed to the anchored stride).
   if(typeof runAnalysis === 'function') { runAnalysis(); }
+}
+
+// Re-extract the 8 posterior frames IN PLACE at the anchored stride (shared by the
+// pre-review step and silent re-apply). effAnchor is the REF-leg contact time (seconds).
+async function _reextractPosteriorAtAnchor(effAnchor) {
+  if(!uploadedFile2 || !isFinite(effAnchor) || !window_primaryPhaseSelection) return false;
+  const tmp = document.createElement('video');
+  tmp.muted = true; tmp.preload = 'auto';
+  const url = URL.createObjectURL(uploadedFile2); tmp.src = url;
+  await new Promise(r => { tmp.oncanplay = r; tmp.oncanplaythrough = r; tmp.onloadeddata = r; tmp.onerror = r; setTimeout(r, 8000); });
+  const dur = (isFinite(tmp.duration) && tmp.duration > 0) ? tmp.duration : null;
+  let ok = false;
+  if(dur) {
+    const times = _recomputeSecPhaseTimes(effAnchor, dur);
+    if(times) {
+      const labels = (window_primaryPhaseSelection.labels) || [];
+      const nf = [];
+      for(let i = 0; i < times.length; i++) {
+        const b = await seekCapture2(tmp, Math.max(0.05, Math.min(dur - 0.05, times[i])));
+        if(b) nf.push({ imageData: b, phase: labels[i] });
+      }
+      if(nf.length >= 4) { extractedFrames2 = nf; ok = true; }
+      window._secPhaseTimes = times; window._secPhaseDur = dur;
+      window._secManualAnchorSec = effAnchor; window._secManualAnchorActive = true;
+      window._secPhaseMatch = { mode:'manual-anchor', confidence:'manual', anchorSec: effAnchor };
+      try { localStorage.setItem(_secAnchorKey(), String(effAnchor)); } catch(e){}
+      // Preserve the lateral (primary) corrections; clear only the posterior (secondary) ones.
+      try {
+        const key = window._currentCorrKey;
+        if(key) {
+          const raw = localStorage.getItem(CORRECTIONS_PREFIX + key);
+          if(raw) { const o = JSON.parse(raw); o.sec = null; o.sEd = []; o.sTimes = null; o.sPhases = null; localStorage.setItem(CORRECTIONS_PREFIX + key, JSON.stringify(o)); }
+        }
+        if(_rvEdited2) _rvEdited2.fill(false);
+        window._secondaryCorrectionsMade = false;
+      } catch(e){}
+      console.log('[PosteriorAnchor] Re-extracted ' + nf.length + ' posterior frames at anchor ' + effAnchor.toFixed(2) + 's → [' + times.map(t=>t.toFixed(2)).join(', ') + ']s');
+    }
+  }
+  try { URL.revokeObjectURL(url); } catch(e){}
+  return ok;
+}
+
+// Pre-review posterior anchor step. Resolves once the posterior frames are synced (or skipped).
+function showPosteriorAnchorStep() {
+  return new Promise((resolve) => {
+    try {
+      if(!uploadedFile2 || !window_primaryPhaseSelection) { resolve(); return; }
+      const storedRaw = parseFloat(localStorage.getItem(_secAnchorKey()));
+      // A saved anchor exists → re-apply silently (no modal); first-time only shows the scrubber.
+      if(isFinite(storedRaw)) { _reextractPosteriorAtAnchor(storedRaw).then(() => resolve()); return; }
+
+      const refSide = (window_strideMetrics && window_strideMetrics.refSide) || 'L';
+      const refWord = refSide === 'R' ? 'Right' : 'Left';
+      let markedFoot = refSide;
+      let pendingAnchor = null;
+
+      const ov = document.createElement('div');
+      ov.id = 'posteriorAnchorStep';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:16px;';
+      const box = document.createElement('div');
+      box.style.cssText = 'background:#fff;color:#111;max-width:540px;width:100%;border-radius:14px;padding:18px 20px;max-height:94vh;overflow:auto;box-shadow:0 12px 44px rgba(0,0,0,.45);font-size:.9rem;';
+      const head = document.createElement('div');
+      head.innerHTML = '<div style="font-size:1.05rem;font-weight:700;margin-bottom:6px;">Sync the posterior view (before marking)</div>'
+        + '<div style="color:#666;margin-bottom:10px;line-height:1.45;">Scrub the posterior clip to a frame where a foot <strong>first contacts the ground (heel strike)</strong>, choose which foot, then set it. Doing this first means the posterior frames already line up with the side view — so you mark landmarks only once. Phases are labeled for the <strong>' + refWord + '</strong> leg.</div>';
+      box.appendChild(head);
+
+      const vid = document.createElement('video');
+      vid.controls = true; vid.muted = true; vid.playsInline = true; vid.preload = 'auto';
+      vid.style.cssText = 'width:100%;max-width:420px;border-radius:8px;background:#000;display:block;margin:0 auto;';
+      const objUrl = URL.createObjectURL(uploadedFile2); vid.src = objUrl;
+      box.appendChild(vid);
+
+      const mkBtn = (label, title, fn) => { const b = document.createElement('button'); b.textContent = label; if(title) b.title = title; b.style.cssText = 'padding:5px 9px;border:1px solid #ccc;background:#f6f6f6;border-radius:6px;cursor:pointer;font-size:.8rem;'; b.onclick = fn; return b; };
+      const stepBy = (d) => { try { vid.pause(); vid.currentTime = Math.max(0, Math.min((vid.duration||0) - 0.001, vid.currentTime + d)); } catch(e){} };
+      // Single-frame nudge uses the capture fps (default 120, matching high-speed slo-mo clips).
+      const _fps = parseInt(document.getElementById('videoFps')?.value) || 120;
+      const _fr = 1 / _fps;
+      const ctr = document.createElement('div');
+      ctr.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;margin:8px 0;';
+      ctr.appendChild(document.createTextNode('Speed:'));
+      [['1×',1],['½×',0.5],['¼×',0.25]].forEach(a => ctr.appendChild(mkBtn(a[0], 'Play at ' + a[0], () => { vid.playbackRate = a[1]; })));
+      ctr.appendChild(document.createTextNode('  Step (' + _fps + 'fps):'));
+      ctr.appendChild(mkBtn('«','back 0.1s', () => stepBy(-0.1)));
+      ctr.appendChild(mkBtn('‹5','back 5 frames', () => stepBy(-5*_fr)));
+      ctr.appendChild(mkBtn('‹','back one frame', () => stepBy(-_fr)));
+      ctr.appendChild(mkBtn('›','forward one frame', () => stepBy(_fr)));
+      ctr.appendChild(mkBtn('5›','forward 5 frames', () => stepBy(5*_fr)));
+      ctr.appendChild(mkBtn('»','forward 0.1s', () => stepBy(0.1)));
+      box.appendChild(ctr);
+
+      const readout = document.createElement('div');
+      readout.style.cssText = 'margin:6px 0;font-variant-numeric:tabular-nums;text-align:center;';
+      const updReadout = () => { readout.textContent = 'Current: ' + (vid.currentTime||0).toFixed(2) + 's   ·   Heel-strike anchor: ' + (pendingAnchor != null ? pendingAnchor.toFixed(2) + 's' : 'not set'); };
+      vid.addEventListener('timeupdate', updReadout); updReadout();
+      box.appendChild(readout);
+
+      const footRow = document.createElement('div');
+      footRow.style.cssText = 'display:flex;gap:12px;align-items:center;justify-content:center;margin:6px 0;';
+      footRow.appendChild(document.createTextNode('Foot at heel strike:'));
+      ['Left','Right'].forEach(side => {
+        const lbl = document.createElement('label'); lbl.style.cssText = 'display:inline-flex;gap:4px;align-items:center;cursor:pointer;';
+        const rb = document.createElement('input'); rb.type = 'radio'; rb.name = 'secAnchorStepFoot'; rb.value = side[0]; if(side[0] === refSide) rb.checked = true;
+        rb.onchange = () => { markedFoot = side[0]; };
+        lbl.appendChild(rb); lbl.appendChild(document.createTextNode(side + (side[0] === refSide ? ' (matches report)' : ''))); footRow.appendChild(lbl);
+      });
+      box.appendChild(footRow);
+
+      const setRow = document.createElement('div'); setRow.style.cssText = 'display:flex;justify-content:center;margin:8px 0;';
+      const setBtn = document.createElement('button'); setBtn.textContent = '📍 Set heel-strike here';
+      setBtn.style.cssText = 'padding:7px 12px;border:1px solid #0a7;background:#eafaf3;border-radius:8px;cursor:pointer;font-weight:600;';
+      setBtn.onclick = () => { pendingAnchor = vid.currentTime; updReadout(); };
+      setRow.appendChild(setBtn); box.appendChild(setRow);
+
+      const actRow = document.createElement('div'); actRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px;';
+      const skipBtn = mkBtn('Skip (automatic)', 'Use automatic posterior timing', () => finish(false));
+      const contBtn = document.createElement('button'); contBtn.textContent = 'Apply & continue →';
+      contBtn.style.cssText = 'padding:8px 14px;border:none;background:#0a7;color:#fff;border-radius:8px;cursor:pointer;font-weight:700;';
+      contBtn.onclick = () => finish(true);
+      actRow.appendChild(skipBtn); actRow.appendChild(contBtn);
+      box.appendChild(actRow);
+
+      function finish(applyAnchor) {
+        const done = () => { try { vid.pause(); URL.revokeObjectURL(objUrl); } catch(e){} ov.remove(); resolve(); };
+        if(applyAnchor && pendingAnchor != null && isFinite(pendingAnchor)) {
+          const strideDur = (window_strideMetrics && window_strideMetrics.strideDurationS) || 0.67;
+          const d = vid.duration || 9999;
+          let eff = pendingAnchor;
+          if(markedFoot !== refSide) {
+            eff = pendingAnchor - 0.5 * strideDur;
+            if(eff < 0.05) eff = pendingAnchor + 0.5 * strideDur;
+            if(eff > d - 0.05) eff = pendingAnchor - 0.5 * strideDur;
+          }
+          contBtn.textContent = 'Working…'; contBtn.disabled = true; skipBtn.disabled = true;
+          _reextractPosteriorAtAnchor(eff).then(done);
+        } else { done(); }
+      }
+
+      ov.appendChild(box); document.body.appendChild(ov);
+    } catch(err) { console.warn('[PosteriorAnchor] step error:', err.message); resolve(); }
+  });
 }
 
 // ── Session Comparison ──────────────────────────────────────────────────────
