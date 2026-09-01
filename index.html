@@ -14746,13 +14746,14 @@ function showPosteriorAnchorStep() {
     try {
       if(!uploadedFile2 || !window_primaryPhaseSelection) { resolve(); return; }
       const storedRaw = parseFloat(localStorage.getItem(_secAnchorKey()));
-      // A saved anchor exists → re-apply silently (no modal); first-time only shows the scrubber.
-      if(isFinite(storedRaw)) { _reextractPosteriorAtAnchor(storedRaw).then(() => resolve()); return; }
-
+      const hasSaved = isFinite(storedRaw);
       const refSide = (window_strideMetrics && window_strideMetrics.refSide) || 'L';
       const refWord = refSide === 'R' ? 'Right' : 'Left';
       let markedFoot = refSide;
-      let pendingAnchor = null;
+      // Pre-load the saved anchor. It is already REF-referenced (foot offset baked in), so
+      // it must NOT be offset again — anchorIsRaw stays false until the PT sets a NEW point.
+      let pendingAnchor = hasSaved ? storedRaw : null;
+      let anchorIsRaw = false;
 
       const ov = document.createElement('div');
       ov.id = 'posteriorAnchorStep';
@@ -14761,13 +14762,17 @@ function showPosteriorAnchorStep() {
       box.style.cssText = 'background:#fff;color:#111;max-width:540px;width:100%;border-radius:14px;padding:18px 20px;max-height:94vh;overflow:auto;box-shadow:0 12px 44px rgba(0,0,0,.45);font-size:.9rem;';
       const head = document.createElement('div');
       head.innerHTML = '<div style="font-size:1.05rem;font-weight:700;margin-bottom:6px;">Sync the posterior view (before marking)</div>'
-        + '<div style="color:#666;margin-bottom:10px;line-height:1.45;">Scrub the posterior clip to a frame where a foot <strong>first contacts the ground (heel strike)</strong>, choose which foot, then set it. Doing this first means the posterior frames already line up with the side view — so you mark landmarks only once. Phases are labeled for the <strong>' + refWord + '</strong> leg.</div>';
+        + '<div style="color:#666;margin-bottom:10px;line-height:1.45;">Scrub the posterior clip to a frame where a foot <strong>first contacts the ground (heel strike)</strong>, choose which foot, then set it. Doing this first means the posterior frames already line up with the side view — so you mark landmarks only once. Phases are labeled for the <strong>' + refWord + '</strong> leg.'
+        + (hasSaved ? ' <span style="color:#0a7;font-weight:600;">Saved anchor ' + storedRaw.toFixed(2) + 's loaded — click <em>Apply &amp; continue</em> to keep it, or re-scrub to adjust.</span>' : '')
+        + '</div>';
       box.appendChild(head);
 
       const vid = document.createElement('video');
       vid.controls = true; vid.muted = true; vid.playsInline = true; vid.preload = 'auto';
       vid.style.cssText = 'width:100%;max-width:420px;border-radius:8px;background:#000;display:block;margin:0 auto;';
       const objUrl = URL.createObjectURL(uploadedFile2); vid.src = objUrl;
+      // Seek to the saved anchor frame so the PT sees it immediately.
+      if(hasSaved) vid.addEventListener('loadedmetadata', () => { try { vid.currentTime = Math.min(storedRaw, (vid.duration||storedRaw)); } catch(e){} }, { once:true });
       box.appendChild(vid);
 
       const mkBtn = (label, title, fn) => { const b = document.createElement('button'); b.textContent = label; if(title) b.title = title; b.style.cssText = 'padding:5px 9px;border:1px solid #ccc;background:#f6f6f6;border-radius:6px;cursor:pointer;font-size:.8rem;'; b.onclick = fn; return b; };
@@ -14808,7 +14813,7 @@ function showPosteriorAnchorStep() {
       const setRow = document.createElement('div'); setRow.style.cssText = 'display:flex;justify-content:center;margin:8px 0;';
       const setBtn = document.createElement('button'); setBtn.textContent = '📍 Set heel-strike here';
       setBtn.style.cssText = 'padding:7px 12px;border:1px solid #0a7;background:#eafaf3;border-radius:8px;cursor:pointer;font-weight:600;';
-      setBtn.onclick = () => { pendingAnchor = vid.currentTime; updReadout(); };
+      setBtn.onclick = () => { pendingAnchor = vid.currentTime; anchorIsRaw = true; updReadout(); };
       setRow.appendChild(setBtn); box.appendChild(setRow);
 
       const actRow = document.createElement('div'); actRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px;';
@@ -14825,7 +14830,9 @@ function showPosteriorAnchorStep() {
           const strideDur = (window_strideMetrics && window_strideMetrics.strideDurationS) || 0.67;
           const d = vid.duration || 9999;
           let eff = pendingAnchor;
-          if(markedFoot !== refSide) {
+          // Only offset for the contralateral foot when this is a NEWLY set raw point — a
+          // pre-loaded saved anchor is already REF-referenced and must not be offset again.
+          if(anchorIsRaw && markedFoot !== refSide) {
             eff = pendingAnchor - 0.5 * strideDur;
             if(eff < 0.05) eff = pendingAnchor + 0.5 * strideDur;
             if(eff > d - 0.05) eff = pendingAnchor - 0.5 * strideDur;
