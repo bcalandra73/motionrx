@@ -2824,6 +2824,21 @@ function startFrameExtraction(file, vid) {
                     };
                     const _stPct = Math.round(_sDur / _strideDurFrac * 100);
                     console.log(`[Zeni2008] ✓ IC=${_icFrac.toFixed(3)} TO=${(_icFrac+_sDur).toFixed(3)} nextIC=${_nextIcFrac.toFixed(3)} stance=${_stPct}% (norm 38-45%)`);
+                    // v0.16.0 GCT/float reconciliation: the phase engine's stance (bounded to the
+                    // speed-band physiological range) is a more reliable single-support estimate
+                    // than the stride engine's raw toe-off detection, which under-detects on a
+                    // treadmill and inflates float (e.g. GCT 29% → float 42%, sprint-elite/implausible).
+                    // Patch the reported GCT/float to the phase-engine stance. float% (airborne
+                    // fraction of the cycle) = 100 − 2 × single-leg stance.
+                    window._zeniStancePct = _stPct;
+                    if(window_strideMetrics && _stPct >= 25 && _stPct <= 55) {
+                      const _ogc = window_strideMetrics.gcPct, _ofl = window_strideMetrics.floatPct;
+                      window_strideMetrics.gcPct   = _stPct;
+                      window_strideMetrics.floatPct = Math.max(0, 100 - 2 * _stPct);
+                      window_strideMetrics.hasFloat = window_strideMetrics.floatPct > 5;
+                      window_strideMetrics._gctReconciled = true;
+                      console.log(`[GCTReconcile] GCT ${_ogc}%→${_stPct}%, float ${_ofl}%→${window_strideMetrics.floatPct}% (phase-engine stance)`);
+                    }
                     console.log('[Zeni2008] Fractions: ' + Object.entries(_zF).map(([k,v])=>k.slice(0,4)+'='+v.toFixed(3)).join(' '));
                   }
                 }
@@ -2967,6 +2982,22 @@ function startFrameExtraction(file, vid) {
               console.log('  Zeni refined IC:', _zIcIdx, 'nextIC:', _zNextIcIdx,
                 '| raw knee@IC:', perFrame[_icIdx]?.[_refKneeKey]?.toFixed(0)+'°',
                 '→ refined knee@IC:', perFrame[_zIcIdx ?? _icIdx]?.[_refKneeKey]?.toFixed(0)+'°');
+              // v0.16.0: recover knee flexion at contact. The stride engine's per-stride IC
+              // detection lands slightly late (into loading), so its knee-at-contact reads >35°
+              // and is suppressed on nearly every clip. The phase engine's displacement-refined IC
+              // is far more accurate (Brian: 162° included = 18° flexion), so adopt its knee angle
+              // when the stride engine suppressed the value.
+              try {
+                const _kicIncl = perFrame[_zIcIdx ?? _icIdx]?.[_refKneeKey];
+                if(_kicIncl != null && isFinite(_kicIncl) && window_strideMetrics && window_strideMetrics.kneeFlexAtContact == null) {
+                  const _kicFlex = Math.round(180 - _kicIncl);
+                  if(_kicFlex >= 0 && _kicFlex <= 55) {
+                    window_strideMetrics.kneeFlexAtContact = _kicFlex;
+                    window_strideMetrics._kneeFlexContactSource = 'phase-engine-IC';
+                    console.log(`[KneeFlexContact] Recovered from phase-engine IC: ${_kicFlex}° (included ${Math.round(_kicIncl)}° at refined IC frame ${_zIcIdx ?? _icIdx})`);
+                  }
+                }
+              } catch(_kfcErr){}
               if(window_primaryPhaseSelection) {
                 const _phLabels = window_primaryPhaseSelection.labels.map(p=>p?.label||p?._baseId||'?');
                 const _phFracs  = window_primaryPhaseSelection.vizFractions || window_primaryPhaseSelection.fractions;
@@ -15333,7 +15364,10 @@ async function exportPDF() {
     {
       const plain = ([...document.querySelectorAll('.edu-text')].map(e=>e.textContent.trim()).filter(Boolean))[0] || '';
       if(plain) {
-        const shown = doc.splitTextToSize(plain, CW-12).slice(0,5);
+        // Set the BODY font BEFORE measuring — splitTextToSize wraps using the current font
+        // size, so measuring at a stale small size then drawing at 8.5pt overflows the box.
+        doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+        const shown = doc.splitTextToSize(_rkSanitize(plain), CW-12).slice(0,6);
         const boxH = shown.length*4.6 + 11;
         setFill(C.tealPale); setDraw(C.teal); doc.setLineWidth(0.3);
         doc.roundedRect(ML, y, CW, boxH, 2, 2, 'FD');
@@ -15963,7 +15997,8 @@ async function exportPDF() {
       eduItems.forEach(edu=>{
         const txt = edu.querySelector('.edu-text')?.textContent?.trim()||'';
         if(!txt) return;
-        const lines = doc.splitTextToSize(txt, CW-10);
+        doc.setFont('helvetica','normal'); doc.setFontSize(8.5); // measure at draw size
+        const lines = doc.splitTextToSize(_rkSanitize(txt), CW-10);
         const boxH  = lines.length*4.8+8;
         guard(boxH+3);
         setFill(C.tealPale); setDraw(C.teal); doc.setLineWidth(0.3);
