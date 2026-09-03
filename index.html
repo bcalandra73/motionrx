@@ -15367,7 +15367,7 @@ async function exportPDF() {
         // Set the BODY font BEFORE measuring — splitTextToSize wraps using the current font
         // size, so measuring at a stale small size then drawing at 8.5pt overflows the box.
         doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
-        const shown = doc.splitTextToSize(_rkSanitize(plain), CW-12).slice(0,6);
+        const shown = doc.splitTextToSize(_rkSanitize(plain), CW-16).slice(0,6); // CW-16 = ~10mm right cushion, safe across PDF viewers with wider Helvetica substitutes
         const boxH = shown.length*4.6 + 11;
         setFill(C.tealPale); setDraw(C.teal); doc.setLineWidth(0.3);
         doc.roundedRect(ML, y, CW, boxH, 2, 2, 'FD');
