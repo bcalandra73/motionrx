@@ -6949,10 +6949,17 @@ function extractAngles(lm, view='side', movement='') {
     }
   }
 
-  // Shoulder angles
+  // Shoulder angles (arm swing: fore-aft angle of the upper arm relative to the trunk)
   const lElbow=v(13),rElbow=v(14);
   if(lShoulder&&lElbow&&lHip) angles['Left Shoulder Flexion'] = calcAngle(lHip,lShoulder,lElbow);
   if(rShoulder&&rElbow&&rHip) angles['Right Shoulder Flexion'] = calcAngle(rHip,rShoulder,rElbow);
+
+  // Elbow angle (running efficiency marker): included angle at the elbow, shoulder→elbow→wrist.
+  // Efficient running elbow is held near ~90° (range 70–110°); very straight arms are a
+  // long-lever energy leak and very flexed arms signal upper-body tension. v0.16.0
+  const lWrist=v(15),rWrist=v(16);
+  if(lShoulder&&lElbow&&lWrist) angles['Left Elbow Flexion'] = calcAngle(lShoulder,lElbow,lWrist);
+  if(rShoulder&&rElbow&&rWrist) angles['Right Elbow Flexion'] = calcAngle(rShoulder,rElbow,rWrist);
 
   return angles;
 }
@@ -6968,6 +6975,11 @@ const REF_RANGES = {
   'Right Ankle Dorsiflexion': {ideal:[10,30], warn:5, label:'Normal: +10 to +30° from neutral'},
   'Left Shoulder Flexion':    {label:'Normal: 0-180°'},
   'Right Shoulder Flexion':   {label:'Normal: 0-180°'},
+  'Left Elbow Flexion':       {ideal:[70,110], warn:60, label:'Running elbow angle: ideal ~90° (70-110°)'},
+  'Right Elbow Flexion':      {ideal:[70,110], warn:60, label:'Running elbow angle: ideal ~90° (70-110°)'},
+  'Left Arm Swing':           {ideal:[25,55], warn:15, label:'Fore-aft arm drive ROM: efficient ~30-45°'},
+  'Right Arm Swing':          {ideal:[25,55], warn:15, label:'Fore-aft arm drive ROM: efficient ~30-45°'},
+  'Arm Cross-Midline':        {max:10, warn:20, label:'Hand-across-midline angle: <10° minimal, >20° notable (posterior view)'},
   'Left Knee Valgus':         {max:5, warn:10, label:'Dynamic valgus: <5° (frontal view)'},
   'Right Knee Valgus':        {max:5, warn:10, label:'Dynamic valgus: <5° (frontal view)'},
   'Pelvic Drop':              {max:5, warn:8,  label:'Contralateral pelvic drop: <5°'},
@@ -12341,6 +12353,7 @@ async function runAnalysis() {
     const s2b = document.getElementById('s2b');
     if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
     console.log('[Analysis] Stage 3b: Running second video pipeline — cameraView2=' + cameraView2);
+    window._armCrossMidlineDeg = null; window._armCrossMidlineN = null; // reset per run (recomputed from posterior pass below)
     // Small delay to let MediaPipe settle after primary run
     await new Promise(r => setTimeout(r, 200));
     if(mpReady && poseLandmarkerInstance) {  // use poseLandmarkerInstance (Heavy) not legacy poseInstance
@@ -12494,6 +12507,42 @@ async function runAnalysis() {
                 }
               });
               console.log('[DensePass3b] Secondary dense pass: ' + secCurves.length + ' frames, upgraded ' + sec_upgraded + ' metrics');
+
+              // ── Arm crossing midline (posterior view, v0.16.0) ──────────────────
+              // Efficient runners keep the hands lateral; a hand that swings PAST the body
+              // midline (to the opposite side of its own shoulder) drives torso counter-rotation
+              // and wastes energy. Measure, per frame and per wrist, the angle at the shoulder
+              // of the cross-past-midline excursion; report the 90th-percentile across frames.
+              try {
+                const crossVals = [];
+                secCurves.forEach(c => {
+                  const lm = c.landmarks; if(!lm) return;
+                  const lHip=lm[23], rHip=lm[24];
+                  if(!lHip || !rHip) return;
+                  const midX = (lHip.x + rHip.x) / 2;
+                  [[lm[11], lm[15]], [lm[12], lm[16]]].forEach(([sh, wr]) => {
+                    if(!sh || !wr) return;
+                    if(wr.visibility != null && wr.visibility < 0.5) return;
+                    if(sh.visibility != null && sh.visibility < 0.4) return;
+                    const shSide = Math.sign(sh.x - midX);
+                    if(shSide === 0) return;
+                    const off = wr.x - midX;
+                    if(Math.sign(off) === shSide) return; // wrist on same side as its shoulder — no cross
+                    const crossDist = Math.abs(off);
+                    const vert = Math.max(0.05, Math.abs(wr.y - sh.y));
+                    crossVals.push(Math.atan2(crossDist, vert) * 180/Math.PI);
+                  });
+                });
+                if(crossVals.length >= 3){
+                  const sorted = [...crossVals].sort((a,b)=>a-b);
+                  const p90 = sorted[Math.min(sorted.length-1, Math.floor(sorted.length*0.9))];
+                  window._armCrossMidlineDeg = Math.round(p90);
+                  window._armCrossMidlineN   = crossVals.length;
+                  console.log('[ArmCross] hand-across-midline angle p90='+Math.round(p90)+'° from '+crossVals.length+' wrist-frames');
+                } else {
+                  console.log('[ArmCross] insufficient crossing frames ('+crossVals.length+') — hands stayed lateral or wrists not tracked');
+                }
+              } catch(_acErr){ console.warn('[ArmCross] failed:', _acErr.message); }
               // v0.15.0 — recover pronation from dense posterior STANCE frames. computePronation
               // already stance-gates on ankle height and clamps implausible angles, so each value
               // is a clean calcaneal-eversion sample. Pooling these (typically 10-15 frames) gives a
@@ -12640,6 +12689,70 @@ async function runAnalysis() {
         .filter(k=>aggregated[k]&&aggregated[k].lowConfidence).join(', ') || 'none')); } catch(e){}
   })();
 
+  // ── v0.16.0 Far-leg occlusion RECOVERY (not just suppression) ─────────────────
+  // The far leg is hidden only briefly during leg crossover (mid-stance / mid-swing);
+  // at the phase ends it is clearly visible. Rather than leave a gated far-side metric
+  // blank, rebuild it from the frames where the far leg WAS clearly seen — pooled across
+  // ALL strides (best-visibility selection) — and adopt the value only when those clean
+  // samples are internally consistent (tight spread). If they are not, we keep the metric
+  // suppressed, so a recovered number is always one we can defend. Runs AFTER the gate so
+  // it only tries to rescue metrics the gate actually flagged.
+  (function _recoverFarLegOcclusion(){
+    try {
+      const near = (typeof window_strideMetrics!=='undefined' && window_strideMetrics && window_strideMetrics.cameraNearLeg) || null;
+      const far  = near==='L' ? 'R' : near==='R' ? 'L' : null;
+      if(!far) return;
+      const sideWord = far==='L' ? 'Left' : 'Right';
+      const frames = (typeof window!=='undefined' && window._denseAnglesFrames) || null;
+      if(!Array.isArray(frames) || frames.length < 20) return;
+      const cv = (typeof cameraView!=='undefined') ? cameraView : 'side';
+      const mv = (typeof movement!=='undefined') ? movement : 'Running';
+      const hipI=far==='L'?23:24, kneeI=far==='L'?25:26, ankI=far==='L'?27:28, toeI=far==='L'?31:32;
+      const VIS = 0.5;
+      const kneeVals=[], dfVals=[]; let kneeClean=0, dfClean=0, total=0;
+      frames.forEach(fr => {
+        const lm = fr.landmarks; if(!lm) return; total++;
+        const h=lm[hipI], k=lm[kneeI], a=lm[ankI], to=lm[toeI];
+        if(h&&k&&a && Math.min(h.visibility==null?1:h.visibility, k.visibility==null?1:k.visibility, a.visibility==null?1:a.visibility) >= VIS){
+          let ang; try { ang = extractAngles(lm, cv, mv); } catch(_e){ return; }
+          const kf = ang[`${sideWord} Knee Flexion`];       // stored as INCLUDED knee angle
+          if(kf!=null && isFinite(kf)){ kneeVals.push(kf); kneeClean++; }
+          const df = ang[`${sideWord} Ankle Dorsiflexion`];
+          if(df!=null && isFinite(df) && to && (to.visibility==null?1:to.visibility) >= VIS){ dfVals.push(df); dfClean++; }
+        }
+      });
+      const iqr = (s)=> s[Math.floor(s.length*0.75)] - s[Math.floor(s.length*0.25)];
+      // Knee: recover peak flexion (= smallest included angle) from clean samples.
+      const kkey = `${sideWord} Knee Flexion`, kcur = aggregated[kkey];
+      if(kcur && kcur.lowConfidence && kneeVals.length >= 8){
+        const s=[...kneeVals].sort((a,b)=>a-b);
+        const p10 = s[Math.floor(s.length*0.1)], spread = iqr(s);
+        if(spread < 25){
+          aggregated[kkey] = { ...kcur, min: Math.round(p10), avg: kcur.avg ?? Math.round(p10), max: kcur.max ?? Math.round(p10),
+            count: kneeVals.length, hitRate: Math.round(100*kneeClean/Math.max(1,total)),
+            lowConfidence:false, _recovered:true, lowConfReason: undefined };
+          console.log(`[FarLegRecover] ${kkey}: recovered peak flexion ${180-Math.round(p10)}° from ${kneeVals.length} clean far-knee frames (IQR ${Math.round(spread)}°) — gate cleared`);
+        } else {
+          console.log(`[FarLegRecover] ${kkey}: clean samples too scattered (IQR ${Math.round(spread)}°) — keeping gate`);
+        }
+      }
+      // Ankle DF: recover from clean far-toe frames when the value is tight & physiological.
+      const akey = `${sideWord} Ankle Dorsiflexion`, acur = aggregated[akey];
+      if(acur && acur.lowConfidence && dfVals.length >= 8){
+        const s=[...dfVals].sort((a,b)=>a-b);
+        const med = s[Math.floor(s.length/2)], spread = iqr(s);
+        if(spread < 18 && med >= -10 && med <= 35){
+          aggregated[akey] = { ...acur, avg: Math.round(med), min: Math.round(s[Math.floor(s.length*0.1)]), max: Math.round(s[Math.min(s.length-1,Math.floor(s.length*0.9))]),
+            count: dfVals.length, hitRate: Math.round(100*dfClean/Math.max(1,total)),
+            lowConfidence:false, _recovered:true, lowConfReason: undefined };
+          console.log(`[FarLegRecover] ${akey}: recovered DF ${Math.round(med)}° from ${dfVals.length} clean far-ankle frames (IQR ${Math.round(spread)}°) — gate cleared`);
+        } else {
+          console.log(`[FarLegRecover] ${akey}: recovery rejected (median ${Math.round(med)}°, IQR ${Math.round(spread)}°, n=${dfVals.length}) — keeping gate`);
+        }
+      }
+    } catch(e){ console.warn('[FarLegRecover] failed:', e.message); }
+  })();
+
   let mergedAggregated = {...aggregated};
   let mergeNotes = [];
 
@@ -12712,7 +12825,7 @@ async function runAnalysis() {
     // For upper extremity movements, suppress lower-body metrics from the prompt
     // — they just measure standing posture and have wrong reference ranges
     if(isUpperExMov && suppressLowerExInPrompt.has(k)) return false;
-    if(/running|gait|walk/i.test(movement) && /Shoulder|Elbow/.test(k)) return false; // v0.15.0: arm swing is a side-view timing artifact, not a finding
+    if(/running|gait|walk/i.test(movement) && /Shoulder Flexion|Shoulder Abduction/.test(k)) return false; // raw shoulder angle superseded by 'Arm Swing' ROM; Elbow/Arm Swing/Cross-Midline now surfaced as efficiency markers (v0.16.0)
     return true;
   }).map(([k,v]) => {
     // For running/gait: report peak (max) for flexion joints, avg for others
@@ -12757,6 +12870,7 @@ ANGLE MEASUREMENT CONVENTIONS (critical for correct interpretation):
 - Hip Flexion/Extension: reported as degrees FROM upright neutral (0° = standing straight). For running/gait, this is the thigh-from-vertical angle (independent of arm swing). For lifts, this is the shoulder-hip-knee included angle corrected to 0°=neutral. Normal running peak hip flexion = 35-65°. A value of 35° means moderate flexion; 65° means deep flexion.
 - SIDE VIEW LIMITATION — Hip and Knee Flexion: In a side-view camera, only the near leg's thigh/knee direction can be measured reliably in 2D. The far leg is foreshortened (its thigh points partly toward/away from camera), making its 2D angle systematically underestimate true hip flexion. If one side shows "N/A" for hip or knee flexion, it means the far-side 2D measurement was suppressed because it would be inaccurate. The available side's measurement IS valid and should be used clinically. For true bilateral hip/knee comparison, use the posterior or frontal view, or rely on 3D worldLandmarks when the device supports them.
 - Knee Flexion: standard included angle at knee. 180° = fully extended, 90° = right angle. Running swing phase norm = 90-130° peak flexion.
+- UPPER-EXTREMITY EFFICIENCY (running only, screening-grade — no arm tape, so treat as secondary efficiency markers not primary findings): "Elbow Flexion" = elbow included angle, efficient ~90° (70-110°); a very straight arm (>120°) is a long-lever energy leak, a very bent arm (<60°) signals upper-body tension. "Arm Swing" (per side) = fore-aft shoulder ROM; efficient drive ~30-45°, <20° is a restricted/stiff arm carriage. Compare Left vs Right Arm Swing for arm-swing SYMMETRY — a >15% side difference often mirrors a lower-limb compensation and is worth noting. "Arm Cross-Midline" (posterior view) = how far the hand crosses the body midline; crossing drives torso counter-rotation and wastes energy (<2cm minimal, >5cm notable). The NEAR arm (camera side) is reliable; the FAR arm is torso-occluded and marked LOW CONFIDENCE — do not headline it.
 ${isUpperExMov ? `
 ⚠️ UPPER EXTREMITY ANGLE CONVENTIONS (read before interpreting):
 - Shoulder Flexion / Abduction values in this report are PEAK ROM values (maximum angle achieved across all frames). Do NOT treat them as averages. A value of 168° means the patient achieved 168° of shoulder flexion at peak — excellent. A value of 90° means they achieved 90° at peak — moderately limited.
@@ -13333,6 +13447,33 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         if(!aggregated['Right Hip Extension']) aggregated['Right Hip Extension'] = {avg: hte, min: hte, max: hte, count: 1};
       }
 
+      // ── Upper-extremity efficiency metrics (v0.16.0) ──────────────────────────
+      // Arm swing amplitude = fore-aft ROM of each shoulder (max−min of Shoulder Flexion
+      // across the cycle). Reported per side so the L/R comparison IS the arm-swing symmetry.
+      // The near arm (camera side) is reliable; the far arm is torso-occluded → screening only.
+      if(isGait){
+        ['Left','Right'].forEach(side=>{
+          const sf = aggregated[`${side} Shoulder Flexion`];
+          if(sf && sf.max!=null && sf.min!=null && (sf.count||0) >= 3){
+            const amp = Math.round(sf.max - sf.min);
+            aggregated[`${side} Arm Swing`] = {avg:amp, min:amp, max:amp, count:sf.count, _derived:true};
+          }
+        });
+        // Flag the far arm (occluded by the torso in the side view) as screening-grade.
+        const _nearArm = window_strideMetrics?.cameraNearLeg;
+        const _farArm  = _nearArm==='L' ? 'Right' : _nearArm==='R' ? 'Left' : null;
+        if(_farArm){
+          [`${_farArm} Arm Swing`,`${_farArm} Elbow Flexion`].forEach(k=>{
+            if(aggregated[k]){ aggregated[k].lowConfidence = true; aggregated[k].lowConfReason = 'far arm — occluded by torso in side view (screening only)'; }
+          });
+        }
+        // Arm crossing midline (posterior view) — injected by the secondary pass when available.
+        if(window._armCrossMidlineDeg != null && isFinite(window._armCrossMidlineDeg)){
+          const cd = Math.round(window._armCrossMidlineDeg);
+          aggregated['Arm Cross-Midline'] = {avg:cd, min:cd, max:cd, count: window._armCrossMidlineN||1, _derived:true};
+        }
+      }
+
       // ── Inject stride engine peak knee flexion ──────────────────────────────
       // The stride engine computes peak swing-phase knee flexion from 64-128 dense
       // frames, averaging across 15+ strides. This is far more accurate than the
@@ -13374,6 +13515,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           {label:'Trunk Lean',            L:'Trunk Lean',                R:null},
           {label:'Trunk Lateral Lean',    L:'Trunk Lateral Lean',        R:null},
           {label:'Pelvic Drop',           L:'Pelvic Drop',               R:null},
+          {label:'Elbow Angle (arm)',     L:'Left Elbow Flexion',        R:'Right Elbow Flexion'},
+          {label:'Arm Swing ROM',         L:'Left Arm Swing',            R:'Right Arm Swing'},
+          {label:'Arm Cross-Midline',     L:'Arm Cross-Midline',         R:null},
         ] : [
           // Landing: show peak-relevant measures in clinical order
           {label:'Knee Flexion (peak)',   L:'Left Knee Flexion',         R:'Right Knee Flexion'},
