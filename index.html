@@ -3151,13 +3151,16 @@ function startFrameExtraction(file, vid) {
                   });
                   vid.pause();
 
-                  // v0.15.0: playback capture lags real-time and skips frames, collapsing
-                  // several phases onto one decoded frame (duplicated gallery frames, worse at
-                  // high fps). Re-seek any target whose captured frame drifted >45ms so each
-                  // phase gets its own distinct frame. No-op when playback landed cleanly.
+                  // v0.16.0: FINALIZE every gallery frame with a deterministic seek to its exact
+                  // target time. Playback capture lands on a slightly different decoded frame each
+                  // run (decode jitter, 1-4 frames at 120fps), so a saved landmark edit — which is
+                  // an absolute pixel position for the frame it was made on — would drift onto the
+                  // wrong frame and look misplaced. Seeking to a FIXED time always decodes the SAME
+                  // frame, so the gallery images are identical every run and manual corrections line
+                  // up perfectly. (Playback above still primes the decoder and is a fallback if a
+                  // seek fails.) The ~1s cost is negligible next to the MediaPipe passes.
                   for(const _tgt of _reextTargets) {
-                    const _bad = !_tgt.captured || _tgt.actualTime === null
-                              || Math.abs(_tgt.actualTime - _tgt.time) > 0.045;
+                    const _bad = true;
                     if(_bad) {
                       try {
                         const _b64 = await seekCapture(vid, _tgt.time);
@@ -3166,7 +3169,7 @@ function startFrameExtraction(file, vid) {
                           _tgt.captured = true;
                           _tgt.b64 = _b64;
                           _tgt.actualTime = vid.currentTime;
-                          console.log(`  Frame ${_tgt.idx+1} [${_tgt.label}]: re-seeked (playback drift) -> ${vid.currentTime.toFixed(3)}s`);
+                          console.log(`  Frame ${_tgt.idx+1} [${_tgt.label}]: deterministic seek -> ${vid.currentTime.toFixed(3)}s (target ${_tgt.time.toFixed(3)}s)`);
                         }
                       } catch(_e) { /* keep playback frame */ }
                     }
@@ -10607,14 +10610,7 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     // dropped all secondary corrections on subsequent runs.
     const _secPhSel = window_primaryPhaseSelection;
     const _secDur   = window._secondaryVidEl?.duration;
-    const _nSecFrames = (extractedFrames2 && extractedFrames2.length) || (_secPhSel?.fractions?.length) || 0;
-    if(window._secManualAnchorActive && Array.isArray(window._secPhaseTimes) && window._secPhaseTimes.length === _nSecFrames && _nSecFrames > 0) {
-      // Prefer the ACTUAL anchor-based posterior frame times (what the PT sees and marks) so saved
-      // corrections key to the real frames rather than a naive fraction×duration estimate.
-      _rvFrameTimes2  = window._secPhaseTimes.map(t => Math.round(t * 1000) / 1000);
-      _rvFramePhases2 = (_secPhSel?.labels || []).map(l => l?._baseId || l?.id || '');
-      console.log('[Corrections] Secondary frame times from anchor-based _secPhaseTimes (' + _rvFrameTimes2.length + ' frames)');
-    } else if(_secPhSel?.fractions && _secDur && isFinite(_secDur)) {
+    if(_secPhSel?.fractions && _secDur && isFinite(_secDur)) {
       const _secDisplayFracs = _secPhSel.vizFractions || _secPhSel.fractions;
       _rvFrameTimes2  = _secDisplayFracs.map(f => Math.round(f * _secDur * 1000) / 1000);
       _rvFramePhases2 = (_secPhSel.labels || []).map(l => l?._baseId || l?.id || '');
@@ -14639,28 +14635,34 @@ function _corrApply(savedData) {
                                   _rvFrameTimes, _rvLandmarks, _rvEdited, _rvFramePhases);
     applied += pResult.n;
     skippedNoMatch += pResult.skip;
-    // Secondary
+    // Secondary — the posterior view is ALWAYS the same fixed set of 8 phase-frames in the same
+    // order, so match by INDEX (phase position). Index matching is immune to timestamp basis and
+    // small anchor drift, which is what kept wiping posterior marks. The clear-guard already
+    // removes these when the anchor genuinely MOVES, so an index match only ever restores marks
+    // that belong to the identical frames. Fall back to time matching only if the count changed.
     const secUnpacked = _corrUnpack(savedData.sec);
-    if(secUnpacked && _rvLandmarks2 && savedData.sTimes) {
-      const sResult = _matchByTime(savedData.sTimes, savedData.sEd, secUnpacked, savedData.sPhases,
-                                    _rvFrameTimes2, _rvLandmarks2, _rvEdited2, _rvFramePhases2);
-      applied += sResult.n;
-      skippedNoMatch += sResult.skip;
-    } else if(secUnpacked && _rvLandmarks2 && !savedData.sTimes) {
-      // v0.13.4 fallback: saved data has secondary corrections but no timestamps
-      // (pre-v0.13.4 bug — _secondaryPhaseSelection was never populated).
-      // Fall back to index-based matching to recover the corrections.
-      console.log('[Corrections] Secondary sTimes missing (legacy save) — using index-based fallback for secondary');
-      let secN = 0;
-      (savedData.sEd || []).forEach((edited, i) => {
-        if(edited && secUnpacked[i] && i < _rvLandmarks2.length) {
-          _rvLandmarks2[i] = secUnpacked[i];
-          _rvEdited2[i]    = true;
-          secN++;
-        }
-      });
-      applied += secN;
-      if(secN > 0) console.log(`[Corrections] Recovered ${secN} secondary correction(s) via index fallback`);
+    if(secUnpacked && _rvLandmarks2) {
+      const sEd = savedData.sEd || [];
+      const _countsMatch = (_rvLandmarks2.length === secUnpacked.length) || (_rvLandmarks2.length === sEd.length);
+      if(_countsMatch) {
+        let secN = 0;
+        sEd.forEach((edited, i) => {
+          if(edited && secUnpacked[i] && i < _rvLandmarks2.length) {
+            _rvLandmarks2[i] = secUnpacked[i];
+            _rvEdited2[i]    = true;
+            secN++;
+          }
+        });
+        applied += secN;
+        console.log(`[Corrections] Secondary: matched ${secN} correction(s) by phase index (${secUnpacked.length} frames)`);
+      } else if(savedData.sTimes) {
+        // Frame count changed vs the save — fall back to timestamp matching.
+        const sResult = _matchByTime(savedData.sTimes, sEd, secUnpacked, savedData.sPhases,
+                                      _rvFrameTimes2, _rvLandmarks2, _rvEdited2, _rvFramePhases2);
+        applied += sResult.n;
+        skippedNoMatch += sResult.skip;
+        console.log(`[Corrections] Secondary: frame count changed — matched ${sResult.n} by time, ${sResult.skip} skipped`);
+      }
     }
     if(skippedNoMatch > 0) {
       console.warn(`[Corrections] ${skippedNoMatch} saved correction(s) could not be matched (frame timing shifted >${MATCH_TOL*1000}ms)`);
