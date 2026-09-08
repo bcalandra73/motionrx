@@ -12227,18 +12227,32 @@ async function runAnalysis() {
         if(peaks.length < 6) return null;
         return { med: peaks[Math.floor(peaks.length/2)], n: peaks.length };
       };
+      // 3D-corrected gallery peak (from the 8 MP-Heavy worldLandmark frames) — the reference for
+      // whether the per-stride median can be trusted for a foreshortened FAR leg.
+      const _galleryPeak = (key, mode) => {
+        const vals = allAngles.map(a => a && a[key]).filter(v => v != null && isFinite(v));
+        if(!vals.length) return null;
+        return mode === 'included' ? (180 - Math.min(...vals)) : Math.max(...vals);
+      };
       // mode 'included' = stored as included angle (peak flexion = 180 − min); 'flexion' = stored as flexion (peak = max)
       const _stabilize = (key, getFlex, lo, hi, mode) => {
         const a = aggregated[key]; if(!a) return;
         const rp = _stridePeakMedian(getFlex); if(!rp) return;
         if(rp.med < lo || rp.med > hi) return;                       // implausible → skip
         const curPeak = (mode === 'included') ? (180 - a.min) : a.max;
-        if(Math.abs(rp.med - curPeak) <= 12) {
+        const gal = _galleryPeak(key, mode);
+        // Trust the per-stride median when it AGREES with the 3D gallery peak (so we're not
+        // deflating a genuinely foreshortened far leg); when there's no gallery value, fall back
+        // to agreement with the current value. This removes single-frame spikes — e.g. a far-knee
+        // frame reading 127° when BOTH the gallery and the per-stride median say ~105° — while
+        // never over-writing a real 3D perspective correction (gallery ≫ median ⇒ preserve).
+        const ref = (gal != null) ? gal : curPeak;
+        if(Math.abs(rp.med - ref) <= 12) {
           if(mode === 'included') a.min = Math.round(180 - rp.med); else a.max = Math.round(rp.med);
           a._stabilized = true;
-          console.log(`[Stabilize] ${key}: peak ${Math.round(curPeak)}° → ${Math.round(rp.med)}° (median of ${rp.n} per-stride peaks)`);
+          console.log(`[Stabilize] ${key}: peak ${Math.round(curPeak)}° → ${Math.round(rp.med)}° (median of ${rp.n} per-stride peaks${gal != null ? `, gallery ${Math.round(gal)}°` : ''})`);
         } else {
-          console.log(`[Stabilize] ${key}: kept ${Math.round(curPeak)}° (robust median ${Math.round(rp.med)}° differs >12° — correction preserved)`);
+          console.log(`[Stabilize] ${key}: kept ${Math.round(curPeak)}° (median ${Math.round(rp.med)}° vs ${gal != null ? 'gallery' : 'current'} ${Math.round(ref)}° differ >12° — preserved)`);
         }
       };
       const _kneeFlex = (hI,kI,aI) => fr => { const lm = fr.landmarks; return (lm && lm[hI] && lm[kI] && lm[aI]) ? 180 - calcAngleBest(lm[hI], lm[kI], lm[aI]) : null; };
@@ -12713,10 +12727,12 @@ async function runAnalysis() {
     const la=c?c[27]||0:0, ra=c?c[28]||0:0, lh=c?c[29]||0:0, rh=c?c[30]||0:0;
     if(c){
       const TH = 0.7;      // relative: far foot much sparser than its mirror
-      const ABS_OK = 25;   // v0.16.0: …but an absolute count this high is plenty on its own —
+      const ABS_OK = 32;   // v0.16.0: …but an absolute count this high is plenty on its own —
                            // a well-tracked far foot (e.g. 36 vs 68) shouldn't be gated just for
                            // having less tape than a very-well-tracked near foot. Only gate when
-                           // BOTH relatively sparse AND absolutely thin.
+                           // BOTH relatively sparse AND absolutely thin. (Raised 25→32: a far foot
+                           // at ~26 detections with scattered per-frame DF was slipping through and
+                           // headlining a spurious ankle asymmetry on a symmetric runner.)
       if(la>0 && ra < TH*la && ra < ABS_OK) mark('Right Ankle Dorsiflexion','far/occluded foot — sparse tape');
       if(ra>0 && la < TH*ra && la < ABS_OK) mark('Left Ankle Dorsiflexion','far/occluded foot — sparse tape');
       if(lh>0 && rh < TH*lh && rh < ABS_OK) mark('Right Pronation','far/occluded foot — sparse tape');
