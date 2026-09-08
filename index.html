@@ -12200,6 +12200,61 @@ async function runAnalysis() {
     const framePhases = extractedFrames.map(f => f.phase || null);
     aggregated = allAngles.length > 0 ? aggregateAngles(allAngles, framePhases) : {};
   }
+
+  // ── #36 Measurement stability: median of PER-STRIDE peaks ─────────────────────
+  // Peak knee/hip flexion previously came from the single most-flexed frame of the one
+  // selected stride/gallery, so it bounced run-to-run on the SAME video (e.g. hip 52↔43).
+  // Recompute each as the MEDIAN of the per-stride peak across all ~20 strides in the clip —
+  // a reproducible, representative "typical peak" rather than one cherry-picked frame.
+  // Guarded: only replaces the current value when the robust median is within 12° of it, so it
+  // damps frame-level noise WITHOUT clobbering a deliberate 3D/gallery perspective correction.
+  try {
+    const _daf = window._denseAnglesFrames;
+    if(Array.isArray(_daf) && _daf.length >= 30 && /running|gait|walk/i.test(movement)) {
+      const _vidDur = (window._primaryVidEl && window._primaryVidEl.duration) || (document.querySelector('video')?.duration) || null;
+      const _strideDurFrac = (window_strideMetrics && window_strideMetrics.strideDurationS && _vidDur)
+        ? (window_strideMetrics.strideDurationS / _vidDur) : 0.05;
+      const _stridePeakMedian = (getFlex) => {
+        const bins = new Map();
+        for(const fr of _daf) {
+          const t = fr.t; if(t == null) continue;
+          const v = getFlex(fr); if(v == null || !isFinite(v)) continue;
+          const b = Math.floor(t / _strideDurFrac);
+          const cur = bins.get(b);
+          if(cur == null || v > cur) bins.set(b, v);   // peak flexion within this stride
+        }
+        const peaks = [...bins.values()].sort((a,b)=>a-b);
+        if(peaks.length < 6) return null;
+        return { med: peaks[Math.floor(peaks.length/2)], n: peaks.length };
+      };
+      // mode 'included' = stored as included angle (peak flexion = 180 − min); 'flexion' = stored as flexion (peak = max)
+      const _stabilize = (key, getFlex, lo, hi, mode) => {
+        const a = aggregated[key]; if(!a) return;
+        const rp = _stridePeakMedian(getFlex); if(!rp) return;
+        if(rp.med < lo || rp.med > hi) return;                       // implausible → skip
+        const curPeak = (mode === 'included') ? (180 - a.min) : a.max;
+        if(Math.abs(rp.med - curPeak) <= 12) {
+          if(mode === 'included') a.min = Math.round(180 - rp.med); else a.max = Math.round(rp.med);
+          a._stabilized = true;
+          console.log(`[Stabilize] ${key}: peak ${Math.round(curPeak)}° → ${Math.round(rp.med)}° (median of ${rp.n} per-stride peaks)`);
+        } else {
+          console.log(`[Stabilize] ${key}: kept ${Math.round(curPeak)}° (robust median ${Math.round(rp.med)}° differs >12° — correction preserved)`);
+        }
+      };
+      const _kneeFlex = (hI,kI,aI) => fr => { const lm = fr.landmarks; return (lm && lm[hI] && lm[kI] && lm[aI]) ? 180 - calcAngleBest(lm[hI], lm[kI], lm[aI]) : null; };
+      const _hipFlex  = (side) => fr => { try { return extractAngles(fr.landmarks, cameraView, movement)[side]; } catch(e){ return null; } };
+      _stabilize('Left Knee Flexion',  _kneeFlex(23,25,27), 60, 148, 'included');
+      _stabilize('Right Knee Flexion', _kneeFlex(24,26,28), 60, 148, 'included');
+      _stabilize('Left Hip Flexion',   _hipFlex('Left Hip Flexion'),  20, 78, 'flexion');
+      _stabilize('Right Hip Flexion',  _hipFlex('Right Hip Flexion'), 20, 78, 'flexion');
+      // Re-reconcile the peak-knee KPI to the stabilized joint-table value.
+      try {
+        const _pk = ['Left Knee Flexion','Right Knee Flexion'].map(k=>aggregated[k]?.min).filter(v=>v!=null&&isFinite(v)).map(v=>180-v);
+        if(_pk.length && window_strideMetrics) window_strideMetrics.peakKneeFlex = Math.round(Math.max(..._pk));
+      } catch(e){}
+    }
+  } catch(e){ console.warn('[Stabilize] failed:', e.message); }
+
   const angleLines = Object.entries(aggregated).map(([k,v]) =>
     `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles.length} frames)`
   ).join('\n');
