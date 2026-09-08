@@ -1057,8 +1057,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <h2>Review Landmark Positions</h2>
       <p>MediaPipe has placed joint markers on each frame. Click a frame thumbnail, then <strong>drag any misplaced marker</strong> to its correct anatomical position. Edited frames show a ✎ badge. When done, click Generate Report.</p>
       <p id="reviewWristNote" style="display:none;margin-top:6px;padding:6px 10px;background:#fff8e1;border:1px solid #ffe082;border-radius:6px;font-size:.78rem;color:#795548;">
-        <strong>Running note:</strong> Wrist positions (<span style="color:#00b5a5;font-weight:600;">LW</span> / <span style="color:#00b5a5;font-weight:600;">RW</span>) are cosmetic only — they don't affect any reported measurements. You can safely skip correcting them.
-        Focus corrections on: <strong>hips, knees, ankles, and heels</strong>.
+        <strong>Running note:</strong> Arm markers (elbow / wrist <span style="color:#00b5a5;font-weight:600;">LW</span> / <span style="color:#00b5a5;font-weight:600;">RW</span>) now feed the arm-swing efficiency metrics, so they're no longer purely cosmetic. Those metrics are screening-grade and averaged over many auto-tracked frames, so correcting arms here is <em>optional</em>.
+        Priority corrections remain: <strong>hips, knees, ankles, and heels</strong>.
       </p>
     </div>
     <!-- Saved corrections banner — shown at TOP so it's visible immediately -->
@@ -4966,14 +4966,15 @@ async function fusedLandmarkPipeline(mpResults, imageBase64Array, movement, view
     statusEl.textContent = 'Applying segment constraints...';
     allLandmarks = applySegmentConstraints(allLandmarks, view);
     // Wrist plausibility: null wrists that are physically impossible given elbow position.
-    // Skip for running/gait — arm swing during running constantly triggers false positives
-    // (forearm ratios, cross-body checks), nulling 14/16 wrists every run.
-    // Wrist position affects ZERO clinical measurements in gait analysis — it's purely
-    // cosmetic in the skeleton. Not worth forcing PT to correct manually each time.
+    // Skip for running/gait — the aggressive plausibility rules (forearm ratios, cross-body
+    // checks) false-positive constantly on a swinging arm and would null 14/16 wrists every run,
+    // which would DROP the arm-swing/elbow efficiency metrics entirely. Those metrics are
+    // screening-grade and robustly aggregated (median across ~30 frames), so a few noisy wrist
+    // frames wash out; wholesale nulling does not. So we keep the check off for gait.
     const _mvLower = (movement || '').toLowerCase();
     const _skipWrist = _mvLower.includes('running') || _mvLower.includes('gait') || _mvLower.includes('walk');
     if(_skipWrist) {
-      console.log(`[WristCheck] Skipped for "${movement}" — wrists are cosmetic in gait, no clinical impact`);
+      console.log(`[WristCheck] Skipped for "${movement}" — plausibility check false-positives on arm swing; arm metrics rely on robust aggregation instead`);
     } else {
       allLandmarks = applyWristPlausibility(allLandmarks, view);
     }
@@ -10606,7 +10607,14 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
     // dropped all secondary corrections on subsequent runs.
     const _secPhSel = window_primaryPhaseSelection;
     const _secDur   = window._secondaryVidEl?.duration;
-    if(_secPhSel?.fractions && _secDur && isFinite(_secDur)) {
+    const _nSecFrames = (extractedFrames2 && extractedFrames2.length) || (_secPhSel?.fractions?.length) || 0;
+    if(window._secManualAnchorActive && Array.isArray(window._secPhaseTimes) && window._secPhaseTimes.length === _nSecFrames && _nSecFrames > 0) {
+      // Prefer the ACTUAL anchor-based posterior frame times (what the PT sees and marks) so saved
+      // corrections key to the real frames rather than a naive fraction×duration estimate.
+      _rvFrameTimes2  = window._secPhaseTimes.map(t => Math.round(t * 1000) / 1000);
+      _rvFramePhases2 = (_secPhSel?.labels || []).map(l => l?._baseId || l?.id || '');
+      console.log('[Corrections] Secondary frame times from anchor-based _secPhaseTimes (' + _rvFrameTimes2.length + ' frames)');
+    } else if(_secPhSel?.fractions && _secDur && isFinite(_secDur)) {
       const _secDisplayFracs = _secPhSel.vizFractions || _secPhSel.fractions;
       _rvFrameTimes2  = _secDisplayFracs.map(f => Math.round(f * _secDur * 1000) / 1000);
       _rvFramePhases2 = (_secPhSel.labels || []).map(l => l?._baseId || l?.id || '');
@@ -10625,7 +10633,7 @@ function showLandmarkReviewPanel(extractedFrames, refinedLandmarks, annotatedFra
 
     document.getElementById('loadingState').style.display = 'none';
     document.getElementById('reviewPanel').style.display  = 'block';
-    // Show wrist note for running/gait — wrists are cosmetic, don't need correction
+    // Show arm-marker note for running/gait — arm markers feed screening-grade efficiency metrics
     const _wristNote = document.getElementById('reviewWristNote');
     const _rvMovement = document.getElementById('movementType')?.value || '';
     if(_wristNote) _wristNote.style.display = /running|gait|walk/i.test(_rvMovement) ? 'block' : 'none';
@@ -12515,15 +12523,18 @@ async function runAnalysis() {
               // of the cross-past-midline excursion; report the 90th-percentile across frames.
               try {
                 const crossVals = [];
+                let wristFrames = 0; // frames where at least one wrist WAS trackable (so 0 crossings = a real "lateral" finding, not just missing data)
                 secCurves.forEach(c => {
                   const lm = c.landmarks; if(!lm) return;
                   const lHip=lm[23], rHip=lm[24];
                   if(!lHip || !rHip) return;
                   const midX = (lHip.x + rHip.x) / 2;
+                  let anyWrist = false;
                   [[lm[11], lm[15]], [lm[12], lm[16]]].forEach(([sh, wr]) => {
                     if(!sh || !wr) return;
                     if(wr.visibility != null && wr.visibility < 0.5) return;
                     if(sh.visibility != null && sh.visibility < 0.4) return;
+                    anyWrist = true;
                     const shSide = Math.sign(sh.x - midX);
                     if(shSide === 0) return;
                     const off = wr.x - midX;
@@ -12532,6 +12543,7 @@ async function runAnalysis() {
                     const vert = Math.max(0.05, Math.abs(wr.y - sh.y));
                     crossVals.push(Math.atan2(crossDist, vert) * 180/Math.PI);
                   });
+                  if(anyWrist) wristFrames++;
                 });
                 if(crossVals.length >= 3){
                   const sorted = [...crossVals].sort((a,b)=>a-b);
@@ -12539,8 +12551,14 @@ async function runAnalysis() {
                   window._armCrossMidlineDeg = Math.round(p90);
                   window._armCrossMidlineN   = crossVals.length;
                   console.log('[ArmCross] hand-across-midline angle p90='+Math.round(p90)+'° from '+crossVals.length+' wrist-frames');
+                } else if(wristFrames >= 6){
+                  // Wrists WERE tracked across enough frames but rarely/never crossed → a genuine
+                  // positive: hands stay lateral. Report a small value rather than dropping the row.
+                  window._armCrossMidlineDeg = crossVals.length ? Math.round(Math.max(...crossVals)) : 0;
+                  window._armCrossMidlineN   = wristFrames;
+                  console.log('[ArmCross] hands stayed lateral — '+crossVals.length+' crossings over '+wristFrames+' tracked frames → '+window._armCrossMidlineDeg+'° (efficient)');
                 } else {
-                  console.log('[ArmCross] insufficient crossing frames ('+crossVals.length+') — hands stayed lateral or wrists not tracked');
+                  console.log('[ArmCross] wrists not reliably tracked ('+wristFrames+' usable frames) — metric omitted');
                 }
               } catch(_acErr){ console.warn('[ArmCross] failed:', _acErr.message); }
               // v0.15.0 — recover pronation from dense posterior STANCE frames. computePronation
@@ -12643,11 +12661,15 @@ async function runAnalysis() {
     const c = (typeof window!=='undefined' && window._tapeRefinedCounts) ? window._tapeRefinedCounts : null;
     const la=c?c[27]||0:0, ra=c?c[28]||0:0, lh=c?c[29]||0:0, rh=c?c[30]||0:0;
     if(c){
-      const TH = 0.7; // v0.16.0: loosened 0.5→0.7 — a clearly-sparse far foot (e.g. 38 vs 70 = 0.54) must not squeak through
-      if(la>0 && ra < TH*la) mark('Right Ankle Dorsiflexion','far/occluded foot — sparse tape');
-      if(ra>0 && la < TH*ra) mark('Left Ankle Dorsiflexion','far/occluded foot — sparse tape');
-      if(lh>0 && rh < TH*lh) mark('Right Pronation','far/occluded foot — sparse tape');
-      if(rh>0 && lh < TH*rh) mark('Left Pronation','far/occluded foot — sparse tape');
+      const TH = 0.7;      // relative: far foot much sparser than its mirror
+      const ABS_OK = 25;   // v0.16.0: …but an absolute count this high is plenty on its own —
+                           // a well-tracked far foot (e.g. 36 vs 68) shouldn't be gated just for
+                           // having less tape than a very-well-tracked near foot. Only gate when
+                           // BOTH relatively sparse AND absolutely thin.
+      if(la>0 && ra < TH*la && ra < ABS_OK) mark('Right Ankle Dorsiflexion','far/occluded foot — sparse tape');
+      if(ra>0 && la < TH*ra && la < ABS_OK) mark('Left Ankle Dorsiflexion','far/occluded foot — sparse tape');
+      if(lh>0 && rh < TH*lh && rh < ABS_OK) mark('Right Pronation','far/occluded foot — sparse tape');
+      if(rh>0 && lh < TH*rh && lh < ABS_OK) mark('Left Pronation','far/occluded foot — sparse tape');
     }
 
     // ── 2. Far-leg QUALITY gate (occlusion-aware, not blanket) ────────────────
@@ -12721,6 +12743,7 @@ async function runAnalysis() {
           if(df!=null && isFinite(df) && to && (to.visibility==null?1:to.visibility) >= VIS){ dfVals.push(df); dfClean++; }
         }
       });
+      console.log(`[FarLegRecover] far=${sideWord} | clean far-knee frames=${kneeVals.length}, clean far-ankle(toe) frames=${dfVals.length} of ${total} | knee gated=${!!(aggregated[`${sideWord} Knee Flexion`]&&aggregated[`${sideWord} Knee Flexion`].lowConfidence)} ankle gated=${!!(aggregated[`${sideWord} Ankle Dorsiflexion`]&&aggregated[`${sideWord} Ankle Dorsiflexion`].lowConfidence)}`);
       const iqr = (s)=> s[Math.floor(s.length*0.75)] - s[Math.floor(s.length*0.25)];
       // Knee: recover peak flexion (= smallest included angle) from clean samples.
       const kkey = `${sideWord} Knee Flexion`, kcur = aggregated[kkey];
@@ -12830,7 +12853,7 @@ async function runAnalysis() {
   }).map(([k,v]) => {
     // For running/gait: report peak (max) for flexion joints, avg for others
     // For shoulder/elbow flexion: always report peak (max) — avg includes start position at 0°
-    const isShoulderOrElbow = /Shoulder (Flexion|Abduction)|Elbow Flexion/.test(k);
+    const isShoulderOrElbow = /Shoulder (Flexion|Abduction)/.test(k); // elbow angle reports its central value (matches table), not peak ROM
     const dispVal = isShoulderOrElbow ? v.max : gaitDisplayVal(k, v, movement);
     // v0.15.0 HARD GATE: send low-confidence metrics to the model WITHOUT a number so it cannot
     // headline them (the value still appears in the on-screen table for the clinician).
@@ -14870,14 +14893,19 @@ async function applyPosteriorAnchor(anchorSec) {
   window._secManualAnchorActive = true;
   window._secAnchorJustApplied = true;  // force a ONE-TIME posterior re-extraction this run
   window._secPhaseMatch = { mode:'manual-anchor', confidence:'manual', anchorSec: effAnchor };
+  // Did the anchor actually MOVE from the saved value? If the PT just proceeded without changing
+  // it, the posterior frames re-extract to identical timestamps, so the saved posterior
+  // corrections are still valid and must NOT be wiped (that was forcing a re-mark every run).
+  let _priorAnchor = null;
+  try { const _s = localStorage.getItem(_secAnchorKey()); if(_s != null) _priorAnchor = parseFloat(_s); } catch(e){}
+  const _anchorChanged = !(_priorAnchor != null && isFinite(_priorAnchor) && Math.abs(_priorAnchor - effAnchor) < 0.03);
   try { localStorage.setItem(_secAnchorKey(), String(effAnchor)); } catch(e){}
   console.log('[PosteriorAnchor] Applied REF-leg contact ' + effAnchor.toFixed(2) + 's → phase times ['
-    + times.map(t=>t.toFixed(2)).join(', ') + ']s');
+    + times.map(t=>t.toFixed(2)).join(', ') + ']s' + (_anchorChanged ? ' (anchor moved — clearing stale posterior marks)' : ' (anchor unchanged — preserving posterior marks)'));
 
-  // Clear ONLY the posterior (secondary) landmark corrections — they were made on mis-timed
-  // frames and are now stale. PRESERVE the lateral (primary) corrections: the anchor never
-  // moves the lateral frames, so the PT must not have to re-mark them.
-  try {
+  // Clear the posterior (secondary) corrections ONLY when the anchor actually moved (old marks
+  // are then on mis-timed frames). PRESERVE the lateral (primary) corrections always.
+  if(_anchorChanged) try {
     const key = window._currentCorrKey;
     if(key) {
       const raw = localStorage.getItem(CORRECTIONS_PREFIX + key);
@@ -14919,9 +14947,14 @@ async function _reextractPosteriorAtAnchor(effAnchor) {
       window._secPhaseTimes = times; window._secPhaseDur = dur;
       window._secManualAnchorSec = effAnchor; window._secManualAnchorActive = true;
       window._secPhaseMatch = { mode:'manual-anchor', confidence:'manual', anchorSec: effAnchor };
+      // Only wipe posterior corrections if the anchor actually MOVED — an unchanged anchor
+      // re-extracts identical frames, so saved posterior marks still line up and must persist.
+      let _priorAnchor = null;
+      try { const _s = localStorage.getItem(_secAnchorKey()); if(_s != null) _priorAnchor = parseFloat(_s); } catch(e){}
+      const _anchorChanged = !(_priorAnchor != null && isFinite(_priorAnchor) && Math.abs(_priorAnchor - effAnchor) < 0.03);
       try { localStorage.setItem(_secAnchorKey(), String(effAnchor)); } catch(e){}
-      // Preserve the lateral (primary) corrections; clear only the posterior (secondary) ones.
-      try {
+      // Preserve the lateral (primary) corrections always; clear posterior (secondary) only on a moved anchor.
+      if(_anchorChanged) try {
         const key = window._currentCorrKey;
         if(key) {
           const raw = localStorage.getItem(CORRECTIONS_PREFIX + key);
@@ -14930,7 +14963,7 @@ async function _reextractPosteriorAtAnchor(effAnchor) {
         if(_rvEdited2) _rvEdited2.fill(false);
         window._secondaryCorrectionsMade = false;
       } catch(e){}
-      console.log('[PosteriorAnchor] Re-extracted ' + nf.length + ' posterior frames at anchor ' + effAnchor.toFixed(2) + 's → [' + times.map(t=>t.toFixed(2)).join(', ') + ']s');
+      console.log('[PosteriorAnchor] Re-extracted ' + nf.length + ' posterior frames at anchor ' + effAnchor.toFixed(2) + 's → [' + times.map(t=>t.toFixed(2)).join(', ') + ']s' + (_anchorChanged ? ' (anchor moved — posterior marks cleared)' : ' (anchor unchanged — posterior marks preserved)'));
     }
   }
   try { URL.revokeObjectURL(url); } catch(e){}
