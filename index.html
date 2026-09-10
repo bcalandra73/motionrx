@@ -9056,7 +9056,13 @@ function renderStrideMetrics(metrics, aggregated={}) {
       label:'Cadence',
       value: metrics.cadenceSpm != null ? metrics.cadenceSpm : '—',
       unit: metrics.cadenceSpm != null ? 'spm' : 'unreliable',
-      sub: metrics.cadenceSpm != null ? `${metrics.cadenceStride} strides/min` : 'Could not be reliably measured',
+      // Show the measured precision (±1 SD of cadence across the detected strides) — a defensible
+      // "test-retest"-style number to state out loud. Derived from the stride-time CV. (v0.16.0)
+      sub: metrics.cadenceSpm != null
+        ? (metrics.cvStridePct != null
+            ? `± ${Math.max(1, Math.round(metrics.cadenceSpm*metrics.cvStridePct/100))} spm across ${metrics.stridesDetected} strides`
+            : `${metrics.cadenceStride} strides/min`)
+        : 'Could not be reliably measured',
       flag: metrics.flags.cadence?.level ?? 'ok',
     },
     {
@@ -9067,7 +9073,7 @@ function renderStrideMetrics(metrics, aggregated={}) {
       flag: metrics.cvStridePct!=null&&metrics.cvStridePct>5 ? 'warn' : 'ok',
     },
     {
-      label:'Ground Contact',
+      label:'Ground Contact (est.)',
       value: metrics.gcPct != null ? metrics.gcPct+'%' : '—',
       unit:'of cycle',
       sub: metrics.gcPct != null
@@ -9076,7 +9082,7 @@ function renderStrideMetrics(metrics, aggregated={}) {
       flag: metrics.flags.gct?.level ?? 'ok',
     },
     {
-      label:'Float Time',
+      label:'Float Time (est.)',
       value: metrics.hasFloat ? metrics.floatPct+'%' : 'None',
       unit: metrics.hasFloat ? 'of cycle' : 'detected',
       sub: metrics.hasFloat
@@ -9238,9 +9244,15 @@ function renderStrideMetrics(metrics, aggregated={}) {
       ${metrics.overstrideGrade && metrics.overstrideGrade !== 'none' ? `<br>⚠ <strong>Overstride ${metrics.overstrideDistCm ?? ''}cm (${metrics.overstrideGrade})</strong> — foot landing ahead of hip at contact. ${metrics.overstrideGrade === 'severe' ? 'Significant braking impulse risk.' : 'Consider shorter stride cue and cadence increase.'}` : ''}
       ${metrics.shinAngleAtContactDeg!=null ? `<br>📐 <strong>Shin angle at contact: ${metrics.shinAngleAtContactDeg}°</strong> — ${metrics.shinAngleAtContactDeg <= 15 ? 'within normal range.' : metrics.shinAngleAtContactDeg <= 20 ? 'borderline — monitor landing position.' : 'excessive forward lean at contact — braking force risk.'}` : ''}
     </div>` : ''}
-    ⚠️ Cadence and stride duration are accurate at any frame rate. GCT and float time require 60fps+.
+    ⚠️ Cadence and stride duration are directly measured and accurate at any frame rate. Values marked <strong>(est.)</strong> —
+    ground contact, float time, vertical oscillation — are inferred from phase timing rather than force/contact sensors; treat them as estimates.
     Phase labels on gallery frames marked <strong style="color:#7ec8c0;">✓</strong> are biomechanically detected; those marked
     <strong style="color:var(--muted);">~</strong> are nearest-event interpolated and should be interpreted with caution.
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:.68rem;">
+      <strong style="color:var(--navy);">Scope:</strong> This is a 2-D video <strong>screening</strong> tool, not a laboratory measurement.
+      Frontal-plane values (valgus, pelvic drop, pronation, hip adduction) are estimated from a single camera and are best used to flag
+      patterns for clinical follow-up, not as exact diagnostic numbers.
+    </div>
   </div>`;
 
   body.innerHTML = html;
@@ -12932,9 +12944,19 @@ async function runAnalysis() {
   }).join('\n');
 
   const injuredSideVal = document.getElementById('injuredSide')?.value || '';
+  // Privacy: never send the patient's name to the AI service. Reduce it to initials for the
+  // prompt; the full name stays client-side (on-screen report + PDF only). This keeps PHI out of
+  // the outbound API call. (v0.16.0)
+  const _deidentify = (n) => {
+    if(!n || n === 'Patient') return 'Patient';
+    const parts = String(n).trim().split(/\s+/).filter(Boolean);
+    const initials = parts.map(p => (p[0] || '').toUpperCase() + '.').join('');
+    return initials || 'Patient';
+  };
+  const promptPatientId = _deidentify(patientName);
   const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay: cyan joints/lines = high confidence, orange joints = estimated position (body was partially occluded, e.g. by a barbell), dashed lines = low confidence segment. A red dot labeled BAR marks the detected barbell position where applicable.
 
-PATIENT: ${patientName}${age ? `, Age ${age}` : ''}${injuredSideVal ? `, Symptomatic side: ${injuredSideVal}` : ''}
+PATIENT: ${promptPatientId} (de-identified initials)${age ? `, Age ${age}` : ''}${injuredSideVal ? `, Symptomatic side: ${injuredSideVal}` : ''}
 DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
 MOVEMENT ASSESSED: ${movement}
 ${dualViewNote}
@@ -13232,6 +13254,12 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       {type:'text', text:prompt}
     ];
 
+    // v0.16.0 graceful degradation: a failed AI call (bad Wi-Fi, timeout, key/API error) must NOT
+    // stall the whole report. On failure we fall through with report=null + aiFailed=true, and the
+    // deterministic score, metrics table, gallery, and PDF still render (AI narrative shows as
+    // "unavailable"). raw/report are hoisted so they're visible at the render call below.
+    let raw = '', report = null, aiFailed = false;
+    try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST',
       headers:{
@@ -13245,9 +13273,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
 
     const data = await res.json();
     if(!res.ok || data.error) throw new Error(data.error?.message || `API error ${res.status}`);
-    const raw = data.content.map(b=>b.text||'').join('');
+    raw = data.content.map(b=>b.text||'').join('');
 
-    let report = null;
+    report = null;
     try {
       report = JSON.parse(raw.replace(/```json|```/g,'').trim());
     } catch(e) {
@@ -13272,6 +13300,10 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         if(footwearM) r.footwear_recommendation=footwearM[1].replace(/\\n/g,'\n').replace(/\\"/g,'"');
         if(r.score||(r.findings&&r.findings.length)||r.recommendations?.length) report=r;
       } catch(e2) { report=null; }
+    }
+    } catch(aiErr) {
+      console.warn('[Analysis] AI narrative unavailable — rendering deterministic report only:', aiErr && aiErr.message);
+      aiFailed = true; report = null; raw = '';
     }
 
     console.log('[Analysis] Stage 4: Hiding spinner, showing results');
@@ -13876,7 +13908,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     try {
       // Store for session comparison snapshot
       window._lastAggregated = aggregated;
-      report ? renderReport(report, movement, allAngles.length, barStats, aggregated) : renderRaw(raw, movement);
+      report ? renderReport(report, movement, allAngles.length, barStats, aggregated)
+        : aiFailed ? renderReport({_aiUnavailable:true}, movement, allAngles.length, barStats, aggregated)
+        : renderRaw(raw, movement);
 
       // Render dense angle curves (landing/running only) — non-blocking, fires after main report
       if(denseCurves && denseCurves.length >= 4) {
@@ -14348,18 +14382,21 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       <div class="score-tile-label">Summary</div>
     </div>`;
 
+  const _naMsg = (what) => r._aiUnavailable
+    ? `<p class="finding-desc">Written ${what} unavailable — reconnect and re-run for the AI analysis. The measurements above are complete and valid.</p>`
+    : `<p class="finding-desc">No ${what} returned.</p>`;
   const findings=(r.findings||[]).map(f=>{
     const dc=f.priority==='high'?'dot-high':f.priority==='positive'?'dot-low':'dot-med';
     return `<div class="finding"><div class="finding-dot ${dc}"></div><div><div class="finding-title">${esc(f.title)}</div><div class="finding-desc">${esc(f.detail)}</div></div></div>`;
-  }).join('')||'<p class="finding-desc">No findings returned.</p>';
+  }).join('')||_naMsg('findings');
 
   const recs=(r.recommendations||[]).map((rec,i)=>
     `<div class="rec-item"><div class="rec-num">${i+1}</div><div class="rec-text">${esc(rec)}</div></div>`
-  ).join('')||'<p class="finding-desc">No recommendations returned.</p>';
+  ).join('')||_naMsg('recommendations');
 
   const edu=(r.patient_education||[]).map(pt=>
     `<div class="edu-item"><div class="edu-icon">💬</div><div class="edu-text">${esc(pt)}</div></div>`
-  ).join('')||'<p class="finding-desc">No education points returned.</p>';
+  ).join('')||_naMsg('patient education');
 
   const footwearHtml = r.footwear_recommendation ? `
     <div class="report-section full">
@@ -14385,7 +14422,14 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     </div>` : '';
 
   const _scoreWhy = _scoreBreakdown ? _scoreBreakdownText(_scoreBreakdown) : (r.score_rationale || _synthScoreWhy(r));
+  const _aiBanner = r._aiUnavailable ? `
+    <div class="report-section full">
+      <div style="background:#fff3cd;border:1px solid #ffe08a;border-left:4px solid var(--cta);border-radius:8px;padding:12px 16px;font-size:.85rem;color:#7a5b00;line-height:1.5;">
+        <strong>Written analysis unavailable.</strong> The AI narrative couldn't be generated (no connection, timeout, or API/key error). Everything below — the movement quality score, joint-angle table, stride metrics, gallery, and the PDF export — is computed on-device and is fully valid. Reconnect and re-run to add the written findings and recommendations.
+      </div>
+    </div>` : '';
   document.getElementById('reportGrid').innerHTML=`
+    ${_aiBanner}
     ${_scoreWhy ? `<div class="report-section full" id="scoreWhySection">
       <div class="section-head"><span class="sh-icon">📊</span><h3>Why This Score${score!=null?': '+score+'/10':''}</h3></div>
       <div class="section-body"><div class="score-why-text" style="font-size:.82rem;line-height:1.65;color:var(--text);">${esc(_scoreWhy)}</div></div>
@@ -15894,10 +15938,10 @@ async function exportPDF() {
 
       // KPI grid: 3 per row
       const kpiDefs = [
-        {label:'Cadence',          value: sm.cadenceSpm!=null ? `${sm.cadenceSpm} spm` : '—',   sub: sm.cadenceSpm!=null ? `${sm.cadenceStride} strides/min` : 'low confidence'},
+        {label:'Cadence',          value: sm.cadenceSpm!=null ? `${sm.cadenceSpm} spm` : '—',   sub: sm.cadenceSpm!=null ? (sm.cvStridePct!=null ? `± ${Math.max(1,Math.round(sm.cadenceSpm*sm.cvStridePct/100))} spm across ${sm.stridesDetected} strides` : `${sm.cadenceStride} strides/min`) : 'low confidence'},
         {label:'Stride Duration',  value:`${Math.round(sm.strideDurationS*1000)} ms`, sub: sm.cvStridePct!=null ? `CV ${sm.cvStridePct}%` : `avg of ${sm.stridesDetected} strides`},
         {
-          label:'Ground Contact',
+          label:'Ground Contact (est.)',
           value: sm.gcPct!=null ? `${sm.gcPct}%` : '60fps+',
           unit: sm.gcPct!=null ? 'of gait cycle' : 'required',
           sub: sm.gcPct!=null
@@ -15908,7 +15952,7 @@ async function exportPDF() {
           flag: sm.gcPct==null ? 'info' : (sm.flags.gct?.level ?? 'ok'),
         },
         {
-          label:'Float Time',
+          label:'Float Time (est.)',
           value: sm.floatPct!=null ? (sm.hasFloat ? `${sm.floatPct}%` : '0%') : '60fps+',
           unit: sm.floatPct!=null ? 'of cycle' : 'required',
           sub: sm.floatPct!=null
@@ -15935,7 +15979,7 @@ async function exportPDF() {
       if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
       if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'! overstriding':sm.overstrideFlag==='understride'?'! understriding':'optimal range'});
       if(sm.verticalOscillationCm!=null) kpiDefs.push({
-        label:'Vertical Oscillation',
+        label:'Vertical Oscillation (est.)',
         value:`${sm.verticalOscillationCm}cm`,
         sub: sm.verticalOscillationCm < 6 ? 'Elite (<6cm)' : sm.verticalOscillationCm <= 10 ? 'Normal (6–10cm)' : '⚠ High bounce (>10cm)',
         flag: sm.verticalOscillationCm <= 10 ? 'ok' : 'warn',
@@ -15988,8 +16032,8 @@ async function exportPDF() {
       }
 
       // Accuracy disclaimer + running context
-      guard(12);
-      setFill(C.bg); doc.rect(ML, y+2, CW, 9, 'F');
+      guard(20);
+      setFill(C.bg); doc.rect(ML, y+2, CW, 17, 'F');
       doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
       const fpsVal = sm.fps || 30;
       const fpsNote = fpsVal < 60 ? `GCT/float require 60fps+ for reliability.` : `GCT detection viable at ${fpsVal}fps.`;
@@ -16005,9 +16049,10 @@ async function exportPDF() {
       const _treadmillNote = _isTreadmill && /running|gait/i.test(_pdfMovement)
         ? ' Gallery phases use biomechanical timing (Zeni 2008 / Perry & Burnfield). Treadmill belt movement makes stance phases appear more compressed than overground — focus on the dense-pass measurements, not static gallery frame appearance.'
         : '';
-      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '') + _treadmillNote;
+      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '') + _treadmillNote
+        + ` Metrics marked (est.) — ground contact, float, vertical oscillation — are inferred from phase timing, not force sensors. This is a 2-D video screening tool, not a lab: frontal-plane values (valgus, pelvic drop, pronation) flag patterns for clinical follow-up rather than exact diagnosis.`;
       doc.text(disclaimerText, ML+3, y+7, {maxWidth:CW-6});
-      y += 13;
+      y += 20;
     }
 
     // ════════════════════════════════════════════════
