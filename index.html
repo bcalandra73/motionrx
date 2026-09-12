@@ -767,7 +767,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
           <!-- PRIMARY VIDEO -->
           <div>
-            <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">
+            <div id="primaryViewLabel" style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">
               Primary View <span style="color:var(--teal);font-weight:700;">Required</span>
             </div>
             <div id="uploadZone" class="upload-zone">
@@ -810,7 +810,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
           <!-- SECONDARY VIDEO -->
           <div>
-            <div style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">
+            <div id="secondaryViewLabel" style="font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px;">
               Second Angle <span style="color:var(--muted);font-weight:400;font-size:.68rem;">(Optional — improves accuracy)</span>
             </div>
             <div id="uploadZone2" class="upload-zone upload-zone-secondary">
@@ -3241,12 +3241,12 @@ function startFrameExtraction(file, vid) {
             const _r = await runMediaPipeOnFrames(_bFrames);
             _bLms = _r.map(x => (x && x.poseLandmarks) ? x.poseLandmarks : null);
           }
-          window_balanceMetrics = computeBalanceMetrics(_bLms, _bFrames.map(f => f.t), cameraView);
-          if(window_balanceMetrics) {
-            const _bm = window_balanceMetrics;
-            console.log(`[Balance] stance=${_bm.stanceLeg} single-leg=${_bm.singleLegPct}% | ${_bm.swayAxisLabel} sway RMS=${_bm.swayHorizPct}%SW vert=${_bm.swayVertPct}%SW | path=${_bm.pathLenPerSec}/s ellipse=${_bm.ellipseArea} | touchdowns=${_bm.touchdowns} trunkLean=${_bm.trunkLeanMax}° | n=${_bm.nFrames} view=${_bm.view}`);
+          const _leftM = computeBalanceMetrics(_bLms, _bFrames.map(f => f.t), cameraView);
+          window_balanceMetrics = Object.assign((window_balanceMetrics && typeof window_balanceMetrics==='object') ? window_balanceMetrics : {}, { left: _leftM });
+          if(_leftM) {
+            console.log(`[Balance:LEFT-stance] stance=${_leftM.stanceLeg} single-leg=${_leftM.singleLegPct}% | ${_leftM.swayAxisLabel} sway RMS=${_leftM.swayHorizPct}%SW | ellipse=${_leftM.ellipseArea} touchdowns=${_leftM.touchdowns} trunkLean=${_leftM.trunkLeanMax}° | n=${_leftM.nFrames} view=${_leftM.view}`);
           } else {
-            console.warn('[Balance] insufficient trackable frames — sway not computed');
+            console.warn('[Balance:LEFT-stance] insufficient trackable frames — sway not computed');
           }
         } catch(_bErr) { console.warn('[Balance] pass failed:', _bErr.message); }
       }
@@ -3668,6 +3668,39 @@ async function startFrameExtraction2(file, vid) {
 
     const movement = document.getElementById('movementType').value || '';
 
+    // ── Balance: the SECONDARY clip is the RIGHT-leg-stance video (v0.16.0) ─────
+    // Run the same postural-sway pass on it (mirrors the primary/left pass in doExtract)
+    // and stash under window_balanceMetrics.right. Then stop — the gait phase-sync below
+    // is not relevant to a static balance hold.
+    if(/balance|single-leg stance/i.test(movement)) {
+      try {
+        if(dur >= 2 && (moveNetReady || (mpReady && poseInstance))) {
+          statusText.textContent = 'Analysing right-stance sway…';
+          const _bN = Math.min(96, Math.max(40, Math.round(dur * 7)));
+          const _bF = [];
+          for(let _i = 0; _i < _bN; _i++) {
+            const _t = 0.03 + (_i / (_bN - 1)) * 0.94;
+            const _b = await seekCapture2(vid, Math.max(0.05, _t * dur));
+            if(_b) _bF.push({ imageData: _b, t: _t * dur });
+            if(barFill) barFill.style.width = `${Math.round(((_i + 1) / _bN) * 90)}%`;
+          }
+          let _rLms;
+          if(moveNetReady) _rLms = await coarseScanWithMoveNet(_bF, statusText);
+          else { const _r = await runMediaPipeOnFrames(_bF); _rLms = _r.map(x => (x && x.poseLandmarks) ? x.poseLandmarks : null); }
+          const _rightM = computeBalanceMetrics(_rLms, _bF.map(f => f.t), (typeof cameraView2!=='undefined' ? cameraView2 : 'front'));
+          window_balanceMetrics = Object.assign((window_balanceMetrics && typeof window_balanceMetrics==='object') ? window_balanceMetrics : {}, { right: _rightM });
+          // keep ~8 frames so hasDualView is true and later increments can show a peak frame
+          const _stepB = Math.max(1, Math.floor(_bF.length / 8));
+          extractedFrames2 = _bF.filter((_, i) => i % _stepB === 0).slice(0, 8).map((f, i) => ({ imageData: f.imageData, phase: { id:'hold', label:`R-Hold ${i+1}`, desc:'' } }));
+          if(_rightM) console.log(`[Balance:RIGHT-stance] stance=${_rightM.stanceLeg} single-leg=${_rightM.singleLegPct}% | ${_rightM.swayAxisLabel} sway RMS=${_rightM.swayHorizPct}%SW ellipse=${_rightM.ellipseArea} touchdowns=${_rightM.touchdowns} trunkLean=${_rightM.trunkLeanMax}° | n=${_rightM.nFrames}`);
+          else console.warn('[Balance:RIGHT-stance] insufficient trackable frames');
+        }
+      } catch(_e){ console.warn('[Balance:RIGHT-stance] pass failed:', _e.message); }
+      statusText.textContent = '✓ Right-stance video analysed';
+      if(barFill) barFill.style.width = '100%';
+      return;
+    }
+
     // ── Sync secondary video to primary video's detected gait phases ──────────
     // If the primary video went through GaitFSM and stored phase fractions,
     // seek video 2 to those same fractions of ITS duration.
@@ -4028,12 +4061,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const v = sel.value || '';
     const isGait = /running|gait|walk/i.test(v);
     const isJump = /drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v);
+    const isBalance = /balance|single-leg stance/i.test(v);
     const card = document.getElementById('runningInputsCard');
     const jump = document.getElementById('jumpInputsCard');
     const tape = document.getElementById('tapeMarkersCard');
     if(card) card.style.display = isGait ? 'block' : 'none';
     if(jump) jump.style.display = isJump ? 'block' : 'none';
     if(tape) tape.style.display = (isGait || isJump) ? 'block' : 'none';
+    // ── Balance: two anterior clips (Left-stance + Right-stance) ─────────────
+    // Relabel the two upload slots to Left/Right stance, force anterior (front) view for
+    // both, and prompt that BOTH are required for the L/R asymmetry comparison. (v0.16.0)
+    const _pLbl = document.getElementById('primaryViewLabel');
+    const _sLbl = document.getElementById('secondaryViewLabel');
+    if(isBalance) {
+      if(_pLbl) _pLbl.innerHTML = 'Left-Leg Stance <span style="color:var(--teal);font-weight:700;">Required · front view</span>';
+      if(_sLbl) _sLbl.innerHTML = 'Right-Leg Stance <span style="color:var(--teal);font-weight:700;">Required · front view</span>';
+      try { const _vf=document.getElementById('viewFront'); if(_vf && typeof setCameraView==='function') setCameraView('front', _vf); } catch(e){}
+      try { const _v2f=document.getElementById('view2Front'); if(_v2f && typeof setCameraView2==='function') setCameraView2('front', _v2f); } catch(e){}
+    } else if(_pLbl && _sLbl) {
+      _pLbl.innerHTML = 'Primary View <span style="color:var(--teal);font-weight:700;">Required</span>';
+      _sLbl.innerHTML = 'Second Angle <span style="color:var(--muted);font-weight:400;font-size:.68rem;">(Optional — improves accuracy)</span>';
+    }
   }
   const movSel = document.getElementById('movementType');
   if(movSel) {
@@ -14294,37 +14342,50 @@ function computeBalanceMetrics(lmsArr, times, view){
     armExcursionPct: armEx.length ? Math.round(median(armEx)/SW*100) : null,
   };
 }
+// Per-leg balance sub-score (0-10) from one leg's metrics. Provisional screening bands.
+function _legBalanceScore(m){
+  if(!m) return null;
+  const d=[]; let neg=0; const add=(x,lab)=>{ neg-=x; d.push({pts:-x,label:lab}); };
+  const s=m.swayHorizPct, ax=m.swayAxisLabel;
+  if(s!=null){ if(s>14) add(2.0,`high ${ax} sway (${s}%)`); else if(s>9) add(1.0,`moderate ${ax} sway (${s}%)`); else if(s>6) add(0.5,`mild ${ax} sway (${s}%)`); }
+  if(m.touchdowns!=null){ if(m.touchdowns>=3) add(2.0,`${m.touchdowns} touch-downs`); else if(m.touchdowns===2) add(1.0,'2 touch-downs'); else if(m.touchdowns===1) add(0.5,'1 touch-down'); }
+  if(m.ellipseArea!=null){ if(m.ellipseArea>0.20) add(1.0,'large sway area'); else if(m.ellipseArea>0.10) add(0.5,'moderate sway area'); }
+  if(m.trunkLeanMax!=null && m.trunkLeanMax>12) add(0.5,`trunk lean ${m.trunkLeanMax}°`);
+  if(m.armExcursionPct!=null && m.armExcursionPct>60) add(0.5,`arm-assisted balance (${m.armExcursionPct}% SW)`);
+  return { sub: Math.max(1, Math.min(10, Math.round(10+neg))), neg, deductions:d };
+}
+// asymmetry % between the two legs for a metric (0 = symmetric, higher = worse)
+function _balAsymPct(a,b){ if(a==null||b==null) return null; const hi=Math.max(a,b), lo=Math.min(a,b); return hi<=0 ? 0 : Math.round((hi-lo)/hi*100); }
+// Combined two-leg balance score: mean of the per-leg sub-scores minus an L/R asymmetry penalty.
 function computeBalanceScore(bm){
   if(!bm) return null;
-  const ded=[], str=[]; let neg=0;
-  const add=(d,label)=>{ neg-=d; ded.push({pts:-d, label}); };
-  const s = bm.swayHorizPct, ax = bm.swayAxisLabel;
-  if(s!=null){
-    if(s>14) add(2.0, `high ${ax} sway (${s}% shoulder width)`);
-    else if(s>9) add(1.0, `moderate ${ax} sway (${s}%)`);
-    else if(s>6) add(0.5, `mild ${ax} sway (${s}%)`);
-    else str.push(`low ${ax} sway (${s}%)`);
-  }
-  if(bm.touchdowns!=null){
-    if(bm.touchdowns>=3) add(2.0, `${bm.touchdowns} losses of balance (foot touch-downs)`);
-    else if(bm.touchdowns===2) add(1.0, '2 balance touch-downs');
-    else if(bm.touchdowns===1) add(0.5, '1 balance touch-down');
-    else str.push('held single-leg throughout (no touch-downs)');
-  }
-  if(bm.ellipseArea!=null){
-    if(bm.ellipseArea>0.20) add(1.0, `large sway area (95% ellipse ${bm.ellipseArea})`);
-    else if(bm.ellipseArea>0.10) add(0.5, `moderate sway area (${bm.ellipseArea})`);
-  }
-  if(bm.trunkLeanMax!=null && bm.trunkLeanMax>12) add(0.5, `trunk lean up to ${bm.trunkLeanMax}° (compensation)`);
-  if(bm.armExcursionPct!=null && bm.armExcursionPct>60) add(0.5, `arms used for balance (excursion ${bm.armExcursionPct}% SW)`);
-  const score = Math.max(1, Math.min(10, Math.round(10 + neg)));
-  return { score, total: Math.round(-neg*10)/10, deductions: ded, strengths: str, _balance:true };
+  const L = bm.left, R = bm.right;
+  const legL = _legBalanceScore(L), legR = _legBalanceScore(R);
+  if(!legL && !legR) return null;
+  // asymmetry (sway RMS + touch-down difference)
+  const swayAsym = (L&&R) ? _balAsymPct(L.swayHorizPct, R.swayHorizPct) : null;
+  const tdDiff = (L&&R && L.touchdowns!=null && R.touchdowns!=null) ? Math.abs(L.touchdowns-R.touchdowns) : null;
+  let asymPen=0; const asymNotes=[];
+  if(swayAsym!=null){ if(swayAsym>40){asymPen+=1.5; asymNotes.push(`${swayAsym}% sway asymmetry`);} else if(swayAsym>25){asymPen+=1.0; asymNotes.push(`${swayAsym}% sway asymmetry`);} else if(swayAsym>15){asymPen+=0.5; asymNotes.push(`${swayAsym}% sway asymmetry`);} }
+  if(tdDiff!=null){ if(tdDiff>=2){asymPen+=1.0; asymNotes.push(`${tdDiff} more touch-downs on one side`);} else if(tdDiff===1){asymPen+=0.5;} }
+  const subs = [legL, legR].filter(Boolean).map(x=>x.sub);
+  const mean = subs.reduce((a,b)=>a+b,0)/subs.length;
+  const score = Math.max(1, Math.min(10, Math.round(mean - asymPen)));
+  // worse leg = lower sub-score (targeted-intervention priority)
+  let worseLeg = null;
+  if(legL && legR) worseLeg = legL.sub < legR.sub ? 'Left' : legR.sub < legL.sub ? 'Right' : null;
+  return { score, _balance:true, legL, legR, swayAsym, tdDiff, asymPen, asymNotes, worseLeg,
+           haveBoth: !!(L && R) };
 }
 function _balanceScoreText(det){
-  let s = `Balance score ${det.score}/10 (started at 10, −${det.total.toFixed(1)} total).`;
-  s += det.deductions.length ? (' Deductions: ' + det.deductions.map(d=>`${d.pts.toFixed(1)} ${d.label}`).join('; ') + '.') : ' No penalised findings.';
-  if(det.strengths.length) s += ' Strengths (no penalty): ' + det.strengths.join('; ') + '.';
-  s += ' Sway thresholds are provisional screening bands — calibrate against normative/force-plate data before clinical use.';
+  const parts=[];
+  if(det.legL) parts.push(`Left-stance ${det.legL.sub}/10${det.legL.deductions.length?' ('+det.legL.deductions.map(d=>d.label).join(', ')+')':' (clean)'}`);
+  if(det.legR) parts.push(`Right-stance ${det.legR.sub}/10${det.legR.deductions.length?' ('+det.legR.deductions.map(d=>d.label).join(', ')+')':' (clean)'}`);
+  let s = `Balance score ${det.score}/10. ` + parts.join('. ') + '.';
+  if(!det.haveBoth) s += ' Only one leg was analysed — upload both a Left-stance and a Right-stance clip for the asymmetry comparison.';
+  else if(det.asymNotes.length){ s += ` L/R asymmetry penalty −${det.asymPen.toFixed(1)} (${det.asymNotes.join('; ')}).`; if(det.worseLeg) s += ` ${det.worseLeg} leg is the weaker side — prioritise it for targeted balance work.`; }
+  else s += ' Left and right are well matched — no asymmetry penalty.';
+  s += ' Sway thresholds are provisional screening bands — calibrate before clinical use.';
   return s;
 }
 function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv){
@@ -14580,27 +14641,32 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   const _scoreWhy = _scoreBreakdown
     ? (_scoreBreakdown._balance ? _balanceScoreText(_scoreBreakdown) : _scoreBreakdownText(_scoreBreakdown))
     : (r.score_rationale || _synthScoreWhy(r));
-  // Balance / postural-sway panel (v0.16.0) — only when a balance clip produced sway metrics.
-  const _bm = (typeof window_balanceMetrics!=='undefined') ? window_balanceMetrics : null;
-  const _balTile = (v,l,sub,flag)=>`<div class="score-tile"><div class="score-tile-value ${flag||''}" style="font-size:1.2rem;">${v}</div><div class="score-tile-label">${l}</div>${sub?`<div style="font-size:.62rem;color:var(--muted);margin-top:2px;">${sub}</div>`:''}</div>`;
-  const balanceHtml = (/balance|single-leg stance/i.test(movement) && _bm) ? `
+  // Balance — Left vs Right single-leg-stance comparison panel (v0.16.0).
+  const _bmAll = (typeof window_balanceMetrics!=='undefined') ? window_balanceMetrics : null;
+  const _bL = _bmAll && _bmAll.left, _bR = _bmAll && _bmAll.right;
+  const balanceHtml = (/balance|single-leg stance/i.test(movement) && (_bL || _bR)) ? (()=>{
+    const fmt = (m,k,suf)=> (m && m[k]!=null) ? (m[k]+(suf||'')) : '—';
+    const asymOf = (k)=> (_bL && _bR && _bL[k]!=null && _bR[k]!=null) ? (_balAsymPct(_bL[k],_bR[k])+'%') : '—';
+    const axis = (_bL&&_bL.swayAxisLabel) || (_bR&&_bR.swayAxisLabel) || 'sway';
+    const row = (label,l,r,asym)=>`<tr><td style="font-weight:600">${label}</td><td>${l}</td><td>${r}</td><td class="ref">${asym}</td></tr>`;
+    return `
     <div class="report-section full">
-      <div class="section-head"><span class="sh-icon">⚖️</span><h3>Balance &amp; Postural Sway</h3></div>
+      <div class="section-head"><span class="sh-icon">⚖️</span><h3>Balance — Left vs Right Single-Leg Stance</h3></div>
       <div class="section-body">
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;">
-          ${_balTile(_bm.swayHorizPct+'%', _bm.swayAxisLabel+' sway', 'RMS · % shoulder width', _bm.swayHorizPct>9?'score-poor':_bm.swayHorizPct>6?'score-warn':'score-good')}
-          ${_balTile(_bm.ellipseArea, '95% sway area', '(shoulder-width)²', _bm.ellipseArea>0.20?'score-poor':_bm.ellipseArea>0.10?'score-warn':'score-good')}
-          ${_balTile((_bm.touchdowns!=null?_bm.touchdowns:'—'), 'Balance losses', 'foot touch-downs', (_bm.touchdowns>=2?'score-poor':_bm.touchdowns===1?'score-warn':'score-good'))}
-          ${_bm.armExcursionPct!=null?_balTile(_bm.armExcursionPct+'%', 'Arm excursion', '% shoulder width', (_bm.armExcursionPct>60?'score-warn':'score-good')):''}
-          ${_balTile((_bm.stanceLeg==='L'?'Left':_bm.stanceLeg==='R'?'Right':'—'), 'Stance leg', (_bm.singleLegPct!=null?_bm.singleLegPct+'% single-leg':''), '')}
-          ${_bm.trunkLeanMax!=null?_balTile(_bm.trunkLeanMax+'°', 'Peak trunk lean', 'compensation', (_bm.trunkLeanMax>12?'score-warn':'score-good')):''}
-        </div>
+        <table class="angles-table"><thead><tr><th>Metric</th><th style="color:#0ea5e9">Left stance</th><th style="color:#f97316">Right stance</th><th>Asymmetry</th></tr></thead><tbody>
+          ${row(axis+' sway (RMS, %SW)', fmt(_bL,'swayHorizPct','%'), fmt(_bR,'swayHorizPct','%'), asymOf('swayHorizPct'))}
+          ${row('95% sway area', fmt(_bL,'ellipseArea'), fmt(_bR,'ellipseArea'), asymOf('ellipseArea'))}
+          ${row('Balance losses (touch-downs)', fmt(_bL,'touchdowns'), fmt(_bR,'touchdowns'), '—')}
+          ${row('Single-leg hold %', fmt(_bL,'singleLegPct','%'), fmt(_bR,'singleLegPct','%'), '—')}
+          ${row('Peak trunk lean', fmt(_bL,'trunkLeanMax','°'), fmt(_bR,'trunkLeanMax','°'), asymOf('trunkLeanMax'))}
+          ${row('Arm excursion (%SW)', fmt(_bL,'armExcursionPct','%'), fmt(_bR,'armExcursionPct','%'), asymOf('armExcursionPct'))}
+        </tbody></table>
         <div style="margin-top:10px;font-size:.72rem;color:var(--muted);line-height:1.5;">
-          Sway is tracked from the pelvis centre of mass across ${_bm.nFrames} frames of the hold, normalised to shoulder width. This is a
-          <strong>2-D screening</strong> proxy from a single ${_bm.view==='front'?'front':'side'}-view camera — it captures ${_bm.swayAxisLabel} sway only; true centre-of-pressure needs a force plate, and a front + side pair would give both planes. Sway thresholds are <em>provisional</em> and should be calibrated before clinical use.
+          Sway is tracked from the pelvis centre of mass, normalised to shoulder width. 2-D anterior-view <strong>screening</strong> proxy — captures ${axis} sway; true centre-of-pressure needs a force plate. Thresholds are <em>provisional</em>. ${(!_bL||!_bR)?'<strong>Only one leg analysed</strong> — upload both a Left-stance and a Right-stance clip for the asymmetry comparison.':''}
         </div>
       </div>
-    </div>` : '';
+    </div>`;
+  })() : '';
   const _aiBanner = r._aiUnavailable ? `
     <div class="report-section full">
       <div style="background:#fff3cd;border:1px solid #ffe08a;border-left:4px solid var(--cta);border-radius:8px;padding:12px 16px;font-size:.85rem;color:#7a5b00;line-height:1.5;">
@@ -16238,41 +16304,46 @@ async function exportPDF() {
     // ════════════════════════════════════════════════
     // BALANCE / POSTURAL SWAY (balance clips only)
     // ════════════════════════════════════════════════
-    if(typeof window_balanceMetrics!=='undefined' && window_balanceMetrics) {
-      const _bm = window_balanceMetrics;
-      guard(SECTION_HEAD_H + 46);
-      sectionHead('Balance & Postural Sway', C.teal);
-      const _bTiles = [
-        { label:(_bm.swayAxisLabel==='medial-lateral'?'M-L':'A-P')+' Sway (RMS)', value:_bm.swayHorizPct+'%', sub:'% shoulder width' },
-        { label:'95% Sway Area', value:''+_bm.ellipseArea, sub:'(shoulder-width)²' },
-        { label:'Balance Losses', value:(_bm.touchdowns!=null?''+_bm.touchdowns:'—'), sub:'foot touch-downs' },
-        { label:'Stance Leg', value:(_bm.stanceLeg==='L'?'Left':_bm.stanceLeg==='R'?'Right':'—'), sub:(_bm.singleLegPct!=null?_bm.singleLegPct+'% single-leg':'') },
-        { label:'Peak Trunk Lean', value:(_bm.trunkLeanMax!=null?_bm.trunkLeanMax+'°':'—'), sub:'compensation' },
-        { label:'Arm Excursion', value:(_bm.armExcursionPct!=null?_bm.armExcursionPct+'%':'—'), sub:'% shoulder width' },
+    if(typeof window_balanceMetrics!=='undefined' && window_balanceMetrics && (window_balanceMetrics.left || window_balanceMetrics.right)) {
+      const _bL = window_balanceMetrics.left, _bR = window_balanceMetrics.right;
+      const _axis = (_bL&&_bL.swayAxisLabel) || (_bR&&_bR.swayAxisLabel) || 'sway';
+      const _bfmt = (m,k,suf)=> (m && m[k]!=null) ? (''+m[k]+(suf||'')) : '—';
+      const _basym = (k)=> (_bL&&_bR&&_bL[k]!=null&&_bR[k]!=null) ? (_balAsymPct(_bL[k],_bR[k])+'%') : '—';
+      const _bRows = [
+        [ (_axis==='medial-lateral'?'M-L':'A-P')+' sway (RMS, %SW)', _bfmt(_bL,'swayHorizPct','%'), _bfmt(_bR,'swayHorizPct','%'), _basym('swayHorizPct') ],
+        [ '95% sway area', _bfmt(_bL,'ellipseArea'), _bfmt(_bR,'ellipseArea'), _basym('ellipseArea') ],
+        [ 'Balance losses (touch-downs)', _bfmt(_bL,'touchdowns'), _bfmt(_bR,'touchdowns'), '—' ],
+        [ 'Single-leg hold %', _bfmt(_bL,'singleLegPct','%'), _bfmt(_bR,'singleLegPct','%'), '—' ],
+        [ 'Peak trunk lean', _bfmt(_bL,'trunkLeanMax','°'), _bfmt(_bR,'trunkLeanMax','°'), _basym('trunkLeanMax') ],
+        [ 'Arm excursion (%SW)', _bfmt(_bL,'armExcursionPct','%'), _bfmt(_bR,'armExcursionPct','%'), _basym('armExcursionPct') ],
       ];
-      const bCols = 3, bW = (CW-(bCols-1)*4)/bCols, BKPI_H = 18;
-      let bCol=0, bRowY=y;
-      _bTiles.forEach(({label,value,sub})=>{
-        if(bCol===0){ guard(BKPI_H+2); bRowY=y; }
-        const bx = ML + bCol*(bW+4);
-        setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.2);
-        doc.roundedRect(bx, bRowY, bW, BKPI_H, 2, 2, 'FD');
-        setFill(C.teal); doc.roundedRect(bx, bRowY, bW, 2, 1, 0, 'F');
-        doc.setFont('helvetica','normal'); doc.setFontSize(5.5); setColor(C.muted);
-        doc.text(label.toUpperCase(), bx+4, bRowY+6);
-        doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.navy);
-        doc.text(value, bx+4, bRowY+13);
-        if(sub){ doc.setFont('helvetica','normal'); doc.setFontSize(5.5); setColor(C.muted); doc.text(sub, bx+4, bRowY+17); }
-        bCol++;
-        if(bCol>=bCols){ bCol=0; y=bRowY+BKPI_H+3; }
+      const _bcolW = [ CW*0.40, CW*0.20, CW*0.20, CW*0.20 ];
+      const _BRH = 6.5, _BHH = 7;
+      guard(SECTION_HEAD_H + _BHH + _BRH*_bRows.length + 22);
+      sectionHead('Balance — Left vs Right Single-Leg Stance', C.teal);
+      setFill(C.navy); doc.rect(ML, y, CW, _BHH, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(7); setColor(C.white);
+      let _bcx = ML+3; ['Metric','Left stance','Right stance','Asymmetry'].forEach((h,i)=>{ doc.text(h,_bcx,y+5); _bcx+=_bcolW[i]; });
+      y += _BHH;
+      _bRows.forEach((rw,ri)=>{
+        setFill(ri%2===0?C.surface:C.white); doc.rect(ML, y, CW, _BRH, 'F');
+        _bcx = ML+3;
+        rw.forEach((cell,ci)=>{
+          setColor(ci===0?C.text:C.navy); doc.setFont('helvetica', ci===0?'normal':'bold'); doc.setFontSize(7);
+          doc.text(''+cell, _bcx, y+4.5, {maxWidth:_bcolW[ci]-3}); _bcx+=_bcolW[ci];
+        });
+        y += _BRH;
       });
-      if(bCol>0) y = bRowY+BKPI_H+3;
-      guard(16);
-      setFill(C.bg); doc.rect(ML, y+2, CW, 13, 'F');
+      const _bScore = computeBalanceScore(window_balanceMetrics);
+      if(_bScore && _bScore.worseLeg){
+        y += 3; doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.amber);
+        doc.text(`Weaker side: ${_bScore.worseLeg} leg — priority for targeted balance work.`, ML+3, y); y += 4;
+      }
+      guard(14);
+      setFill(C.bg); doc.rect(ML, y+2, CW, 12, 'F');
       doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
-      const _bView = _bm.view==='front' ? 'front' : 'side';
-      doc.text(`Sway tracked from the pelvis centre of mass across ${_bm.nFrames} frames, normalised to shoulder width. 2-D single-camera (${_bView}-view) screening proxy — captures ${_bm.swayAxisLabel} sway only; true centre-of-pressure needs a force plate. Sway thresholds are provisional and should be calibrated before clinical use.`, ML+3, y+7, {maxWidth:CW-6});
-      y += 18;
+      doc.text(`Sway from the pelvis centre of mass, normalised to shoulder width. 2-D anterior-view screening proxy — captures ${_axis} sway; true centre-of-pressure needs a force plate. ${(!_bL||!_bR)?'Only one leg analysed — upload both a Left and Right clip for the asymmetry comparison. ':''}Sway thresholds are provisional and should be calibrated before clinical use.`, ML+3, y+6, {maxWidth:CW-6});
+      y += 16;
     }
 
     // ════════════════════════════════════════════════
