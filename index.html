@@ -1611,6 +1611,7 @@ function startFrameExtraction(file, vid) {
   let started = false;
   window_strideMetrics = null; // reset for each new analysis
   window_balanceMetrics = null;
+  window._balancePeak = null;
   window_primaryPhaseSelection = null;
   window._denseAnglesFrames = null;
   window._fusionDisagree = {}; // v0.15.0: per-landmark MP/MoveNet disagreement (max across fusion frames)
@@ -3243,6 +3244,13 @@ function startFrameExtraction(file, vid) {
           }
           const _leftM = computeBalanceMetrics(_bLms, _bFrames.map(f => f.t), cameraView);
           window_balanceMetrics = Object.assign((window_balanceMetrics && typeof window_balanceMetrics==='object') ? window_balanceMetrics : {}, { left: _leftM });
+          // Stash the peak-deviation frame image + sway trail for the report's annotated frame.
+          if(_leftM && _leftM.peakFrameIdx!=null && _bFrames[_leftM.peakFrameIdx]) {
+            window._balancePeak = Object.assign((window._balancePeak && typeof window._balancePeak==='object') ? window._balancePeak : {}, {
+              left: { img:_bFrames[_leftM.peakFrameIdx].imageData, trail:_leftM.comTrail, mean:_leftM.comMeanImg, peak:_leftM.peakPt,
+                      view:_leftM.view, sway:_leftM.swayHorizPct, axis:_leftM.swayAxisLabel, devPct:_leftM.peakDevPct, aspect:_leftM.aspect }
+            });
+          }
           if(_leftM) {
             console.log(`[Balance:LEFT-stance] stance=${_leftM.stanceLeg} single-leg=${_leftM.singleLegPct}% | ${_leftM.swayAxisLabel} sway RMS=${_leftM.swayHorizPct}%SW | ellipse=${_leftM.ellipseArea} touchdowns=${_leftM.touchdowns} trunkLean=${_leftM.trunkLeanMax}° | n=${_leftM.nFrames} view=${_leftM.view}`);
           } else {
@@ -3689,6 +3697,13 @@ async function startFrameExtraction2(file, vid) {
           else { const _r = await runMediaPipeOnFrames(_bF); _rLms = _r.map(x => (x && x.poseLandmarks) ? x.poseLandmarks : null); }
           const _rightM = computeBalanceMetrics(_rLms, _bF.map(f => f.t), (typeof cameraView2!=='undefined' ? cameraView2 : 'front'));
           window_balanceMetrics = Object.assign((window_balanceMetrics && typeof window_balanceMetrics==='object') ? window_balanceMetrics : {}, { right: _rightM });
+          // Stash the right-leg peak-deviation frame image + sway trail for the report.
+          if(_rightM && _rightM.peakFrameIdx!=null && _bF[_rightM.peakFrameIdx]) {
+            window._balancePeak = Object.assign((window._balancePeak && typeof window._balancePeak==='object') ? window._balancePeak : {}, {
+              right: { img:_bF[_rightM.peakFrameIdx].imageData, trail:_rightM.comTrail, mean:_rightM.comMeanImg, peak:_rightM.peakPt,
+                       view:_rightM.view, sway:_rightM.swayHorizPct, axis:_rightM.swayAxisLabel, devPct:_rightM.peakDevPct, aspect:_rightM.aspect }
+            });
+          }
           // keep ~8 frames so hasDualView is true and later increments can show a peak frame
           const _stepB = Math.max(1, Math.floor(_bF.length / 8));
           extractedFrames2 = _bF.filter((_, i) => i % _stepB === 0).slice(0, 8).map((f, i) => ({ imageData: f.imageData, phase: { id:'hold', label:`R-Hold ${i+1}`, desc:'' } }));
@@ -13469,8 +13484,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       gallery.innerHTML = '';
 
       const dualView = hasDualView && annotatedFrames2.length > 0;
+      const _balPeak = (/balance|single-leg stance/i.test(movement) && window._balancePeak && (window._balancePeak.left || window._balancePeak.right)) ? window._balancePeak : null;
 
-      if(dualView) {
+      if(_balPeak) {
+        // ── Balance: one peak-deviation frame per leg with the sway trail overlaid ──
+        // Replaces the 8-frame hold gallery (v0.16.1).
+        gallery.classList.remove('dual-view');
+        gallery.innerHTML = renderBalancePeakFrames(_balPeak);
+      } else if(dualView) {
         // ── Paired dual-view layout ──
         gallery.classList.add('dual-view');
         const v1Frames = annotatedFrames;
@@ -13668,7 +13689,9 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       // Update section title based on view mode
       const titleEl = document.getElementById('framesSectionTitle');
       if(titleEl) {
-        if(dualView) {
+        if(_balPeak) {
+          titleEl.textContent = `Balance — Peak-Sway Frame per Leg (pelvis sway trail overlaid)`;
+        } else if(dualView) {
           titleEl.textContent = `Dual-Plane Analysis — ${view1Label.split(' (')[0]} + ${view2Label.split(' (')[0]} · ${annotatedFrames.length} phase pairs`;
         } else {
           const vName = cameraView==='side' ? 'Side View' : cameraView==='front' ? 'Front View' : 'Posterior View';
@@ -14372,7 +14395,10 @@ function computeBalanceMetrics(lmsArr, times, view){
   for(let f=0; f<lmsArr.length; f++){
     const lm = lmsArr[f]; if(!lm) continue;
     const lH=vis(lm,23), rH=vis(lm,24), lS=vis(lm,11), rS=vis(lm,12);
-    if(lH && rH) com.push({ t: (times && times[f]!=null) ? times[f] : f, x: ((lH.x+rH.x)/2)*asp, y: (lH.y+rH.y)/2 });
+    // Store both aspect-corrected coords (x/y — for true-distance sway math) and the RAW
+    // image-normalised coords (ix/iy — 0..1, for drawing the trail over the video frame),
+    // plus the source frame index f so the peak-deviation frame image can be recovered.
+    if(lH && rH) com.push({ t: (times && times[f]!=null) ? times[f] : f, x: ((lH.x+rH.x)/2)*asp, y: (lH.y+rH.y)/2, ix:(lH.x+rH.x)/2, iy:(lH.y+rH.y)/2, f });
     if(lS && rS) shoulderW.push(Math.abs((lS.x-rS.x)*asp));
     if(lS && rS && lH && rH){
       const smx=((lS.x+rS.x)/2)*asp, smy=(lS.y+rS.y)/2, hmx=((lH.x+rH.x)/2)*asp, hmy=(lH.y+rH.y)/2;
@@ -14415,6 +14441,16 @@ function computeBalanceMetrics(lmsArr, times, view){
     touchdowns = td;
   }
   const isFront = (view==='front');
+  // Peak-deviation frame: the moment the COM is farthest from its mean position — the single
+  // most representative "worst sway" frame to show the clinician. Also expose the full trail
+  // (raw image-normalised) + mean so the report can draw the sway path over that frame.
+  let peakK=0, peakD=-1;
+  for(let k=0;k<com.length;k++){ const d=Math.hypot(dvx[k],dvy[k]); if(d>peakD){ peakD=d; peakK=k; } }
+  const mix = com.reduce((s,p)=>s+p.ix,0)/com.length, miy = com.reduce((s,p)=>s+p.iy,0)/com.length;
+  const peakFrameIdx = com[peakK] ? com[peakK].f : null;
+  const peakPt = com[peakK] ? { ix: com[peakK].ix, iy: com[peakK].iy } : null;
+  const peakDevPct = Math.round(peakD/SW*1000)/10;
+  const comTrail = com.map(p=>({ ix:p.ix, iy:p.iy }));
   return {
     view: view || 'side', nFrames: com.length,
     swayHorizPct, swayVertPct, pathLenPerSec, ellipseArea,
@@ -14422,6 +14458,7 @@ function computeBalanceMetrics(lmsArr, times, view){
     stanceLeg, singleLegPct, touchdowns,
     trunkLeanMax: trunkLean.length ? Math.round(Math.max(...trunkLean)) : null,
     armExcursionPct: armEx.length ? Math.round(median(armEx)/SW*100) : null,
+    comTrail, comMeanImg: { ix:mix, iy:miy }, peakFrameIdx, peakPt, peakDevPct, aspect: asp,
   };
 }
 // Per-leg balance sub-score (0-10) from one leg's metrics. Provisional screening bands.
@@ -14469,6 +14506,43 @@ function _balanceScoreText(det){
   else s += ' Left and right are well matched — no asymmetry penalty.';
   s += ' Sway thresholds are provisional screening bands — calibrate before clinical use.';
   return s;
+}
+// Balance gallery: one peak-deviation frame per leg with the pelvis sway trail drawn over it.
+// The SVG viewBox matches the frame's aspect (W/H) so the overlay is geometrically true —
+// markers stay round and the trail lands on the pelvis. (v0.16.1)
+function renderBalancePeakFrames(bp){
+  const esc = (x)=> String(x==null?'':x);
+  const card = (leg, m, color) => {
+    if(!m || !m.img) {
+      return `<div class="frame-card" style="padding:18px;text-align:center;color:var(--muted);font-size:.8rem;cursor:default;">${leg}-leg stance clip not analysed — upload a ${leg.toLowerCase()}-leg clip for its peak-sway frame.</div>`;
+    }
+    const asp = (m.aspect && isFinite(m.aspect) && m.aspect>0) ? m.aspect : ((window._videoAspect)||0.563);
+    const X = (ix)=> (ix*asp).toFixed(4); // map raw-normalised x (0..1 of width) into the asp-wide viewBox
+    const trail = Array.isArray(m.trail) ? m.trail : [];
+    const pts = trail.map(p=>`${X(p.ix)},${p.iy.toFixed(4)}`).join(' ');
+    const mean = m.mean || {ix:0.5,iy:0.5};
+    const pk = m.peak || mean;
+    const swayTxt = (m.sway!=null) ? `${m.sway}% ${(m.axis||'').split('-')[0]}` : '—';
+    const svg = `<svg viewBox="0 0 ${asp.toFixed(4)} 1" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;">
+      ${pts ? `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>` : ''}
+      <line x1="${X(mean.ix-0.025)}" y1="${mean.iy.toFixed(4)}" x2="${X(mean.ix+0.025)}" y2="${mean.iy.toFixed(4)}" stroke="#ffffff" stroke-width="1.5" vector-effect="non-scaling-stroke" opacity="0.9"/>
+      <line x1="${X(mean.ix)}" y1="${(mean.iy-0.025).toFixed(4)}" x2="${X(mean.ix)}" y2="${(mean.iy+0.025).toFixed(4)}" stroke="#ffffff" stroke-width="1.5" vector-effect="non-scaling-stroke" opacity="0.9"/>
+      <circle cx="${X(pk.ix)}" cy="${pk.iy.toFixed(4)}" r="${(0.02*asp).toFixed(4)}" fill="none" stroke="${color}" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+      <circle cx="${X(pk.ix)}" cy="${pk.iy.toFixed(4)}" r="${(0.008*asp).toFixed(4)}" fill="${color}"/>
+    </svg>`;
+    return `<div class="frame-card" style="cursor:default;">
+      <div class="frame-card-img" style="position:relative;">
+        <img src="data:image/jpeg;base64,${esc(m.img)}" style="width:100%;height:auto;display:block;">
+        ${svg}
+      </div>
+      <div class="frame-label"><span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0;"></span>${leg}-Leg Stance — peak sway</span><span class="phase-badge" style="background:${color};color:#fff;">${swayTxt}</span></div>
+    </div>`;
+  };
+  return `<div style="grid-column:1/-1;font-size:.72rem;color:var(--muted);margin-bottom:8px;line-height:1.55;">
+      Each image is the single frame where the pelvis centre-of-mass was <strong>farthest from its average position</strong> — the peak-sway instant. The coloured line traces the full sway path across the hold; the white cross marks the average position and the ringed dot marks the peak. A tighter, more centred trail = steadier balance.
+    </div>
+    ${card('Left', bp.left, '#0ea5e9')}
+    ${card('Right', bp.right, '#f97316')}`;
 }
 function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv){
   sm = sm || {};
@@ -16010,7 +16084,53 @@ async function exportPDF() {
       isDualView ? '#framesGallery .phase-view-slot img' : '#framesGallery .frame-card img'
     )];
 
-    if(allFrameImgs.length > 0) {
+    // Balance: draw ONE peak-deviation frame per leg with the pelvis sway trail rendered as
+    // vector lines over the image (the on-screen SVG overlay isn't baked into the <img>, so we
+    // redraw it here). window._balancePeak is set only during a balance run. (v0.16.1)
+    const _balPeakPDF = (window._balancePeak && (window._balancePeak.left || window._balancePeak.right)) ? window._balancePeak : null;
+    if(_balPeakPDF) {
+      const GAP = 4, COLS = 2, fW = (CW - (COLS-1)*GAP) / COLS;
+      const _anyM = _balPeakPDF.left || _balPeakPDF.right;
+      const _wh = (_anyM && _anyM.aspect && isFinite(_anyM.aspect) && _anyM.aspect>0) ? _anyM.aspect : 0.563;
+      const fH = fW * (1/_wh); // fW * (H/W)
+      guard(SECTION_HEAD_H + fH + 16);
+      sectionHead('Balance - Peak-Sway Frame per Leg');
+      doc.setFont('helvetica','italic'); doc.setFontSize(6.5); setColor(C.text);
+      const _note = doc.splitTextToSize('Each frame is the instant the pelvis centre-of-mass was farthest from its average position (peak sway). Coloured line = full sway path; white cross = average position; ringed dot = peak. Tighter, more centred = steadier.', CW);
+      _note.slice(0,2).forEach((l,i)=>doc.text(l, ML, y+3+i*3.4));
+      y += 3 + Math.min(2,_note.length)*3.4 + 2;
+      const rowY = y;
+      [['Left', _balPeakPDF.left, [14,165,233]], ['Right', _balPeakPDF.right, [249,115,22]]].forEach(([leg,m,rgb], ci) => {
+        const fx = ML + ci*(fW+GAP);
+        if(!m || !m.img) {
+          setFill(C.surface); doc.rect(fx,rowY,fW,fH,'F');
+          setDraw(C.border); doc.setLineWidth(0.2); doc.rect(fx,rowY,fW,fH,'D');
+          doc.setFont('helvetica','normal'); doc.setFontSize(6.5); setColor(C.text);
+          doc.text(leg+'-leg clip not analysed', fx+fW/2, rowY+fH/2, {align:'center'});
+          return;
+        }
+        try { doc.addImage('data:image/jpeg;base64,'+m.img, 'JPEG', fx, rowY, fW, fH); } catch(_e){}
+        const PX = (ix)=> fx + ix*fW, PY = (iy)=> rowY + iy*fH;
+        const trail = Array.isArray(m.trail) ? m.trail : [];
+        if(trail.length > 1) {
+          doc.setDrawColor(rgb[0],rgb[1],rgb[2]); doc.setLineWidth(0.4);
+          for(let k=1;k<trail.length;k++) doc.line(PX(trail[k-1].ix),PY(trail[k-1].iy),PX(trail[k].ix),PY(trail[k].iy));
+        }
+        const mean = m.mean || {ix:0.5,iy:0.5};
+        doc.setDrawColor(255,255,255); doc.setLineWidth(0.4);
+        doc.line(PX(mean.ix)-1.6,PY(mean.iy),PX(mean.ix)+1.6,PY(mean.iy));
+        doc.line(PX(mean.ix),PY(mean.iy)-1.6,PX(mean.ix),PY(mean.iy)+1.6);
+        const pk = m.peak || mean;
+        doc.setDrawColor(rgb[0],rgb[1],rgb[2]); doc.setLineWidth(0.5); doc.circle(PX(pk.ix),PY(pk.iy),1.4,'S');
+        doc.setFillColor(rgb[0],rgb[1],rgb[2]); doc.circle(PX(pk.ix),PY(pk.iy),0.5,'F');
+        const LBAR = 4.5; setFill(C.navy); doc.setGState(doc.GState({opacity:0.72}));
+        doc.rect(fx,rowY+fH-LBAR,fW,LBAR,'F'); doc.setGState(doc.GState({opacity:1}));
+        doc.setFont('helvetica','bold'); doc.setFontSize(5.4); setColor(C.white);
+        doc.text((m.sway!=null)?`${leg}-Leg peak sway ${m.sway}%`:`${leg}-Leg stance`, fx+fW/2, rowY+fH-1.3, {align:'center'});
+        setDraw(C.border); doc.setLineWidth(0.2); doc.rect(fx,rowY,fW,fH,'D');
+      });
+      y = rowY + fH + 6;
+    } else if(allFrameImgs.length > 0) {
       const secTitle = (document.getElementById('framesSectionTitle')?.textContent||'Tracked Frames')
                         .replace(/[·—].*/,'').trim();
 
