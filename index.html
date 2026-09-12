@@ -9298,6 +9298,15 @@ function renderStrideMetrics(metrics, aggregated={}) {
 
 // Get phase times for a movement (returns array of 0-1 proportions)
 function getPhaseTimes(movement, videoDuration) {
+  // Balance / single-leg stance is a static hold with no phases — use neutral, evenly-spaced
+  // "Hold" frames. (Early return prevents it from partial-matching "Single-Leg Squat" below,
+  // which was mislabelling balance gallery frames as Descent/Bottom/Ascent.) v0.16.0
+  if(/balance|single-leg stance/i.test(movement)) {
+    return {
+      times: Array.from({length:8}, (_,i) => i===0 ? 0.03 : (i/7)*0.95),
+      labels: Array.from({length:8}, (_,i) => ({id:'hold', label:`Hold ${i+1}`, desc:'Balance hold'}))
+    };
+  }
   let phases = MOVEMENT_NORMS[movement] ? PHASE_MAPS[movement] : null;
   if(!phases) {
     // Try partial match
@@ -14266,7 +14275,13 @@ function computeBalanceMetrics(lmsArr, times, view){
     singleLegPct = Math.round(single.filter(Boolean).length/single.length*100);
     let lLow=0,rLow=0; ankPairs.forEach((p,i)=>{ if(single[i]){ if(p.lY>p.rY) lLow++; else rLow++; } });
     stanceLeg = lLow>=rLow ? 'L' : 'R'; // stance foot stays LOWER in the image (higher y)
-    let td=0; for(let i=1;i<single.length;i++) if(single[i-1] && !single[i]) td++;
+    // Touch-downs = sustained double-support episodes AFTER lift-off. Require the double-support
+    // run to persist ≥2 frames so a single-frame ankle-gap flicker isn't miscounted as a loss.
+    let td=0, i=0;
+    while(i<single.length){
+      if(!single[i]){ let j=i; while(j<single.length && !single[j]) j++; if((j-i)>=2 && i>0) td++; i=j; }
+      else i++;
+    }
     touchdowns = td;
   }
   const isFront = (view==='front');
@@ -14575,8 +14590,8 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;">
           ${_balTile(_bm.swayHorizPct+'%', _bm.swayAxisLabel+' sway', 'RMS · % shoulder width', _bm.swayHorizPct>9?'score-poor':_bm.swayHorizPct>6?'score-warn':'score-good')}
           ${_balTile(_bm.ellipseArea, '95% sway area', '(shoulder-width)²', _bm.ellipseArea>0.20?'score-poor':_bm.ellipseArea>0.10?'score-warn':'score-good')}
-          ${_balTile(_bm.pathLenPerSec+'/s', 'COM travel', 'shoulder-widths / sec', '')}
           ${_balTile((_bm.touchdowns!=null?_bm.touchdowns:'—'), 'Balance losses', 'foot touch-downs', (_bm.touchdowns>=2?'score-poor':_bm.touchdowns===1?'score-warn':'score-good'))}
+          ${_bm.armExcursionPct!=null?_balTile(_bm.armExcursionPct+'%', 'Arm excursion', '% shoulder width', (_bm.armExcursionPct>60?'score-warn':'score-good')):''}
           ${_balTile((_bm.stanceLeg==='L'?'Left':_bm.stanceLeg==='R'?'Right':'—'), 'Stance leg', (_bm.singleLegPct!=null?_bm.singleLegPct+'% single-leg':''), '')}
           ${_bm.trunkLeanMax!=null?_balTile(_bm.trunkLeanMax+'°', 'Peak trunk lean', 'compensation', (_bm.trunkLeanMax>12?'score-warn':'score-good')):''}
         </div>
@@ -16218,6 +16233,46 @@ async function exportPDF() {
         + ` Metrics marked (est.) — ground contact, float, vertical oscillation — are inferred from phase timing, not force sensors. This is a 2-D video screening tool, not a lab: frontal-plane values (valgus, pelvic drop, pronation) flag patterns for clinical follow-up rather than exact diagnosis.`;
       doc.text(disclaimerText, ML+3, y+7, {maxWidth:CW-6});
       y += 20;
+    }
+
+    // ════════════════════════════════════════════════
+    // BALANCE / POSTURAL SWAY (balance clips only)
+    // ════════════════════════════════════════════════
+    if(typeof window_balanceMetrics!=='undefined' && window_balanceMetrics) {
+      const _bm = window_balanceMetrics;
+      guard(SECTION_HEAD_H + 46);
+      sectionHead('Balance & Postural Sway', C.teal);
+      const _bTiles = [
+        { label:(_bm.swayAxisLabel==='medial-lateral'?'M-L':'A-P')+' Sway (RMS)', value:_bm.swayHorizPct+'%', sub:'% shoulder width' },
+        { label:'95% Sway Area', value:''+_bm.ellipseArea, sub:'(shoulder-width)²' },
+        { label:'Balance Losses', value:(_bm.touchdowns!=null?''+_bm.touchdowns:'—'), sub:'foot touch-downs' },
+        { label:'Stance Leg', value:(_bm.stanceLeg==='L'?'Left':_bm.stanceLeg==='R'?'Right':'—'), sub:(_bm.singleLegPct!=null?_bm.singleLegPct+'% single-leg':'') },
+        { label:'Peak Trunk Lean', value:(_bm.trunkLeanMax!=null?_bm.trunkLeanMax+'°':'—'), sub:'compensation' },
+        { label:'Arm Excursion', value:(_bm.armExcursionPct!=null?_bm.armExcursionPct+'%':'—'), sub:'% shoulder width' },
+      ];
+      const bCols = 3, bW = (CW-(bCols-1)*4)/bCols, BKPI_H = 18;
+      let bCol=0, bRowY=y;
+      _bTiles.forEach(({label,value,sub})=>{
+        if(bCol===0){ guard(BKPI_H+2); bRowY=y; }
+        const bx = ML + bCol*(bW+4);
+        setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.2);
+        doc.roundedRect(bx, bRowY, bW, BKPI_H, 2, 2, 'FD');
+        setFill(C.teal); doc.roundedRect(bx, bRowY, bW, 2, 1, 0, 'F');
+        doc.setFont('helvetica','normal'); doc.setFontSize(5.5); setColor(C.muted);
+        doc.text(label.toUpperCase(), bx+4, bRowY+6);
+        doc.setFont('helvetica','bold'); doc.setFontSize(9); setColor(C.navy);
+        doc.text(value, bx+4, bRowY+13);
+        if(sub){ doc.setFont('helvetica','normal'); doc.setFontSize(5.5); setColor(C.muted); doc.text(sub, bx+4, bRowY+17); }
+        bCol++;
+        if(bCol>=bCols){ bCol=0; y=bRowY+BKPI_H+3; }
+      });
+      if(bCol>0) y = bRowY+BKPI_H+3;
+      guard(16);
+      setFill(C.bg); doc.rect(ML, y+2, CW, 13, 'F');
+      doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
+      const _bView = _bm.view==='front' ? 'front' : 'side';
+      doc.text(`Sway tracked from the pelvis centre of mass across ${_bm.nFrames} frames, normalised to shoulder width. 2-D single-camera (${_bView}-view) screening proxy — captures ${_bm.swayAxisLabel} sway only; true centre-of-pressure needs a force plate. Sway thresholds are provisional and should be calibrated before clinical use.`, ML+3, y+7, {maxWidth:CW-6});
+      y += 18;
     }
 
     // ════════════════════════════════════════════════
