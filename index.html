@@ -815,9 +815,9 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             </div>
             <div id="uploadZone2" class="upload-zone upload-zone-secondary">
               <input type="file" id="fileInput2" accept="video/*,image/*">
-              <span class="upload-icon" style="font-size:1.4rem;opacity:.5;">➕</span>
-              <div class="upload-title" style="font-size:.82rem;opacity:.7;">Add second camera angle</div>
-              <div class="upload-sub">Front, posterior, or opposite side</div>
+              <span class="upload-icon" id="uploadIcon2" style="font-size:1.4rem;opacity:.5;">➕</span>
+              <div class="upload-title" id="uploadTitle2" style="font-size:.82rem;opacity:.7;">Add second camera angle</div>
+              <div class="upload-sub" id="uploadSub2">Front, posterior, or opposite side</div>
             </div>
             <!-- View selector for secondary (hidden until file added) -->
             <div id="view2Selector" style="margin-top:8px;display:none;">
@@ -4073,14 +4073,24 @@ document.addEventListener('DOMContentLoaded', () => {
     // both, and prompt that BOTH are required for the L/R asymmetry comparison. (v0.16.0)
     const _pLbl = document.getElementById('primaryViewLabel');
     const _sLbl = document.getElementById('secondaryViewLabel');
+    const _uIcon2 = document.getElementById('uploadIcon2');
+    const _uTitle2 = document.getElementById('uploadTitle2');
+    const _uSub2 = document.getElementById('uploadSub2');
     if(isBalance) {
       if(_pLbl) _pLbl.innerHTML = 'Left-Leg Stance <span style="color:var(--teal);font-weight:700;">Required · front view</span>';
       if(_sLbl) _sLbl.innerHTML = 'Right-Leg Stance <span style="color:var(--teal);font-weight:700;">Required · front view</span>';
+      // Second box is a required leg clip in balance mode, not an optional extra angle.
+      if(_uIcon2) _uIcon2.textContent = '📁';
+      if(_uTitle2) _uTitle2.textContent = 'Drop right-leg clip or click to browse';
+      if(_uSub2) _uSub2.textContent = 'MP4, MOV, AVI · front view';
       try { const _vf=document.getElementById('viewFront'); if(_vf && typeof setCameraView==='function') setCameraView('front', _vf); } catch(e){}
       try { const _v2f=document.getElementById('view2Front'); if(_v2f && typeof setCameraView2==='function') setCameraView2('front', _v2f); } catch(e){}
     } else if(_pLbl && _sLbl) {
       _pLbl.innerHTML = 'Primary View <span style="color:var(--teal);font-weight:700;">Required</span>';
       _sLbl.innerHTML = 'Second Angle <span style="color:var(--muted);font-weight:400;font-size:.68rem;">(Optional — improves accuracy)</span>';
+      if(_uIcon2) _uIcon2.textContent = '➕';
+      if(_uTitle2) _uTitle2.textContent = 'Add second camera angle';
+      if(_uSub2) _uSub2.textContent = 'Front, posterior, or opposite side';
     }
   }
   const movSel = document.getElementById('movementType');
@@ -7711,6 +7721,19 @@ const MOVEMENT_NORMS = {
     'Left Knee Flexion':  {ideal:[60,120], warn:50, label:'SL squat knee: 60-120°'},
     'Right Knee Flexion': {ideal:[60,120], warn:50, label:'SL squat knee: 60-120°'},
     'Trunk Lean':         {max:20, warn:30, label:'<20° lateral trunk lean'},
+  },
+  // Static single-leg balance hold. Frontal (anterior) view only. Knee/hip FLEXION are
+  // NOT meaningful here — the stance leg is near-extension and the aggregator otherwise
+  // picks up the LIFTED (floating) leg held bent (~150°), which is noise, not a finding.
+  // Keep only the frontal-plane stance-control metrics that matter for balance.
+  'Balance / Single-Leg Stance': {
+    'Trunk Lateral Lean': {max:5,  warn:8,  label:'Single-leg stance: <5° lateral trunk lean'},
+    'Trunk Lean':         {max:10, warn:15, label:'Single-leg stance: minimal trunk lean <10°'},
+    'Pelvic Drop':        {max:5,  warn:8,  label:'Trendelenburg / pelvic drop: <5° (hip-abductor control)'},
+    'Left Knee Valgus':   {max:8,  warn:12, label:'Stance-knee valgus: <8° (frontal view)'},
+    'Right Knee Valgus':  {max:8,  warn:12, label:'Stance-knee valgus: <8° (frontal view)'},
+    'Left Hip Adduction': {max:10, warn:15, label:'Stance-hip adduction: <10° (frontal view)'},
+    'Right Hip Adduction':{max:10, warn:15, label:'Stance-hip adduction: <10° (frontal view)'},
   },
   'Lunge': {
     'Left Knee Flexion':  {ideal:[80,100], warn:70, label:'Front knee: 80-100° at bottom'},
@@ -13016,10 +13039,22 @@ async function runAnalysis() {
     'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion','Left Pronation','Right Pronation',
   ]);
 
+  // Balance: keep the AI narrative aligned with the on-screen table — suppress the sagittal
+  // flexion metrics (they capture the lifted/floating leg, not a stance finding).
+  const isBalanceMov = /balance|single-leg stance/i.test(movement);
+  const suppressForBalancePrompt = new Set([
+    'Left Knee Flexion','Right Knee Flexion','Left Knee Extension','Right Knee Extension',
+    'Left Hip Flexion','Right Hip Flexion','Left Hip Extension','Right Hip Extension',
+    'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion','Left Pronation','Right Pronation',
+    'Left Shoulder Flexion','Right Shoulder Flexion','Left Shoulder Abduction','Right Shoulder Abduction',
+    'Left Elbow Flexion','Right Elbow Flexion','Left Arm Swing','Right Arm Swing','Arm Cross-Midline',
+  ]);
+
   const mergedAngleLines = Object.entries(aggregated).filter(([k]) => {
     // For upper extremity movements, suppress lower-body metrics from the prompt
     // — they just measure standing posture and have wrong reference ranges
     if(isUpperExMov && suppressLowerExInPrompt.has(k)) return false;
+    if(isBalanceMov && suppressForBalancePrompt.has(k)) return false;
     if(/running|gait|walk/i.test(movement) && /Shoulder Flexion|Shoulder Abduction/.test(k)) return false; // raw shoulder angle superseded by 'Arm Swing' ROM; Elbow/Arm Swing/Cross-Midline now surfaced as efficiency markers (v0.16.0)
     return true;
   }).map(([k,v]) => {
@@ -13058,6 +13093,27 @@ ${notes ? `CLINICAL NOTES: ${notes}` : ''}
 ${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
+${(() => {
+  try {
+    if(!isBalanceMov || !window_balanceMetrics) return '';
+    const L = window_balanceMetrics.left, R = window_balanceMetrics.right;
+    const det = (typeof computeBalanceScore==='function') ? computeBalanceScore(window_balanceMetrics) : null;
+    const line = (m)=> m ? `sway RMS ${m.swayHorizPct}%SW (${m.swayAxisLabel}), 95% sway area ${m.ellipseArea}, ${m.touchdowns} balance-loss/touch-down event(s), single-leg hold ${m.singleLegPct}%, peak trunk lean ${m.trunkLeanMax}°, arm excursion ${m.armExcursionPct}%SW${m.nFrames?` [${m.nFrames} frames]`:''}` : 'not captured';
+    let s = `BALANCE / SINGLE-LEG STANCE METRICS (2-D anterior-view SCREENING — sway measured from the pelvis centre-of-mass, normalised to shoulder width; lower sway/area = steadier. This is a screening proxy, NOT force-plate centre-of-pressure):\n`;
+    s += `- LEFT-leg stance: ${line(L)}\n`;
+    s += `- RIGHT-leg stance: ${line(R)}\n`;
+    if(det && det.haveBoth){
+      s += `- Side-to-side asymmetry: sway ${det.swayAsym}%${det.tdDiff!=null?`, balance-loss difference ${det.tdDiff}`:''}. `;
+      s += det.worseLeg ? `The ${det.worseLeg.toUpperCase()} leg is the less stable / higher-priority side.` : `Sides are comparable.`;
+      s += ` Deterministic balance score: ${det.score}/10.`;
+      if(det.asymNotes) s += ` ${det.asymNotes}`;
+    } else {
+      s += `- Only one leg was captured — cannot compute L/R asymmetry; state this limitation.`;
+    }
+    s += `\nGUIDANCE: report the less-stable leg as the priority for targeted single-leg strengthening / proprioception work. Treat a side difference in sway or balance-losses beyond ~15% as a meaningful asymmetry worth an asymmetry-focused intervention. Do NOT cite knee or hip flexion for this movement — the lifted (floating) leg's bend is not a stance finding.`;
+    return s;
+  } catch(_e){ return ''; }
+})()}
 ${(window._pelvicDropInfo && window._pelvicDropInfo.peakMag >= 4) ? `PELVIC DROP DIRECTION (#36): peak contralateral pelvic drop is ${window._pelvicDropInfo.peakMag}° with the ${window._pelvicDropInfo.dropSide.toUpperCase()} pelvis dropping during ${window._pelvicDropInfo.dropSide==='left'?'RIGHT':'LEFT'} single-leg stance, pointing to the ${window._pelvicDropInfo.abductor.toUpperCase()} hip abductor (gluteus medius). ${window._pelvicDropInfo.peakMag <= 6 ? `NOTE: at ${window._pelvicDropInfo.peakMag}° this is BORDERLINE (upper edge of normal) — frame it as a monitor/screening point on the ${window._pelvicDropInfo.abductor.toUpperCase()} side, NOT a definitive deficit.` : `Attribute the abductor weakness to the ${window._pelvicDropInfo.abductor.toUpperCase()} side and target strengthening there.`} This is measured from limited posterior-view frames (2-D screening), so it likely UNDER-represents the true drop rather than over-stating it.${window._pelvicDropInfo.leftPeak!=null&&window._pelvicDropInfo.rightPeak!=null?` (L-side ${window._pelvicDropInfo.leftPeak}°, R-side ${window._pelvicDropInfo.rightPeak}°.)`:''}` : ''}
 ${(() => {
   try {
@@ -13852,6 +13908,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         }
       } else {
         const isUpperEx = /shoulder|overhead|press.*reach|pushing|pulling/i.test(movement);
+        const isBalance = /balance|single-leg stance/i.test(movement);
 
         // For upper extremity movements: define the clinically relevant joints in priority order
         // and suppress lower-extremity metrics (knee flex, hip flex etc.) that just measure
@@ -13874,10 +13931,29 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
           'Left Pronation','Right Pronation',
         ]);
 
+        // Balance / single-leg stance: suppress SAGITTAL flexion/ROM metrics. Knee/hip
+        // flexion just capture the LIFTED (floating) leg held bent (~150°) — noise, not a
+        // finding. Arm ROM lives in the dedicated Balance sway panel. Keep only the
+        // frontal-plane stance-control metrics (trunk lean, pelvic drop, valgus, hip add.).
+        const suppressForBalance = new Set([
+          'Left Knee Flexion','Right Knee Flexion',
+          'Left Knee Extension','Right Knee Extension',
+          'Left Hip Flexion','Right Hip Flexion',
+          'Left Hip Extension','Right Hip Extension',
+          'Left Ankle Dorsiflexion','Right Ankle Dorsiflexion',
+          'Left Pronation','Right Pronation',
+          'Left Shoulder Flexion','Right Shoulder Flexion',
+          'Left Shoulder Abduction','Right Shoulder Abduction',
+          'Left Elbow Flexion','Right Elbow Flexion',
+          'Left Arm Swing','Right Arm Swing','Arm Cross-Midline',
+        ]);
+
         tableHtml += '<table class="angles-table"><thead><tr><th>Joint</th><th>Peak / Avg</th><th>Range (min–max)</th><th>Reference for this movement</th></tr></thead><tbody>';
 
         const entriesToShow = isUpperEx
           ? Object.entries(aggregated).filter(([k]) => !suppressForUpperEx.has(k))
+          : isBalance
+          ? Object.entries(aggregated).filter(([k]) => !suppressForBalance.has(k))
           : Object.entries(aggregated);
 
         entriesToShow.forEach(([k, v]) => {
@@ -13902,8 +13978,14 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
         tableHtml += '</tbody></table>';
         if(isUpperEx) {
           tableHtml += `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">
-            † Shoulder flexion shows <strong>peak ROM achieved</strong> across all frames — not average. 
+            † Shoulder flexion shows <strong>peak ROM achieved</strong> across all frames — not average.
             Lower extremity metrics suppressed (not clinically relevant for this movement).
+          </div>`;
+        }
+        if(isBalance) {
+          tableHtml += `<div style="font-size:.68rem;color:var(--muted);margin-top:6px;">
+            † Single-leg stance is scored on <strong>frontal-plane stance control</strong> — trunk lean, pelvic drop (Trendelenburg), stance-knee valgus, and hip adduction.
+            Knee/hip flexion are suppressed here: they only capture the lifted (floating) leg held bent, not a stance finding. Sway, balance losses, and arm excursion are in the Balance panel above.
           </div>`;
         }
       }
