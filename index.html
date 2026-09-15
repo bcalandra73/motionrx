@@ -12570,6 +12570,44 @@ async function runAnalysis() {
     if(s2b) { s2b.style.display='flex'; s2b.classList.add('active'); }
     console.log('[Analysis] Stage 3b: Running second video pipeline — cameraView2=' + cameraView2);
     window._armCrossMidlineDeg = null; window._armCrossMidlineN = null; // reset per run (recomputed from posterior pass below)
+
+    // ── Balance right-leg sway recovery (v0.16.1) ─────────────────────────────
+    // The right-leg sway pass normally runs during the second clip's EXTRACTION
+    // (doExtract2). When PT landmark corrections exist, that extraction is skipped/
+    // preserved — which dropped the right leg from the report. Recompute the sway
+    // metrics here from the second video so the L/R comparison + right peak-frame
+    // survive corrections and saved-session reloads. Sway comes from the dense pass,
+    // not the (corrected) gallery frames, so this is independent of the edits.
+    if(/balance|single-leg stance/i.test(movement) && window._secondaryVidEl
+       && !(window_balanceMetrics && window_balanceMetrics.right)) {
+      try {
+        const _sv = window._secondaryVidEl, _sdur = _sv.duration;
+        const _mnOK = (typeof moveNetReady !== 'undefined' && moveNetReady);
+        if(_sdur && isFinite(_sdur) && _sdur >= 2 && (_mnOK || (mpReady && poseLandmarkerInstance))) {
+          statusEl.textContent = 'Recovering right-stance sway…';
+          const _bN = Math.min(96, Math.max(40, Math.round(_sdur * 7)));
+          const _bF = [];
+          for(let _i = 0; _i < _bN; _i++) {
+            const _t = 0.03 + (_i / (_bN - 1)) * 0.94;
+            const _b = await seekCapture2(_sv, Math.max(0.05, _t * _sdur));
+            if(_b) _bF.push({ imageData: _b, t: _t * _sdur });
+          }
+          let _rLms;
+          if(_mnOK) _rLms = await coarseScanWithMoveNet(_bF, statusEl);
+          else { const _r = await runMediaPipeOnFrames(_bF); _rLms = _r.map(x => (x && x.poseLandmarks) ? x.poseLandmarks : null); }
+          const _rightM = computeBalanceMetrics(_rLms, _bF.map(f => f.t), (typeof cameraView2!=='undefined' ? cameraView2 : 'front'));
+          window_balanceMetrics = Object.assign((window_balanceMetrics && typeof window_balanceMetrics==='object') ? window_balanceMetrics : {}, { right: _rightM });
+          if(_rightM && _rightM.peakFrameIdx!=null && _bF[_rightM.peakFrameIdx]) {
+            window._balancePeak = Object.assign((window._balancePeak && typeof window._balancePeak==='object') ? window._balancePeak : {}, {
+              right: { img:_bF[_rightM.peakFrameIdx].imageData, trail:_rightM.comTrail, mean:_rightM.comMeanImg, peak:_rightM.peakPt,
+                       view:_rightM.view, sway:_rightM.swayHorizPct, axis:_rightM.swayAxisLabel, devPct:_rightM.peakDevPct, aspect:_rightM.aspect }
+            });
+          }
+          if(_rightM) console.log(`[Balance:RIGHT-stance] (recovered in Stage 3b) stance=${_rightM.stanceLeg} sway RMS=${_rightM.swayHorizPct}%SW ellipse=${_rightM.ellipseArea} touchdowns=${_rightM.touchdowns} trunkLean=${_rightM.trunkLeanMax}° | n=${_rightM.nFrames}`);
+          else console.warn('[Balance:RIGHT-stance] recovery — insufficient trackable frames');
+        }
+      } catch(_e){ console.warn('[Balance:RIGHT-stance] recovery failed:', _e.message); }
+    }
     // Small delay to let MediaPipe settle after primary run
     await new Promise(r => setTimeout(r, 200));
     if(mpReady && poseLandmarkerInstance) {  // use poseLandmarkerInstance (Heavy) not legacy poseInstance
