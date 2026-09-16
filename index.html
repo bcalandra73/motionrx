@@ -15086,8 +15086,9 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   const _protocolStrip = _protoTxt
     ? `<div class="report-section full"><div style="background:var(--navy-light);border-radius:8px;padding:8px 14px;font-size:.78rem;color:var(--navy-mid);"><strong>Test protocol:</strong> ${esc(_protoTxt)}</div></div>`
     : '';
-  const _stabilogram = (/balance|single-leg stance/i.test(movement) && _bmAll && (_bmAll.left || _bmAll.right) && typeof renderBalanceStabilogram==='function')
-    ? renderBalanceStabilogram(_bmAll) : '';
+  const _stabPeak = (typeof window!=='undefined') ? window._balancePeak : null;
+  const _stabilogram = (/balance|single-leg stance/i.test(movement) && _stabPeak && (_stabPeak.left || _stabPeak.right) && typeof renderBalanceStabilogram==='function')
+    ? renderBalanceStabilogram(_stabPeak) : '';
   document.getElementById('reportGrid').innerHTML=`
     ${_aiBanner}
     ${_protocolStrip}
@@ -16864,10 +16865,11 @@ async function exportPDF() {
     // ════════════════════════════════════════════════
     // STABILOGRAM (zoomed sway plot, both legs same scale)
     // ════════════════════════════════════════════════
-    if(typeof window_balanceMetrics!=='undefined' && window_balanceMetrics && (window_balanceMetrics.left||window_balanceMetrics.right)) {
+    const _stabBP = (typeof window!=='undefined') ? window._balancePeak : null;
+    if(_stabBP && (_stabBP.left||_stabBP.right)) {
       const _dev=(trail,mean,asp)=>(Array.isArray(trail)?trail:[]).map(p=>({x:(p.ix-(mean?mean.ix:0.5))*asp,y:(p.iy-(mean?mean.iy:0.5))}));
       const _prep=(m)=>{ if(!m) return null; const asp=(m.aspect&&m.aspect>0)?m.aspect:0.563; return {pel:_dev(m.trail,m.mean,asp),tor:_dev(m.shoTrail,m.shoMean,asp),sway:m.sway,sho:m.shoSway}; };
-      const _sd=[['Left',_prep(window_balanceMetrics.left),[14,165,233]],['Right',_prep(window_balanceMetrics.right),[249,115,22]]];
+      const _sd=[['Left',_prep(_stabBP.left),[14,165,233]],['Right',_prep(_stabBP.right),[249,115,22]]];
       let _mR=1e-6; _sd.forEach(([,d])=>{ if(d)[...d.pel,...d.tor].forEach(pt=>{const r=Math.max(Math.abs(pt.x),Math.abs(pt.y)); if(isFinite(r)&&r>_mR)_mR=r;});});
       const _RR=_mR*1.15, _gap=8, _S=Math.min((CW-_gap)/2, 60), _x0=ML+(CW-(2*_S+_gap))/2;
       guard(SECTION_HEAD_H + _S + 16);
