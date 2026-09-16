@@ -13224,14 +13224,15 @@ ${(() => {
     s += `- RIGHT-leg stance: ${line(R)}\n`;
     if(det && det.haveBoth){
       s += `- Side-to-side asymmetry: sway ${det.swayAsym}%${det.tdDiff!=null?`, balance-loss difference ${det.tdDiff}`:''}. `;
+      if(det.valgusAsym!=null) s += `Stance-knee valgus: Left ${det.valgusL}°, Right ${det.valgusR}° = ${det.valgusAsym}% asymmetry. `;
       s += det.worseLeg ? `The ${det.worseLeg.toUpperCase()} leg is the less stable / higher-priority side.` : `Sides are comparable.`;
       s += ` Deterministic balance score: ${det.score}/10.`;
-      if(det.asymNotes) s += ` ${det.asymNotes}`;
+      if(det.asymNotes && det.asymNotes.length) s += ` (${det.asymNotes.join('; ')}.)`;
     } else {
       s += `- Only one leg was captured — cannot compute L/R asymmetry; state this limitation.`;
     }
     s += `\nGUIDANCE: report the less-stable leg as the priority for targeted single-leg strengthening / proprioception work. Treat a side difference in sway or balance-losses beyond ~15% as a meaningful asymmetry worth an asymmetry-focused intervention. When TORSO/shoulder sway markedly exceeds pelvis sway on a side (especially alongside high arm excursion), the patient is stabilising with the upper body and trunk rather than the stance limb — call this out as an upper-body/trunk compensation strategy and note it as a proprioceptive/hip-control deficit on that side. Do NOT cite knee or hip flexion for this movement — the lifted (floating) leg's bend is not a stance finding.
-AUTHORITATIVE VALUES (critical): the MEASURED JOINT ANGLES table and the metrics above are the ONLY source of numbers. Do NOT state a knee-valgus or any angle value that is not in that table, and do NOT infer a different value from looking at an individual frame. The table already reconciles the two camera views, so do NOT write any finding that explains, reconciles, or comments on disagreement between views or between a frame and the table — view reconciliation is handled by the system, not by you. If a metric is not in the table, treat it as not measured and do not raise it.`;
+AUTHORITATIVE VALUES (critical): the MEASURED JOINT ANGLES table and the metrics above are the ONLY source of numbers. Do NOT state a knee-valgus or any angle value that is not in that table, and do NOT infer a different value from looking at an individual frame. When you state a percentage for knee-valgus asymmetry, use EXACTLY ${det && det.valgusAsym!=null ? det.valgusAsym+'%' : 'the figure given above'} — do not recompute or round it differently. The table already reconciles the two camera views, so do NOT write any finding that explains, reconciles, or comments on disagreement between views or between a frame and the table — view reconciliation is handled by the system, not by you. If a metric is not in the table, treat it as not measured and do not raise it.`;
     return s;
   } catch(_e){ return ''; }
 })()}
@@ -14615,9 +14616,10 @@ function _legBalanceScore(m, stanceValgus){
   if(m.armExcursionPct!=null && m.armExcursionPct>60) add(0.5,`arm-assisted balance (${m.armExcursionPct}% SW)`);
   // Stance-knee dynamic valgus (norm <8° in single-leg stance). A collapsing knee is a quality
   // deficit even when the person holds steady, so it must pull the score down.
+  // Bands align with ACL-risk literature (Hewett): dynamic valgus >15° = high risk / severe.
   if(stanceValgus!=null && isFinite(stanceValgus)){
-    if(stanceValgus>20) add(2.0,`severe stance-knee valgus (${Math.round(stanceValgus)}°)`);
-    else if(stanceValgus>12) add(1.0,`moderate stance-knee valgus (${Math.round(stanceValgus)}°)`);
+    if(stanceValgus>15) add(2.0,`severe stance-knee valgus (${Math.round(stanceValgus)}°)`);
+    else if(stanceValgus>10) add(1.0,`moderate stance-knee valgus (${Math.round(stanceValgus)}°)`);
     else if(stanceValgus>8) add(0.5,`mild stance-knee valgus (${Math.round(stanceValgus)}°)`);
   }
   return { sub: Math.max(1, Math.min(10, Math.round(10+neg))), neg, deductions:d };
