@@ -652,6 +652,41 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
         </div>
       </div>
 
+      <!-- Balance / Single-Leg Stance Protocol — shown only for balance -->
+      <div class="card no-mb" id="balanceInputsCard" style="display:none;margin-top:12px;">
+        <div class="card-header">
+          <div class="card-header-icon">⚖️</div>
+          <div><h2>Balance Test Protocol</h2><p>Recorded on the report so the test is reproducible and comparable to norms</p></div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Hold Duration (target)</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="number" id="balHoldSec" placeholder="e.g. 30" min="3" max="120" step="1" style="flex:1">
+              <span style="font-size:.85rem;color:var(--muted);padding-right:4px;flex-shrink:0;">sec</span>
+            </div>
+            <div style="font-size:.68rem;color:var(--muted);margin-top:3px;">Leave blank to use each clip's length</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Eyes</label>
+            <select id="balEyes"><option value="">Not specified</option><option value="open">Eyes open</option><option value="closed">Eyes closed</option></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Surface</label>
+            <select id="balSurface"><option value="">Not specified</option><option value="firm">Firm floor</option><option value="foam">Foam / Airex pad</option><option value="bosu">BOSU / unstable</option><option value="other">Other</option></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Arm Position</label>
+            <select id="balArms"><option value="">Not specified</option><option value="free">Free / natural</option><option value="hips">Hands on hips</option><option value="crossed">Arms crossed</option></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Footwear</label>
+            <select id="balFootwear"><option value="">Not specified</option><option value="barefoot">Barefoot</option><option value="socks">Socks</option><option value="shoes">Shoes</option></select>
+          </div>
+        </div>
+        <div style="margin-top:10px;font-size:.72rem;color:var(--muted);line-height:1.5;">These conditions change balance difficulty (eyes closed removes vision; foam removes somatosensory input). Recording them makes the test reproducible and comparable to published norms.</div>
+      </div>
+
       <!-- Tape Marker Configuration — shown for running and jump/landing movements -->
       <div class="card no-mb" id="tapeMarkersCard" style="display:none;margin-top:12px;">
         <div class="card-header" style="margin-bottom:0;">
@@ -4083,9 +4118,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const card = document.getElementById('runningInputsCard');
     const jump = document.getElementById('jumpInputsCard');
     const tape = document.getElementById('tapeMarkersCard');
+    const balCard = document.getElementById('balanceInputsCard');
     if(card) card.style.display = isGait ? 'block' : 'none';
     if(jump) jump.style.display = isJump ? 'block' : 'none';
     if(tape) tape.style.display = (isGait || isJump) ? 'block' : 'none';
+    if(balCard) balCard.style.display = isBalance ? 'block' : 'none';
     // ── Balance: two anterior clips (Left-stance + Right-stance) ─────────────
     // Relabel the two upload slots to Left/Right stance, force anterior (front) view for
     // both, and prompt that BOTH are required for the L/R asymmetry comparison. (v0.16.0)
@@ -7605,6 +7642,13 @@ function _metricLandmarkDisagree(label) {
 }
 
 function renderASI(aggregated, movement) {
+  // Balance: the L/R comparison table and the joint-angle table already carry left-vs-right
+  // valgus/hip-adduction, and the header tile carries the headline asymmetry. A separate LSI
+  // card here would be a confusing third representation of the same numbers, so suppress it. (v0.16.2)
+  if(/balance|single-leg stance/i.test(movement)) {
+    const _asi = document.getElementById('asiSection'); if(_asi) _asi.style.display='none';
+    return false;
+  }
   const pairs = [
     {label:'Knee Flexion',       left:'Left Knee Flexion',         right:'Right Knee Flexion',         minMag: 10},
     {label:'Hip Flexion',        left:'Left Hip Flexion',          right:'Right Hip Flexion',           minMag: 5},
@@ -7755,13 +7799,13 @@ const MOVEMENT_NORMS = {
   // picks up the LIFTED (floating) leg held bent (~150°), which is noise, not a finding.
   // Keep only the frontal-plane stance-control metrics that matter for balance.
   'Balance / Single-Leg Stance': {
-    'Trunk Lateral Lean': {max:5,  warn:8,  label:'Single-leg stance: <5° lateral trunk lean'},
-    'Trunk Lean':         {max:10, warn:15, label:'Single-leg stance: minimal trunk lean <10°'},
-    'Pelvic Drop':        {max:5,  warn:8,  label:'Trendelenburg / pelvic drop: <5° (hip-abductor control)'},
-    'Left Knee Valgus':   {max:8,  warn:12, label:'Stance-knee valgus: <8° (frontal view)'},
-    'Right Knee Valgus':  {max:8,  warn:12, label:'Stance-knee valgus: <8° (frontal view)'},
-    'Left Hip Adduction': {max:10, warn:15, label:'Stance-hip adduction: <10° (frontal view)'},
-    'Right Hip Adduction':{max:10, warn:15, label:'Stance-hip adduction: <10° (frontal view)'},
+    'Trunk Lateral Lean': {max:5,  warn:8,  label:'Lateral trunk lean <5°'},
+    'Trunk Lean':         {max:10, warn:15, label:'Trunk lean <10°'},
+    'Pelvic Drop':        {max:5,  warn:8,  label:'Pelvic drop <5° (Trendelenburg)'},
+    'Left Knee Valgus':   {max:8,  warn:12, label:'Stance-knee valgus <8°'},
+    'Right Knee Valgus':  {max:8,  warn:12, label:'Stance-knee valgus <8°'},
+    'Left Hip Adduction': {max:10, warn:15, label:'Stance-hip adduction <10°'},
+    'Right Hip Adduction':{max:10, warn:15, label:'Stance-hip adduction <10°'},
   },
   'Lunge': {
     'Left Knee Flexion':  {ideal:[80,100], warn:70, label:'Front knee: 80-100° at bottom'},
@@ -13095,7 +13139,10 @@ async function runAnalysis() {
   const view1Label = cameraView === 'side' ? 'Side view (sagittal plane)' : cameraView === 'front' ? 'Front view (frontal plane)' : 'Posterior view';
   const view2Label = cameraView2 === 'side' ? 'Side view (sagittal plane)' : cameraView2 === 'front' ? 'Front view (frontal plane)' : 'Posterior view';
 
-  const dualViewNote = hasDualView
+  const _isBalanceForNote = /balance|single-leg stance/i.test(movement);
+  const dualViewNote = _isBalanceForNote
+    ? `TWO CLIPS: one LEFT-leg-stance clip and one RIGHT-leg-stance clip, both anterior (front) view. Compare the two sides for asymmetry; the stance leg is the one bearing weight in each clip.`
+    : hasDualView
     ? `DUAL-PLANE ANALYSIS: Two camera angles were captured. Images 1–${framesToSend.length} are from the ${view1Label}; images ${framesToSend.length+1}–${frameCount} are from the ${view2Label}. Angles have been merged: sagittal-plane measurements (hip/knee flexion, trunk lean) taken from the most appropriate view, frontal-plane measurements (valgus, pelvic tilt, symmetry) from the other. Use both sets of frames to give a more complete 3D movement picture than a single-view analysis allows.`
     : `CAMERA VIEW: ${view1Label}`;
 
@@ -13149,7 +13196,10 @@ async function runAnalysis() {
     return initials || 'Patient';
   };
   const promptPatientId = _deidentify(patientName);
-  const prompt = `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay: cyan joints/lines = high confidence, orange joints = estimated position (body was partially occluded, e.g. by a barbell), dashed lines = low confidence segment. A red dot labeled BAR marks the detected barbell position where applicable.
+  const _preamble = isBalanceMov
+    ? `You are an expert physical therapist and clinical movement analyst reviewing a single-leg BALANCE assessment. The attached images are still frames from a quasi-static hold — treat them ONLY as general visual context for posture and limb position. Do NOT describe skeleton-overlay colours, cite individual frame numbers, or narrate frame-by-frame changes; there is no motion sequence to read. Every quantitative finding must come from the MEASURED tables and BALANCE METRICS below, which are derived from a dense postural-sway pass across the whole hold.`
+    : `You are an expert physical therapist and clinical movement analyst. You are reviewing ${frameCount} annotated frame${frameCount>1?'s':''} from a patient movement assessment. Each frame has a MediaPipe skeleton overlay: cyan joints/lines = high confidence, orange joints = estimated position (body was partially occluded, e.g. by a barbell), dashed lines = low confidence segment. A red dot labeled BAR marks the detected barbell position where applicable.`;
+  const prompt = `${_preamble}
 
 PATIENT: ${promptPatientId} (de-identified initials)${age ? `, Age ${age}` : ''}${injuredSideVal ? `, Symptomatic side: ${injuredSideVal}` : ''}
 DIAGNOSIS / CHIEF COMPLAINT: ${diagnosis || 'Not specified'}
@@ -13157,7 +13207,8 @@ MOVEMENT ASSESSED: ${movement}
 ${dualViewNote}
 CLINICAL FOCUS: ${focusText}
 ${notes ? `CLINICAL NOTES: ${notes}` : ''}
-${frameCount > 1 ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
+${(isBalanceMov && typeof _balanceProtocolText==='function' && _balanceProtocolText()) ? `TEST PROTOCOL: ${_balanceProtocolText()} — interpret difficulty accordingly (eyes closed / foam are harder; note when comparing to norms).` : ''}
+${(frameCount > 1 && !isBalanceMov) ? `FRAMES: ${frameCount} frames targeted to key movement phases (setup, liftoff, mid-pull, lockout etc.) rather than evenly spaced — each frame label indicates its phase.` : ''}
 
 ${mergedAngleLines ? `MEASURED JOINT ANGLES${hasDualView ? ' (merged from both views)' : ' (MediaPipe across all frames)'}:\n${mergedAngleLines}` : ''}
 ${(() => {
@@ -13179,7 +13230,8 @@ ${(() => {
     } else {
       s += `- Only one leg was captured — cannot compute L/R asymmetry; state this limitation.`;
     }
-    s += `\nGUIDANCE: report the less-stable leg as the priority for targeted single-leg strengthening / proprioception work. Treat a side difference in sway or balance-losses beyond ~15% as a meaningful asymmetry worth an asymmetry-focused intervention. When TORSO/shoulder sway markedly exceeds pelvis sway on a side (especially alongside high arm excursion), the patient is stabilising with the upper body and trunk rather than the stance limb — call this out as an upper-body/trunk compensation strategy and note it as a proprioceptive/hip-control deficit on that side. Do NOT cite knee or hip flexion for this movement — the lifted (floating) leg's bend is not a stance finding.`;
+    s += `\nGUIDANCE: report the less-stable leg as the priority for targeted single-leg strengthening / proprioception work. Treat a side difference in sway or balance-losses beyond ~15% as a meaningful asymmetry worth an asymmetry-focused intervention. When TORSO/shoulder sway markedly exceeds pelvis sway on a side (especially alongside high arm excursion), the patient is stabilising with the upper body and trunk rather than the stance limb — call this out as an upper-body/trunk compensation strategy and note it as a proprioceptive/hip-control deficit on that side. Do NOT cite knee or hip flexion for this movement — the lifted (floating) leg's bend is not a stance finding.
+AUTHORITATIVE VALUES (critical): the MEASURED JOINT ANGLES table and the metrics above are the ONLY source of numbers. Do NOT state a knee-valgus or any angle value that is not in that table, and do NOT infer a different value from looking at an individual frame. The table already reconciles the two camera views, so do NOT write any finding that explains, reconciles, or comments on disagreement between views or between a frame and the table — view reconciliation is handled by the system, not by you. If a metric is not in the table, treat it as not measured and do not raise it.`;
     return s;
   } catch(_e){ return ''; }
 })()}
@@ -13529,8 +13581,12 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     document.getElementById('resultsSection').style.display='block';
 
     const now = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+    const _isBalanceSub = /balance|single-leg stance/i.test(movement);
+    const _viewDesc = _isBalanceSub
+      ? 'Left + Right leg (front view)'
+      : (hasDualView ? `Dual-plane (${view1Label.split(' (')[0]} + ${view2Label.split(' (')[0]})` : (cameraView === 'side' ? 'Side view' : cameraView === 'front' ? 'Front view' : 'Posterior view'));
     document.getElementById('reportSubtitle').textContent =
-      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${hasDualView ? `Dual-plane (${view1Label.split(' (')[0]} + ${view2Label.split(' (')[0]})` : (cameraView === 'side' ? 'Side view' : cameraView === 'front' ? 'Front view' : 'Posterior view')} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0 ? (poseLandmarkerInstance ? 'Pose Landmarker Heavy' : 'MediaPipe tracked') :'Visual analysis'}`;
+      `${patientName}${age?` · Age ${age}`:''} · ${movement} · ${_viewDesc} · ${now} · ${frameCount} frame${frameCount>1?'s':''} · ${allAngles.length>0 ? (poseLandmarkerInstance ? 'Pose Landmarker Heavy' : 'MediaPipe tracked') :'Visual analysis'}`;
 
     // Render skeleton frames gallery
     if(annotatedFrames.length > 0) {
@@ -14265,6 +14321,20 @@ function _referenceData(movement) {
       'Zeni JA Jr, Richards JG, Higginson JS. Two simple methods for determining gait events during treadmill and overground walking using kinematic data. Gait Posture. 2008;27(4):710–714.'
     ]
   };
+  if(/balance|single-leg stance/i.test(movement || '')) {
+    return [
+      { area: 'Single-leg stance — normative hold times',
+        refs: ['Springer BA, Marin R, Cyhan T, Roberts H, Gill NW. Normative values for the unipedal stance test with eyes open and closed. J Geriatr Phys Ther. 2007;30(1):8-15.'] },
+      { area: 'Postural sway measurement & reliability',
+        refs: ['Ruhe A, Fejer R, Walker B. The test-retest reliability of centre of pressure measures in bipedal static task conditions - a systematic review. Gait Posture. 2010;32(4):436-445.'] },
+      { area: 'Dynamic knee valgus & injury risk',
+        refs: ['Hewett TE, Myer GD, Ford KR, et al. Biomechanical measures of neuromuscular control and valgus loading of the knee predict anterior cruciate ligament injury risk in female athletes. Am J Sports Med. 2005;33(4):492-501.'] },
+      { area: 'Single-leg balance & ankle sprain risk',
+        refs: ['Trojian TH, McKeag DB. Single leg balance test to identify risk of ankle sprains. Br J Sports Med. 2006;40(7):610-613.'] },
+      { area: '2-D video screening — method limits',
+        refs: ['2-D single-camera video gives moderate reliability for frontal-plane alignment screening but does not measure true centre-of-pressure or absolute joint angles. Sway metrics here are a screening proxy, not a force-plate or diagnostic measure.'] },
+    ];
+  }
   if(!isRun) return [methodology];
   return [
     {
@@ -14587,15 +14657,88 @@ function computeBalanceScore(bm, valgus){
            valgusL: vL, valgusR: vR, valgusAsym, haveBoth: !!(L && R) };
 }
 function _balanceScoreText(det){
+  const legLine = (lbl,leg)=> !leg ? '' :
+    `${lbl}-stance ${leg.sub}/10 (starts at 10${leg.deductions.length ? ', ' + leg.deductions.map(d=>`−${Math.abs(d.pts).toFixed(1)} ${d.label}`).join(', ') : ' — no deductions'})`;
+  let s = `Computed ${det.score}/10, model-independent. Each leg is scored on its own, then the two are averaged and an L/R asymmetry penalty is applied.`;
   const parts=[];
-  if(det.legL) parts.push(`Left-stance ${det.legL.sub}/10${det.legL.deductions.length?' ('+det.legL.deductions.map(d=>d.label).join(', ')+')':' (clean)'}`);
-  if(det.legR) parts.push(`Right-stance ${det.legR.sub}/10${det.legR.deductions.length?' ('+det.legR.deductions.map(d=>d.label).join(', ')+')':' (clean)'}`);
-  let s = `Balance score ${det.score}/10. ` + parts.join('. ') + '.';
-  if(!det.haveBoth) s += ' Only one leg was analysed — upload both a Left-stance and a Right-stance clip for the asymmetry comparison.';
-  else if(det.asymNotes.length){ s += ` L/R asymmetry penalty −${det.asymPen.toFixed(1)} (${det.asymNotes.join('; ')}).`; if(det.worseLeg) s += ` ${det.worseLeg} leg is the weaker side — prioritise it for targeted balance work.`; }
-  else s += ' Left and right are well matched — no asymmetry penalty.';
+  if(det.legL) parts.push(legLine('Left', det.legL));
+  if(det.legR) parts.push(legLine('Right', det.legR));
+  if(parts.length) s += ' ' + parts.join('. ') + '.';
+  if(det.haveBoth){
+    const subs=[det.legL,det.legR].filter(Boolean).map(x=>x.sub);
+    const mean = subs.reduce((a,b)=>a+b,0)/subs.length;
+    s += ` Combined = (${subs.join(' + ')}) ÷ ${subs.length} = ${mean.toFixed(1)}`;
+    if(det.asymPen>0) s += `, − ${det.asymPen.toFixed(1)} L/R asymmetry penalty (${det.asymNotes.join('; ')}) = ${(mean-det.asymPen).toFixed(1)}`;
+    else s += ' with no asymmetry penalty (sides well matched)';
+    s += ` → rounded to ${det.score}/10.`;
+    if(det.worseLeg) s += ` ${det.worseLeg} leg is the weaker side — prioritise it for targeted balance work.`;
+  } else {
+    s += ' Only one leg was analysed — upload both a Left-stance and a Right-stance clip for the asymmetry comparison.';
+  }
   s += ' Sway thresholds are provisional screening bands — calibrate before clinical use.';
   return s;
+}
+// Test-protocol strip for balance: reads the protocol inputs and returns a compact one-liner
+// (e.g. "30s hold · eyes open · firm floor · hands on hips · barefoot"). Empty when nothing set.
+function _balanceProtocolText(){
+  const g = id => (document.getElementById(id)?.value || '').trim();
+  const holdSec = g('balHoldSec');
+  const M = {
+    balEyes:{open:'eyes open',closed:'eyes closed'},
+    balSurface:{firm:'firm floor',foam:'foam pad',bosu:'BOSU / unstable',other:'other surface'},
+    balArms:{free:'arms free',hips:'hands on hips',crossed:'arms crossed'},
+    balFootwear:{barefoot:'barefoot',socks:'socks',shoes:'shoes'},
+  };
+  const parts=[];
+  if(holdSec) parts.push(`${holdSec}s hold`);
+  ['balEyes','balSurface','balArms','balFootwear'].forEach(id=>{ const v=g(id); if(v && M[id][v]) parts.push(M[id][v]); });
+  return parts.join(' · ');
+}
+// Stabilogram: an abstract, ZOOMED sway plot (pelvis solid + torso dashed) centred on the mean,
+// with both legs drawn to the SAME auto-scaled axes so tiny real sways become visible and L vs R
+// is directly comparable. This is the picture version of the compensation story. (v0.16.2)
+function renderBalanceStabilogram(bp){
+  if(!bp || (!bp.left && !bp.right)) return '';
+  const _dev = (trail, mean, asp)=> (Array.isArray(trail)?trail:[]).map(p=>({
+    x:(p.ix - (mean?mean.ix:0.5))*asp, y:(p.iy - (mean?mean.iy:0.5))
+  }));
+  const prep = (m)=>{
+    if(!m) return null;
+    const asp = (m.aspect && m.aspect>0) ? m.aspect : 0.563;
+    return { pel:_dev(m.trail, m.mean, asp), tor:_dev(m.shoTrail, m.shoMean, asp),
+             sway:m.sway, sho:m.shoSway, axis:m.axis||'medial-lateral' };
+  };
+  const legs = [['Left', prep(bp.left), '#0ea5e9'], ['Right', prep(bp.right), '#f97316']];
+  let maxR = 1e-6;
+  legs.forEach(([,d])=>{ if(d) [...d.pel, ...d.tor].forEach(pt=>{ const r=Math.max(Math.abs(pt.x),Math.abs(pt.y)); if(isFinite(r)&&r>maxR) maxR=r; }); });
+  const R = maxR*1.15; // 15% padding
+  const VB = 100, C0 = 50, SCALE = 44/R;
+  const P = (v)=> (C0 + v*SCALE);
+  const panel = (lbl, d, color)=>{
+    if(!d) return `<div style="flex:1;min-width:150px;text-align:center;color:var(--muted);font-size:.78rem;padding:20px 0;">${lbl} stance — not analysed</div>`;
+    const poly = (pts,dash)=> pts.length>1 ? `<polyline points="${pts.map(p=>`${P(p.x).toFixed(2)},${P(p.y).toFixed(2)}`).join(' ')}" fill="none" stroke="${color}" stroke-width="1.2" ${dash?'stroke-dasharray="3 2" ':''}vector-effect="non-scaling-stroke" stroke-linejoin="round" opacity="${dash?0.75:0.95}"/>` : '';
+    return `<div style="flex:1;min-width:150px;">
+      <div style="font-size:.72rem;font-weight:700;color:${color};text-align:center;margin-bottom:3px;">${lbl}-Leg Stance</div>
+      <svg viewBox="0 0 ${VB} ${VB}" style="width:100%;height:auto;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+        <line x1="${C0}" y1="6" x2="${C0}" y2="${VB-6}" stroke="var(--border)" stroke-width="0.5"/>
+        <line x1="6" y1="${C0}" x2="${VB-6}" y2="${C0}" stroke="var(--border)" stroke-width="0.5"/>
+        ${poly(d.tor,true)}
+        ${poly(d.pel,false)}
+        <circle cx="${C0}" cy="${C0}" r="1.1" fill="var(--muted)"/>
+      </svg>
+      <div style="font-size:.64rem;color:var(--muted);text-align:center;margin-top:2px;">pelvis ${d.sway!=null?d.sway+'%':'—'}${d.sho!=null?` · torso ${d.sho}%`:''}</div>
+    </div>`;
+  };
+  const axisName = (legs.find(([,d])=>d)?.[1]?.axis) || 'medial-lateral';
+  return `<div class="report-section full">
+    <div class="section-head"><span class="sh-icon">📈</span><h3>Stabilogram — Sway Path (zoomed, both legs same scale)</h3></div>
+    <div class="section-body">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;">${panel('Left', legs[0][1], legs[0][2])}${panel('Right', legs[1][1], legs[1][2])}</div>
+      <div style="margin-top:8px;font-size:.72rem;color:var(--muted);line-height:1.5;">
+        Each plot is the sway path centred on its own average position and <strong>magnified to the same scale</strong> on both sides, so a larger or wider shape = more sway. Horizontal axis = ${axisName} sway, vertical = up/down. <strong style="color:var(--text)">Solid = pelvis</strong> (lower body), <strong style="color:var(--text)">dashed = torso</strong> (shoulders). A dashed torso path noticeably larger than the solid pelvis path shows the patient steadying with the upper body instead of the stance leg. Axes are auto-zoomed for visibility — compare the two sides to each other, not to a fixed grid.
+      </div>
+    </div>
+  </div>`;
 }
 // Balance gallery: one peak-deviation frame per leg with the pelvis sway trail drawn over it.
 // The SVG viewBox matches the frame's aspect (W/H) so the overlay is geometrically true —
@@ -14903,7 +15046,15 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   const _bL = _bmAll && _bmAll.left, _bR = _bmAll && _bmAll.right;
   const balanceHtml = (/balance|single-leg stance/i.test(movement) && (_bL || _bR)) ? (()=>{
     const fmt = (m,k,suf)=> (m && m[k]!=null) ? (m[k]+(suf||'')) : '—';
-    const asymOf = (k)=> (_bL && _bR && _bL[k]!=null && _bR[k]!=null) ? (_balAsymPct(_bL[k],_bR[k])+'%') : '—';
+    // Minimum-magnitude floor: below these values the metric is within noise, so an asymmetry
+    // ratio (e.g. 0 vs 0.01 = 100%) is a divide-by-near-zero artifact, not a finding → show '—'.
+    const _ASYM_FLOOR = { swayHorizPct:0.6, shoSwayPct:0.6, ellipseArea:0.03, trunkLeanMax:3, armExcursionPct:6 };
+    const asymOf = (k)=>{
+      if(!(_bL && _bR && _bL[k]!=null && _bR[k]!=null)) return '—';
+      const hi = Math.max(_bL[k], _bR[k]);
+      if(_ASYM_FLOOR[k]!=null && hi < _ASYM_FLOOR[k]) return '—';
+      return _balAsymPct(_bL[k],_bR[k])+'%';
+    };
     const axis = (_bL&&_bL.swayAxisLabel) || (_bR&&_bR.swayAxisLabel) || 'sway';
     const row = (label,l,r,asym)=>`<tr><td style="font-weight:600">${label}</td><td>${l}</td><td>${r}</td><td class="ref">${asym}</td></tr>`;
     return `
@@ -14920,7 +15071,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
           ${row('Arm excursion (%SW)', fmt(_bL,'armExcursionPct','%'), fmt(_bR,'armExcursionPct','%'), asymOf('armExcursionPct'))}
         </tbody></table>
         <div style="margin-top:10px;font-size:.72rem;color:var(--muted);line-height:1.5;">
-          Sway is tracked from the pelvis centre of mass, normalised to shoulder width. 2-D anterior-view <strong>screening</strong> proxy — captures ${axis} sway; true centre-of-pressure needs a force plate. Thresholds are <em>provisional</em>. ${(!_bL||!_bR)?'<strong>Only one leg analysed</strong> — upload both a Left-stance and a Right-stance clip for the asymmetry comparison.':''}
+          <strong>Units:</strong> <strong>%SW</strong> = percent of the patient's own shoulder width (a body-scale reference, so values compare across people and camera distances). <strong>Sway (RMS)</strong> = how far the point wanders from its average position on average. <strong>95% sway area</strong> = the area of the ellipse containing 95% of the point's positions, in (shoulder-width)² units — smaller is steadier. Sway is tracked from the pelvis centre of mass (and shoulder midpoint for torso). This is a 2-D anterior-view <strong>screening</strong> proxy that captures ${axis} sway; true centre-of-pressure needs a force plate, and thresholds are <em>provisional</em>. This is a screening aid, not a diagnosis. ${(!_bL||!_bR)?'<strong>Only one leg analysed</strong> — upload both a Left-stance and a Right-stance clip for the asymmetry comparison.':''}
         </div>
       </div>
     </div>`;
@@ -14931,9 +15082,17 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
         <strong>Written analysis unavailable.</strong> The AI narrative couldn't be generated (no connection, timeout, or API/key error). Everything below — the movement quality score, joint-angle table, stride metrics, gallery, and the PDF export — is computed on-device and is fully valid. Reconnect and re-run to add the written findings and recommendations.
       </div>
     </div>` : '';
+  const _protoTxt = (/balance|single-leg stance/i.test(movement) && typeof _balanceProtocolText==='function') ? _balanceProtocolText() : '';
+  const _protocolStrip = _protoTxt
+    ? `<div class="report-section full"><div style="background:var(--navy-light);border-radius:8px;padding:8px 14px;font-size:.78rem;color:var(--navy-mid);"><strong>Test protocol:</strong> ${esc(_protoTxt)}</div></div>`
+    : '';
+  const _stabilogram = (/balance|single-leg stance/i.test(movement) && _bmAll && (_bmAll.left || _bmAll.right) && typeof renderBalanceStabilogram==='function')
+    ? renderBalanceStabilogram(_bmAll) : '';
   document.getElementById('reportGrid').innerHTML=`
     ${_aiBanner}
+    ${_protocolStrip}
     ${balanceHtml}
+    ${_stabilogram}
     ${_scoreWhy ? `<div class="report-section full" id="scoreWhySection">
       <div class="section-head"><span class="sh-icon">📊</span><h3>Why This Score${score!=null?': '+score+'/10':''}</h3></div>
       <div class="section-body"><div class="score-why-text" style="font-size:.82rem;line-height:1.65;color:var(--text);">${esc(_scoreWhy)}</div></div>
@@ -14946,10 +15105,10 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       <div class="section-head"><span class="sh-icon">📋</span><h3>Recommendations</h3></div>
       <div class="section-body">${recs}</div>
     </div>
-    <div class="report-section full">
+    ${/balance|single-leg stance/i.test(movement) ? '' : `<div class="report-section full">
       <div class="section-head"><span class="sh-icon">🦿</span><h3>Biomechanical Analysis</h3></div>
       <div class="section-body"><div class="narrative">${narrativeHtml(r.biomechanical_analysis)}</div></div>
-    </div>
+    </div>`}
     <div class="report-section">
       <div class="section-head"><span class="sh-icon">🏥</span><h3>Clinical Impressions</h3></div>
       <div class="section-body"><div class="narrative">${narrativeHtml(r.clinical_impressions)}</div></div>
@@ -15989,6 +16148,11 @@ async function exportPDF() {
     // as tofu when the report is printed or projected. Wrap doc.text once.
     const _rkSanitize = (s) => {
       s = String(s);
+      // Repair sentence joins where a paragraph break was collapsed without a space
+      // (e.g. "range.Second-view", "control.The balance"): lowercase/digit + period +
+      // uppercase → add the missing space. Abbreviations (U.S., e.g.) have an uppercase or
+      // space around the dot and are left alone.
+      s = s.replace(/([a-z0-9])\.([A-Z])/g, '$1. $2');
       const map = {'≥':'>=','≤':'<=','≈':'~','±':'+/-','−':'-','→':'->','←':'<-','↑':'^','↓':'v','•':'-','●':'*','–':'-','—':'—'};
       s = s.replace(/[≥≤≈±−→←↑↓•●]/g, m => map[m] || m);
       // strip emoji / pictographs / variation selectors jsPDF can't draw
@@ -16104,19 +16268,16 @@ async function exportPDF() {
     for(let gx=20;gx<PW;gx+=12) for(let gy=5;gy<46;gy+=10) doc.circle(gx,gy,0.6,'F');
     doc.setGState(doc.GState({opacity:1}));
 
-    doc.setFont('helvetica','bold'); doc.setFontSize(9.5); setColor(C.tealPale);
-    doc.text('RIDGELINE KINETICS', 9, 11);
-    doc.setFont('helvetica','normal'); doc.setFontSize(7); setColor(C.tealPale);
-    doc.text('MOVEMENT ANALYSIS REPORT', 9, 16);
+    // One brand line (the clinic) + one report descriptor — not four near-identical titles.
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.tealPale);
     doc.text(now, PW-MR, 11, {align:'right'});
     doc.setFont('helvetica','bold'); doc.setFontSize(18); setColor(C.white);
-    doc.text(brand.practice||'Clinical Motion Assessment', 9, 30);
+    doc.text(brand.practice||'Clinical Motion Assessment', 9, 26);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8); setColor(C.tealPale);
+    doc.text('Biomechanical Movement Analysis Report', 9, 33);
     doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.tealPale);
     [brand.clinician,brand.address,brand.contact].filter(Boolean)
-      .forEach((l,i) => doc.text(l, PW-MR, 23+i*5, {align:'right'}));
-    doc.setFont('helvetica','bold'); doc.setFontSize(8); setColor(C.tealPale);
-    doc.text('BIOMECHANICAL MOTION ANALYSIS', 9, 42);
+      .forEach((l,i) => doc.text(l, PW-MR, 20+i*5, {align:'right'}));
 
     let y = 54;
 
@@ -16160,6 +16321,22 @@ async function exportPDF() {
         doc.text(lbl,tx+tW/2,y+14,{align:'center'});
       });
       y += 22;
+    }
+
+    // ── BALANCE TEST PROTOCOL strip (reproducibility / norm comparison) ──
+    {
+      const _pTxt = (typeof _balanceProtocolText==='function') ? _balanceProtocolText() : '';
+      if(_pTxt) {
+        doc.setFont('helvetica','normal'); doc.setFontSize(7.5);
+        const _pLines = doc.splitTextToSize('Test protocol:  ' + _pTxt, CW-8);
+        const _pH = _pLines.length*4 + 5;
+        guard(_pH + 3);
+        setFill(C.navyLight || C.tealPale); setDraw(C.border); doc.setLineWidth(0.25);
+        doc.roundedRect(ML, y, CW, _pH, 1.5, 1.5, 'FD');
+        doc.setFont('helvetica','normal'); doc.setFontSize(7.5); setColor(C.navyMid || C.text);
+        _pLines.forEach((l,i)=>doc.text(l, ML+4, y+5.5+i*4));
+        y += _pH + 4;
+      }
     }
 
     // ── IN PLAIN TERMS — lay-language takeaway up front (before the technical detail) ──
@@ -16635,7 +16812,13 @@ async function exportPDF() {
       const _bL = window_balanceMetrics.left, _bR = window_balanceMetrics.right;
       const _axis = (_bL&&_bL.swayAxisLabel) || (_bR&&_bR.swayAxisLabel) || 'sway';
       const _bfmt = (m,k,suf)=> (m && m[k]!=null) ? (''+m[k]+(suf||'')) : '—';
-      const _basym = (k)=> (_bL&&_bR&&_bL[k]!=null&&_bR[k]!=null) ? (_balAsymPct(_bL[k],_bR[k])+'%') : '—';
+      const _BASYM_FLOOR = { swayHorizPct:0.6, shoSwayPct:0.6, ellipseArea:0.03, trunkLeanMax:3, armExcursionPct:6 };
+      const _basym = (k)=>{
+        if(!(_bL&&_bR&&_bL[k]!=null&&_bR[k]!=null)) return '—';
+        const hi = Math.max(_bL[k], _bR[k]);
+        if(_BASYM_FLOOR[k]!=null && hi < _BASYM_FLOOR[k]) return '—';
+        return _balAsymPct(_bL[k],_bR[k])+'%';
+      };
       const _bRows = [
         [ 'Pelvis '+(_axis==='medial-lateral'?'M-L':'A-P')+' sway (RMS, %SW)', _bfmt(_bL,'swayHorizPct','%'), _bfmt(_bR,'swayHorizPct','%'), _basym('swayHorizPct') ],
         [ 'Torso (shoulder) sway (RMS, %SW)', _bfmt(_bL,'shoSwayPct','%'), _bfmt(_bR,'shoSwayPct','%'), _basym('shoSwayPct') ],
@@ -16667,11 +16850,48 @@ async function exportPDF() {
         y += 3; doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.amber);
         doc.text(`Weaker side: ${_bScore.worseLeg} leg — priority for targeted balance work.`, ML+3, y); y += 4;
       }
-      guard(14);
-      setFill(C.bg); doc.rect(ML, y+2, CW, 12, 'F');
       doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
-      doc.text(`Sway from the pelvis centre of mass, normalised to shoulder width. 2-D anterior-view screening proxy — captures ${_axis} sway; true centre-of-pressure needs a force plate. ${(!_bL||!_bR)?'Only one leg analysed — upload both a Left and Right clip for the asymmetry comparison. ':''}Sway thresholds are provisional and should be calibrated before clinical use.`, ML+3, y+6, {maxWidth:CW-6});
-      y += 16;
+      const _uTxt = `Units: %SW = percent of the patient's own shoulder width (a body-scale reference so values compare across people and camera distances). Sway (RMS) = average distance the point wanders from its mean position. 95% sway area = area of the ellipse containing 95% of positions, in shoulder-width-squared units; smaller = steadier. Tracked from the pelvis centre of mass and shoulder midpoint (torso). 2-D anterior-view screening proxy (${_axis} sway) — not force-plate centre-of-pressure; thresholds provisional, calibrate before clinical use. ${(!_bL||!_bR)?'Only one leg analysed — upload both a Left and Right clip for the asymmetry comparison.':''}`;
+      const _uLines = doc.splitTextToSize(_uTxt, CW-6);
+      const _uH = _uLines.length*3 + 4;
+      guard(_uH + 4);
+      setFill(C.bg); doc.rect(ML, y+2, CW, _uH, 'F');
+      doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
+      _uLines.forEach((l,i)=>doc.text(l, ML+3, y+6+i*3));
+      y += _uH + 6;
+    }
+
+    // ════════════════════════════════════════════════
+    // STABILOGRAM (zoomed sway plot, both legs same scale)
+    // ════════════════════════════════════════════════
+    if(typeof window_balanceMetrics!=='undefined' && window_balanceMetrics && (window_balanceMetrics.left||window_balanceMetrics.right)) {
+      const _dev=(trail,mean,asp)=>(Array.isArray(trail)?trail:[]).map(p=>({x:(p.ix-(mean?mean.ix:0.5))*asp,y:(p.iy-(mean?mean.iy:0.5))}));
+      const _prep=(m)=>{ if(!m) return null; const asp=(m.aspect&&m.aspect>0)?m.aspect:0.563; return {pel:_dev(m.trail,m.mean,asp),tor:_dev(m.shoTrail,m.shoMean,asp),sway:m.sway,sho:m.shoSway}; };
+      const _sd=[['Left',_prep(window_balanceMetrics.left),[14,165,233]],['Right',_prep(window_balanceMetrics.right),[249,115,22]]];
+      let _mR=1e-6; _sd.forEach(([,d])=>{ if(d)[...d.pel,...d.tor].forEach(pt=>{const r=Math.max(Math.abs(pt.x),Math.abs(pt.y)); if(isFinite(r)&&r>_mR)_mR=r;});});
+      const _RR=_mR*1.15, _gap=8, _S=Math.min((CW-_gap)/2, 60), _x0=ML+(CW-(2*_S+_gap))/2;
+      guard(SECTION_HEAD_H + _S + 16);
+      sectionHead('Stabilogram - Sway Path (zoomed, both legs same scale)');
+      const _plotY=y;
+      _sd.forEach(([lbl,d,rgb],ci)=>{
+        const bx=_x0+ci*(_S+_gap), by=_plotY;
+        setFill(C.surface); setDraw(C.border); doc.setLineWidth(0.2); doc.rect(bx,by,_S,_S,'FD');
+        doc.setDrawColor(200,200,200); doc.setLineWidth(0.2);
+        doc.line(bx+_S/2,by+3,bx+_S/2,by+_S-3); doc.line(bx+3,by+_S/2,bx+_S-3,by+_S/2);
+        if(!d){ doc.setFont('helvetica','normal'); doc.setFontSize(6); setColor(C.muted); doc.text(lbl+' - n/a', bx+_S/2, by+_S/2, {align:'center'}); return; }
+        const _SC=(_S/2-4)/_RR, PXx=(v)=>bx+_S/2+v*_SC, PYy=(v)=>by+_S/2+v*_SC;
+        if(d.tor.length>1){ doc.setDrawColor(rgb[0],rgb[1],rgb[2]); doc.setLineWidth(0.3); try{doc.setLineDashPattern([0.8,0.6],0);}catch(e){}
+          for(let k=1;k<d.tor.length;k++) doc.line(PXx(d.tor[k-1].x),PYy(d.tor[k-1].y),PXx(d.tor[k].x),PYy(d.tor[k].y));
+          try{doc.setLineDashPattern([],0);}catch(e){} }
+        if(d.pel.length>1){ doc.setDrawColor(rgb[0],rgb[1],rgb[2]); doc.setLineWidth(0.4);
+          for(let k=1;k<d.pel.length;k++) doc.line(PXx(d.pel[k-1].x),PYy(d.pel[k-1].y),PXx(d.pel[k].x),PYy(d.pel[k].y)); }
+        doc.setFont('helvetica','bold'); doc.setFontSize(6); setColor(rgb);
+        doc.text(`${lbl}: pelvis ${d.sway!=null?d.sway+'%':'-'}${d.sho!=null?`  torso ${d.sho}%`:''}`, bx+_S/2, by+_S+4, {align:'center'});
+      });
+      y = _plotY + _S + 8;
+      doc.setFont('helvetica','italic'); doc.setFontSize(5.5); setColor(C.muted);
+      const _slines=doc.splitTextToSize('Each plot is the sway path centred on its average and magnified to the same scale on both legs (axes auto-zoomed for visibility - compare the two sides, not a fixed grid). Solid = pelvis, dashed = torso. A dashed path larger than the solid indicates upper-body/trunk compensation rather than stance-leg control.', CW-6);
+      _slines.forEach((l,i)=>doc.text(l, ML, y+i*3)); y += _slines.length*3 + 5;
     }
 
     // ════════════════════════════════════════════════
@@ -16870,11 +17090,15 @@ async function exportPDF() {
     // ════════════════════════════════════════════════
     // CLINICAL IMPRESSIONS
     // ════════════════════════════════════════════════
-    const allNarratives = document.querySelectorAll('.narrative');
-    if(allNarratives.length>1 && allNarratives[1]?.textContent?.trim()) {
+    // Find by heading, not by narrative index — the Biomechanical Analysis section is omitted for
+    // balance, which would otherwise shift an index-based lookup and drop this section. (v0.16.2)
+    const _ciSection = [...document.querySelectorAll('#reportGrid .report-section')]
+      .find(s => s.querySelector('h3')?.textContent?.trim() === 'Clinical Impressions');
+    const _ciText = _ciSection?.querySelector('.narrative')?.textContent?.trim() || '';
+    if(_ciText) {
       guard(SECTION_HEAD_H+20);
       sectionHead('Clinical Impressions');
-      bodyText(allNarratives[1].textContent.trim());
+      bodyText(_ciText);
     }
 
     // ════════════════════════════════════════════════
@@ -16904,7 +17128,9 @@ async function exportPDF() {
     // ════════════════════════════════════════════════
     // PATIENT EDUCATION
     // ════════════════════════════════════════════════
-    const eduItems = [...document.querySelectorAll('.edu-item')];
+    // The first education item is already shown verbatim in the IN PLAIN TERMS box on page 1,
+    // so skip it here to avoid printing the same paragraph twice. (v0.16.2)
+    const eduItems = [...document.querySelectorAll('.edu-item')].slice(1);
     if(eduItems.length>0) {
       guard(SECTION_HEAD_H+16);
       sectionHead('Patient Education');
