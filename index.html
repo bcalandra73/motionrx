@@ -1612,6 +1612,7 @@ function startFrameExtraction(file, vid) {
   window_strideMetrics = null; // reset for each new analysis
   window_balanceMetrics = null;
   window._balancePeak = null;
+  window._balanceStanceValgus = null;
   window_primaryPhaseSelection = null;
   window._denseAnglesFrames = null;
   window._fusionDisagree = {}; // v0.15.0: per-landmark MP/MoveNet disagreement (max across fusion frames)
@@ -3248,7 +3249,8 @@ function startFrameExtraction(file, vid) {
           if(_leftM && _leftM.peakFrameIdx!=null && _bFrames[_leftM.peakFrameIdx]) {
             window._balancePeak = Object.assign((window._balancePeak && typeof window._balancePeak==='object') ? window._balancePeak : {}, {
               left: { img:_bFrames[_leftM.peakFrameIdx].imageData, trail:_leftM.comTrail, mean:_leftM.comMeanImg, peak:_leftM.peakPt,
-                      view:_leftM.view, sway:_leftM.swayHorizPct, axis:_leftM.swayAxisLabel, devPct:_leftM.peakDevPct, aspect:_leftM.aspect }
+                      view:_leftM.view, sway:_leftM.swayHorizPct, axis:_leftM.swayAxisLabel, devPct:_leftM.peakDevPct, aspect:_leftM.aspect,
+                      shoTrail:_leftM.shoTrail, shoMean:_leftM.shoMeanImg, shoSway:_leftM.shoSwayPct }
             });
           }
           if(_leftM) {
@@ -3701,7 +3703,8 @@ async function startFrameExtraction2(file, vid) {
           if(_rightM && _rightM.peakFrameIdx!=null && _bF[_rightM.peakFrameIdx]) {
             window._balancePeak = Object.assign((window._balancePeak && typeof window._balancePeak==='object') ? window._balancePeak : {}, {
               right: { img:_bF[_rightM.peakFrameIdx].imageData, trail:_rightM.comTrail, mean:_rightM.comMeanImg, peak:_rightM.peakPt,
-                       view:_rightM.view, sway:_rightM.swayHorizPct, axis:_rightM.swayAxisLabel, devPct:_rightM.peakDevPct, aspect:_rightM.aspect }
+                       view:_rightM.view, sway:_rightM.swayHorizPct, axis:_rightM.swayAxisLabel, devPct:_rightM.peakDevPct, aspect:_rightM.aspect,
+                       shoTrail:_rightM.shoTrail, shoMean:_rightM.shoMeanImg, shoSway:_rightM.shoSwayPct }
             });
           }
           // keep ~8 frames so hasDualView is true and later increments can show a peak frame
@@ -7619,6 +7622,13 @@ function renderASI(aggregated, movement) {
   // Ankle DF values near 0° (e.g. -4° vs +1°) are within 30fps noise (±5°)
   // and produce astronomically high asymmetry percentages from tiny absolute differences.
 
+  // Balance / single-leg stance: knee & hip FLEXION here are the lifted (floating) leg held
+  // bent, not a stance finding — a "knee flexion 112° vs 153°" LSI would compare two floating
+  // legs and is meaningless. Keep only the frontal-plane stance-control metrics. (v0.16.1)
+  const isBalanceASI = /balance|single-leg stance/i.test(movement);
+  const balanceKeepASI = new Set(['Knee Valgus','Hip Adduction']);
+  const pairsToUse = isBalanceASI ? pairs.filter(p => balanceKeepASI.has(p.label)) : pairs;
+
   const ASYM_NORMAL_RANGES = {
     'Knee Flexion':    {min:90, max:130},
     'Hip Flexion':     {min:35, max:65},
@@ -7629,7 +7639,7 @@ function renderASI(aggregated, movement) {
   };
 
   const cards = [];
-  pairs.forEach(pair => {
+  pairsToUse.forEach(pair => {
     const L = aggregated[pair.left];
     const R = aggregated[pair.right];
     if(!L || !R) return;
@@ -7686,6 +7696,9 @@ function renderASI(aggregated, movement) {
 
 // Build ASI summary text for Claude prompt
 function asiToPromptText(aggregated, movement) {
+  // Balance: every pair below is a flexion metric = the lifted (floating) leg. None is a
+  // stance finding, so a limb-symmetry line here would only mislead the narrative. (v0.16.1)
+  if(/balance|single-leg stance/i.test(movement)) return '';
   const pairs = [
     {label:'Knee Flexion',     left:'Left Knee Flexion',       right:'Right Knee Flexion',       minMag:10},
     {label:'Hip Flexion',      left:'Left Hip Flexion',        right:'Right Hip Flexion',         minMag:5},
@@ -12600,7 +12613,8 @@ async function runAnalysis() {
           if(_rightM && _rightM.peakFrameIdx!=null && _bF[_rightM.peakFrameIdx]) {
             window._balancePeak = Object.assign((window._balancePeak && typeof window._balancePeak==='object') ? window._balancePeak : {}, {
               right: { img:_bF[_rightM.peakFrameIdx].imageData, trail:_rightM.comTrail, mean:_rightM.comMeanImg, peak:_rightM.peakPt,
-                       view:_rightM.view, sway:_rightM.swayHorizPct, axis:_rightM.swayAxisLabel, devPct:_rightM.peakDevPct, aspect:_rightM.aspect }
+                       view:_rightM.view, sway:_rightM.swayHorizPct, axis:_rightM.swayAxisLabel, devPct:_rightM.peakDevPct, aspect:_rightM.aspect,
+                       shoTrail:_rightM.shoTrail, shoMean:_rightM.shoMeanImg, shoSway:_rightM.shoSwayPct }
             });
           }
           if(_rightM) console.log(`[Balance:RIGHT-stance] (recovered in Stage 3b) stance=${_rightM.stanceLeg} sway RMS=${_rightM.swayHorizPct}%SW ellipse=${_rightM.ellipseArea} touchdowns=${_rightM.touchdowns} trunkLean=${_rightM.trunkLeanMax}° | n=${_rightM.nFrames}`);
@@ -13150,8 +13164,10 @@ ${(() => {
   try {
     if(!isBalanceMov || !window_balanceMetrics) return '';
     const L = window_balanceMetrics.left, R = window_balanceMetrics.right;
-    const det = (typeof computeBalanceScore==='function') ? computeBalanceScore(window_balanceMetrics) : null;
-    const line = (m)=> m ? `sway RMS ${m.swayHorizPct}%SW (${m.swayAxisLabel}), 95% sway area ${m.ellipseArea}, ${m.touchdowns} balance-loss/touch-down event(s), single-leg hold ${m.singleLegPct}%, peak trunk lean ${m.trunkLeanMax}°, arm excursion ${m.armExcursionPct}%SW${m.nFrames?` [${m.nFrames} frames]`:''}` : 'not captured';
+    const _svp = (k)=>{ const a=aggregated[k]; if(!a||a.lowConfidence) return null; const v=gaitDisplayVal(k,a,movement); return (v==null||!isFinite(v))?null:v; };
+    const _balValgusP = { left:_svp('Left Knee Valgus'), right:_svp('Right Knee Valgus') };
+    const det = (typeof computeBalanceScore==='function') ? computeBalanceScore(window_balanceMetrics, _balValgusP) : null;
+    const line = (m)=> m ? `pelvis sway RMS ${m.swayHorizPct}%SW (${m.swayAxisLabel}), torso/shoulder sway RMS ${m.shoSwayPct!=null?m.shoSwayPct+'%SW':'n/a'}, 95% sway area ${m.ellipseArea}, ${m.touchdowns} balance-loss/touch-down event(s), single-leg hold ${m.singleLegPct}%, peak trunk lean ${m.trunkLeanMax}°, arm excursion ${m.armExcursionPct}%SW${m.nFrames?` [${m.nFrames} frames]`:''}` : 'not captured';
     let s = `BALANCE / SINGLE-LEG STANCE METRICS (2-D anterior-view SCREENING — sway measured from the pelvis centre-of-mass, normalised to shoulder width; lower sway/area = steadier. This is a screening proxy, NOT force-plate centre-of-pressure):\n`;
     s += `- LEFT-leg stance: ${line(L)}\n`;
     s += `- RIGHT-leg stance: ${line(R)}\n`;
@@ -13163,7 +13179,7 @@ ${(() => {
     } else {
       s += `- Only one leg was captured — cannot compute L/R asymmetry; state this limitation.`;
     }
-    s += `\nGUIDANCE: report the less-stable leg as the priority for targeted single-leg strengthening / proprioception work. Treat a side difference in sway or balance-losses beyond ~15% as a meaningful asymmetry worth an asymmetry-focused intervention. Do NOT cite knee or hip flexion for this movement — the lifted (floating) leg's bend is not a stance finding.`;
+    s += `\nGUIDANCE: report the less-stable leg as the priority for targeted single-leg strengthening / proprioception work. Treat a side difference in sway or balance-losses beyond ~15% as a meaningful asymmetry worth an asymmetry-focused intervention. When TORSO/shoulder sway markedly exceeds pelvis sway on a side (especially alongside high arm excursion), the patient is stabilising with the upper body and trunk rather than the stance limb — call this out as an upper-body/trunk compensation strategy and note it as a proprioceptive/hip-control deficit on that side. Do NOT cite knee or hip flexion for this movement — the lifted (floating) leg's bend is not a stance finding.`;
     return s;
   } catch(_e){ return ''; }
 })()}
@@ -14429,7 +14445,7 @@ function computeBalanceMetrics(lmsArr, times, view){
   const vis = (lm,i)=> (lm && lm[i] && (lm[i].visibility==null || lm[i].visibility>0.25)) ? lm[i] : null;
   const median = a => { const s=[...a].sort((x,y)=>x-y); return s.length ? s[Math.floor(s.length/2)] : 0; };
   const rms = a => a.length ? Math.sqrt(a.reduce((s,v)=>s+v*v,0)/a.length) : 0;
-  const com=[], shoulderW=[], trunkLean=[], armEx=[], ankPairs=[];
+  const com=[], sho=[], shoulderW=[], trunkLean=[], armEx=[], ankPairs=[];
   for(let f=0; f<lmsArr.length; f++){
     const lm = lmsArr[f]; if(!lm) continue;
     const lH=vis(lm,23), rH=vis(lm,24), lS=vis(lm,11), rS=vis(lm,12);
@@ -14437,6 +14453,8 @@ function computeBalanceMetrics(lmsArr, times, view){
     // image-normalised coords (ix/iy — 0..1, for drawing the trail over the video frame),
     // plus the source frame index f so the peak-deviation frame image can be recovered.
     if(lH && rH) com.push({ t: (times && times[f]!=null) ? times[f] : f, x: ((lH.x+rH.x)/2)*asp, y: (lH.y+rH.y)/2, ix:(lH.x+rH.x)/2, iy:(lH.y+rH.y)/2, f });
+    // Shoulder-midpoint = upper-body/torso drift proxy (parallel to the pelvis COM trail).
+    if(lS && rS) sho.push({ x:((lS.x+rS.x)/2)*asp, y:(lS.y+rS.y)/2, ix:(lS.x+rS.x)/2, iy:(lS.y+rS.y)/2 });
     if(lS && rS) shoulderW.push(Math.abs((lS.x-rS.x)*asp));
     if(lS && rS && lH && rH){
       const smx=((lS.x+rS.x)/2)*asp, smy=(lS.y+rS.y)/2, hmx=((lH.x+rH.x)/2)*asp, hmy=(lH.y+rH.y)/2;
@@ -14489,6 +14507,19 @@ function computeBalanceMetrics(lmsArr, times, view){
   const peakPt = com[peakK] ? { ix: com[peakK].ix, iy: com[peakK].iy } : null;
   const peakDevPct = Math.round(peakD/SW*1000)/10;
   const comTrail = com.map(p=>({ ix:p.ix, iy:p.iy }));
+  // Shoulder-midpoint (torso) drift: same treatment as the pelvis COM, so the panel can show
+  // upper-body compensation. RMS shoulder sway normalised to shoulder width. (v0.16.2)
+  let shoTrail=[], shoMeanImg=null, shoSwayPct=null, shoPeakPt=null;
+  if(sho.length >= 8){
+    const smx=sho.reduce((s,p)=>s+p.x,0)/sho.length, smy=sho.reduce((s,p)=>s+p.y,0)/sho.length;
+    const sdvx=sho.map(p=>p.x-smx), sdvy=sho.map(p=>p.y-smy);
+    shoSwayPct = Math.round(rms(sdvx)/SW*1000)/10;
+    const smix=sho.reduce((s,p)=>s+p.ix,0)/sho.length, smiy=sho.reduce((s,p)=>s+p.iy,0)/sho.length;
+    shoMeanImg={ ix:smix, iy:smiy };
+    let spk=0, spd=-1; for(let k=0;k<sho.length;k++){ const d=Math.hypot(sdvx[k],sdvy[k]); if(d>spd){ spd=d; spk=k; } }
+    shoPeakPt={ ix:sho[spk].ix, iy:sho[spk].iy };
+    shoTrail=sho.map(p=>({ ix:p.ix, iy:p.iy }));
+  }
   return {
     view: view || 'side', nFrames: com.length,
     swayHorizPct, swayVertPct, pathLenPerSec, ellipseArea,
@@ -14497,10 +14528,13 @@ function computeBalanceMetrics(lmsArr, times, view){
     trunkLeanMax: trunkLean.length ? Math.round(Math.max(...trunkLean)) : null,
     armExcursionPct: armEx.length ? Math.round(median(armEx)/SW*100) : null,
     comTrail, comMeanImg: { ix:mix, iy:miy }, peakFrameIdx, peakPt, peakDevPct, aspect: asp,
+    shoTrail, shoMeanImg, shoSwayPct, shoPeakPt,
   };
 }
 // Per-leg balance sub-score (0-10) from one leg's metrics. Provisional screening bands.
-function _legBalanceScore(m){
+// stanceValgus (optional): the STANCE knee's dynamic valgus for this leg (degrees, frontal
+// view). Folded in so a collapsing knee lowers the balance score even when sway is steady.
+function _legBalanceScore(m, stanceValgus){
   if(!m) return null;
   const d=[]; let neg=0; const add=(x,lab)=>{ neg-=x; d.push({pts:-x,label:lab}); };
   const s=m.swayHorizPct, ax=m.swayAxisLabel;
@@ -14509,15 +14543,26 @@ function _legBalanceScore(m){
   if(m.ellipseArea!=null){ if(m.ellipseArea>0.20) add(1.0,'large sway area'); else if(m.ellipseArea>0.10) add(0.5,'moderate sway area'); }
   if(m.trunkLeanMax!=null && m.trunkLeanMax>12) add(0.5,`trunk lean ${m.trunkLeanMax}°`);
   if(m.armExcursionPct!=null && m.armExcursionPct>60) add(0.5,`arm-assisted balance (${m.armExcursionPct}% SW)`);
+  // Stance-knee dynamic valgus (norm <8° in single-leg stance). A collapsing knee is a quality
+  // deficit even when the person holds steady, so it must pull the score down.
+  if(stanceValgus!=null && isFinite(stanceValgus)){
+    if(stanceValgus>20) add(2.0,`severe stance-knee valgus (${Math.round(stanceValgus)}°)`);
+    else if(stanceValgus>12) add(1.0,`moderate stance-knee valgus (${Math.round(stanceValgus)}°)`);
+    else if(stanceValgus>8) add(0.5,`mild stance-knee valgus (${Math.round(stanceValgus)}°)`);
+  }
   return { sub: Math.max(1, Math.min(10, Math.round(10+neg))), neg, deductions:d };
 }
 // asymmetry % between the two legs for a metric (0 = symmetric, higher = worse)
 function _balAsymPct(a,b){ if(a==null||b==null) return null; const hi=Math.max(a,b), lo=Math.min(a,b); return hi<=0 ? 0 : Math.round((hi-lo)/hi*100); }
 // Combined two-leg balance score: mean of the per-leg sub-scores minus an L/R asymmetry penalty.
-function computeBalanceScore(bm){
+// valgus (optional): { left, right } stance-knee dynamic valgus in degrees for each leg, folded
+// into both the per-leg sub-scores and an L/R valgus-asymmetry penalty.
+function computeBalanceScore(bm, valgus){
   if(!bm) return null;
   const L = bm.left, R = bm.right;
-  const legL = _legBalanceScore(L), legR = _legBalanceScore(R);
+  const vL = (valgus && valgus.left!=null && isFinite(valgus.left)) ? valgus.left : null;
+  const vR = (valgus && valgus.right!=null && isFinite(valgus.right)) ? valgus.right : null;
+  const legL = _legBalanceScore(L, vL), legR = _legBalanceScore(R, vR);
   if(!legL && !legR) return null;
   // asymmetry (sway RMS + touch-down difference)
   const swayAsym = (L&&R) ? _balAsymPct(L.swayHorizPct, R.swayHorizPct) : null;
@@ -14525,6 +14570,13 @@ function computeBalanceScore(bm){
   let asymPen=0; const asymNotes=[];
   if(swayAsym!=null){ if(swayAsym>40){asymPen+=1.5; asymNotes.push(`${swayAsym}% sway asymmetry`);} else if(swayAsym>25){asymPen+=1.0; asymNotes.push(`${swayAsym}% sway asymmetry`);} else if(swayAsym>15){asymPen+=0.5; asymNotes.push(`${swayAsym}% sway asymmetry`);} }
   if(tdDiff!=null){ if(tdDiff>=2){asymPen+=1.0; asymNotes.push(`${tdDiff} more touch-downs on one side`);} else if(tdDiff===1){asymPen+=0.5;} }
+  // Stance-knee valgus asymmetry — only penalise when at least one side is abnormal (>8°), so a
+  // symmetric tiny valgus isn't flagged.
+  const valgusAsym = (vL!=null && vR!=null) ? _balAsymPct(vL, vR) : null;
+  if(valgusAsym!=null && Math.max(vL,vR)>8){
+    if(valgusAsym>50){asymPen+=1.0; asymNotes.push(`${valgusAsym}% knee-valgus asymmetry`);}
+    else if(valgusAsym>25){asymPen+=0.5; asymNotes.push(`${valgusAsym}% knee-valgus asymmetry`);}
+  }
   const subs = [legL, legR].filter(Boolean).map(x=>x.sub);
   const mean = subs.reduce((a,b)=>a+b,0)/subs.length;
   const score = Math.max(1, Math.min(10, Math.round(mean - asymPen)));
@@ -14532,7 +14584,7 @@ function computeBalanceScore(bm){
   let worseLeg = null;
   if(legL && legR) worseLeg = legL.sub < legR.sub ? 'Left' : legR.sub < legL.sub ? 'Right' : null;
   return { score, _balance:true, legL, legR, swayAsym, tdDiff, asymPen, asymNotes, worseLeg,
-           haveBoth: !!(L && R) };
+           valgusL: vL, valgusR: vR, valgusAsym, haveBoth: !!(L && R) };
 }
 function _balanceScoreText(det){
   const parts=[];
@@ -14560,24 +14612,31 @@ function renderBalancePeakFrames(bp){
     const pts = trail.map(p=>`${X(p.ix)},${p.iy.toFixed(4)}`).join(' ');
     const mean = m.mean || {ix:0.5,iy:0.5};
     const pk = m.peak || mean;
-    const swayTxt = (m.sway!=null) ? `${m.sway}% ${(m.axis||'').split('-')[0]}` : '—';
+    // Torso (shoulder-midpoint) drift trail — dashed, same leg colour.
+    const shoTrail = Array.isArray(m.shoTrail) ? m.shoTrail : [];
+    const shoPts = shoTrail.map(p=>`${X(p.ix)},${p.iy.toFixed(4)}`).join(' ');
+    const shoMean = m.shoMean || null;
     const svg = `<svg viewBox="0 0 ${asp.toFixed(4)} 1" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;">
-      ${pts ? `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>` : ''}
+      ${shoPts ? `<polyline points="${shoPts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-dasharray="5 3" stroke-linejoin="round" stroke-linecap="round" opacity="0.8"/>` : ''}
+      ${shoMean ? `<circle cx="${X(shoMean.ix)}" cy="${shoMean.iy.toFixed(4)}" r="${(0.014*asp).toFixed(4)}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke" opacity="0.9"/>` : ''}
+      ${pts ? `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>` : ''}
       <line x1="${X(mean.ix-0.025)}" y1="${mean.iy.toFixed(4)}" x2="${X(mean.ix+0.025)}" y2="${mean.iy.toFixed(4)}" stroke="#ffffff" stroke-width="1.5" vector-effect="non-scaling-stroke" opacity="0.9"/>
       <line x1="${X(mean.ix)}" y1="${(mean.iy-0.025).toFixed(4)}" x2="${X(mean.ix)}" y2="${(mean.iy+0.025).toFixed(4)}" stroke="#ffffff" stroke-width="1.5" vector-effect="non-scaling-stroke" opacity="0.9"/>
       <circle cx="${X(pk.ix)}" cy="${pk.iy.toFixed(4)}" r="${(0.02*asp).toFixed(4)}" fill="none" stroke="${color}" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
       <circle cx="${X(pk.ix)}" cy="${pk.iy.toFixed(4)}" r="${(0.008*asp).toFixed(4)}" fill="${color}"/>
     </svg>`;
+    const swayTxt = (m.sway!=null) ? `pelvis ${m.sway}%` : 'pelvis —';
+    const shoTxt  = (m.shoSway!=null) ? ` · torso ${m.shoSway}%` : '';
     return `<div class="frame-card" style="cursor:default;">
       <div class="frame-card-img" style="position:relative;">
         <img src="data:image/jpeg;base64,${esc(m.img)}" style="width:100%;height:auto;display:block;">
         ${svg}
       </div>
-      <div class="frame-label"><span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0;"></span>${leg}-Leg Stance — peak sway</span><span class="phase-badge" style="background:${color};color:#fff;">${swayTxt}</span></div>
+      <div class="frame-label"><span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0;"></span>${leg}-Leg Stance</span><span style="font-size:.62rem;font-weight:700;color:${color};">${swayTxt}${shoTxt}</span></div>
     </div>`;
   };
   return `<div style="grid-column:1/-1;font-size:.72rem;color:var(--muted);margin-bottom:8px;line-height:1.55;">
-      Each image is the single frame where the pelvis centre-of-mass was <strong>farthest from its average position</strong> — the peak-sway instant. The coloured line traces the full sway path across the hold; the white cross marks the average position and the ringed dot marks the peak. A tighter, more centred trail = steadier balance.
+      Each image is the single frame where the pelvis was <strong>farthest from its average position</strong> (peak sway). The <strong>solid line</strong> traces the pelvis (lower-body) sway path; the <strong>dashed line</strong> traces the shoulder-midpoint (torso / upper-body) drift. Rings mark each average position and the ringed dot marks the pelvis peak. A large dashed torso trail over a small solid pelvis trail means the patient is stabilising with the upper body and trunk rather than the stance leg.
     </div>
     ${card('Left', bp.left, '#0ea5e9')}
     ${card('Right', bp.right, '#f97316')}`;
@@ -14753,7 +14812,11 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   } else if(/balance|single-leg stance/i.test(movement) && typeof window_balanceMetrics!=='undefined' && window_balanceMetrics) {
     // Deterministic balance score (parallels the running rubric) — reproducible, model-independent.
     try {
-      const _bdet = computeBalanceScore(window_balanceMetrics);
+      // Stance-knee dynamic valgus per leg: left-stance uses the left knee, right-stance the right.
+      const _sv = (k)=>{ const a=aggregated[k]; if(!a||a.lowConfidence) return null; const v=gaitDisplayVal(k,a,movement); return (v==null||!isFinite(v))?null:v; };
+      const _balValgus = { left:_sv('Left Knee Valgus'), right:_sv('Right Knee Valgus') };
+      window._balanceStanceValgus = _balValgus; // cached so the PDF (no aggregated in scope) matches
+      const _bdet = computeBalanceScore(window_balanceMetrics, _balValgus);
       if(_bdet && _bdet.score != null) {
         score = _bdet.score; _scoreBreakdown = _bdet; window._lastScore = score;
         sc = score>=7?'score-good':score>=5?'score-warn':'score-poor';
@@ -14848,7 +14911,8 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       <div class="section-head"><span class="sh-icon">⚖️</span><h3>Balance — Left vs Right Single-Leg Stance</h3></div>
       <div class="section-body">
         <table class="angles-table"><thead><tr><th>Metric</th><th style="color:#0ea5e9">Left stance</th><th style="color:#f97316">Right stance</th><th>Asymmetry</th></tr></thead><tbody>
-          ${row(axis+' sway (RMS, %SW)', fmt(_bL,'swayHorizPct','%'), fmt(_bR,'swayHorizPct','%'), asymOf('swayHorizPct'))}
+          ${row('Pelvis '+axis+' sway (RMS, %SW)', fmt(_bL,'swayHorizPct','%'), fmt(_bR,'swayHorizPct','%'), asymOf('swayHorizPct'))}
+          ${row('Torso (shoulder) sway (RMS, %SW)', fmt(_bL,'shoSwayPct','%'), fmt(_bR,'shoSwayPct','%'), asymOf('shoSwayPct'))}
           ${row('95% sway area', fmt(_bL,'ellipseArea'), fmt(_bR,'ellipseArea'), asymOf('ellipseArea'))}
           ${row('Balance losses (touch-downs)', fmt(_bL,'touchdowns'), fmt(_bR,'touchdowns'), '—')}
           ${row('Single-leg hold %', fmt(_bL,'singleLegPct','%'), fmt(_bR,'singleLegPct','%'), '—')}
@@ -16131,12 +16195,12 @@ async function exportPDF() {
       const _anyM = _balPeakPDF.left || _balPeakPDF.right;
       const _wh = (_anyM && _anyM.aspect && isFinite(_anyM.aspect) && _anyM.aspect>0) ? _anyM.aspect : 0.563;
       const fH = fW * (1/_wh); // fW * (H/W)
-      guard(SECTION_HEAD_H + fH + 16);
+      guard(SECTION_HEAD_H + fH + 22);
       sectionHead('Balance - Peak-Sway Frame per Leg');
       doc.setFont('helvetica','italic'); doc.setFontSize(6.5); setColor(C.text);
-      const _note = doc.splitTextToSize('Each frame is the instant the pelvis centre-of-mass was farthest from its average position (peak sway). Coloured line = full sway path; white cross = average position; ringed dot = peak. Tighter, more centred = steadier.', CW);
-      _note.slice(0,2).forEach((l,i)=>doc.text(l, ML, y+3+i*3.4));
-      y += 3 + Math.min(2,_note.length)*3.4 + 2;
+      const _note = doc.splitTextToSize('Frame = the instant the pelvis was farthest from its average position (peak sway). Solid line = pelvis (lower-body) sway path; dashed line = shoulder-midpoint (torso) drift; white cross = pelvis average; ringed dot = pelvis peak. A large dashed (torso) trail over a small solid (pelvis) one = upper-body/trunk compensation rather than stance-leg control.', CW);
+      _note.slice(0,3).forEach((l,i)=>doc.text(l, ML, y+3+i*3.4));
+      y += 3 + Math.min(3,_note.length)*3.4 + 2;
       const rowY = y;
       [['Left', _balPeakPDF.left, [14,165,233]], ['Right', _balPeakPDF.right, [249,115,22]]].forEach(([leg,m,rgb], ci) => {
         const fx = ML + ci*(fW+GAP);
@@ -16149,6 +16213,15 @@ async function exportPDF() {
         }
         try { doc.addImage('data:image/jpeg;base64,'+m.img, 'JPEG', fx, rowY, fW, fH); } catch(_e){}
         const PX = (ix)=> fx + ix*fW, PY = (iy)=> rowY + iy*fH;
+        // Torso (shoulder-midpoint) drift — dashed, same leg colour, drawn first.
+        const shoTrail = Array.isArray(m.shoTrail) ? m.shoTrail : [];
+        if(shoTrail.length > 1) {
+          doc.setDrawColor(rgb[0],rgb[1],rgb[2]); doc.setLineWidth(0.4);
+          try { doc.setLineDashPattern([1.1,0.9], 0); } catch(_e){}
+          for(let k=1;k<shoTrail.length;k++) doc.line(PX(shoTrail[k-1].ix),PY(shoTrail[k-1].iy),PX(shoTrail[k].ix),PY(shoTrail[k].iy));
+          try { doc.setLineDashPattern([], 0); } catch(_e){}
+        }
+        if(m.shoMean) { doc.setDrawColor(rgb[0],rgb[1],rgb[2]); doc.setLineWidth(0.4); doc.circle(PX(m.shoMean.ix),PY(m.shoMean.iy),1.1,'S'); }
         const trail = Array.isArray(m.trail) ? m.trail : [];
         if(trail.length > 1) {
           doc.setDrawColor(rgb[0],rgb[1],rgb[2]); doc.setLineWidth(0.4);
@@ -16164,7 +16237,7 @@ async function exportPDF() {
         const LBAR = 4.5; setFill(C.navy); doc.setGState(doc.GState({opacity:0.72}));
         doc.rect(fx,rowY+fH-LBAR,fW,LBAR,'F'); doc.setGState(doc.GState({opacity:1}));
         doc.setFont('helvetica','bold'); doc.setFontSize(5.4); setColor(C.white);
-        doc.text((m.sway!=null)?`${leg}-Leg peak sway ${m.sway}%`:`${leg}-Leg stance`, fx+fW/2, rowY+fH-1.3, {align:'center'});
+        doc.text((m.sway!=null)?`${leg}-Leg  pelvis ${m.sway}%${m.shoSway!=null?`  torso ${m.shoSway}%`:''}`:`${leg}-Leg stance`, fx+fW/2, rowY+fH-1.3, {align:'center'});
         setDraw(C.border); doc.setLineWidth(0.2); doc.rect(fx,rowY,fW,fH,'D');
       });
       y = rowY + fH + 6;
@@ -16550,7 +16623,8 @@ async function exportPDF() {
       const _bfmt = (m,k,suf)=> (m && m[k]!=null) ? (''+m[k]+(suf||'')) : '—';
       const _basym = (k)=> (_bL&&_bR&&_bL[k]!=null&&_bR[k]!=null) ? (_balAsymPct(_bL[k],_bR[k])+'%') : '—';
       const _bRows = [
-        [ (_axis==='medial-lateral'?'M-L':'A-P')+' sway (RMS, %SW)', _bfmt(_bL,'swayHorizPct','%'), _bfmt(_bR,'swayHorizPct','%'), _basym('swayHorizPct') ],
+        [ 'Pelvis '+(_axis==='medial-lateral'?'M-L':'A-P')+' sway (RMS, %SW)', _bfmt(_bL,'swayHorizPct','%'), _bfmt(_bR,'swayHorizPct','%'), _basym('swayHorizPct') ],
+        [ 'Torso (shoulder) sway (RMS, %SW)', _bfmt(_bL,'shoSwayPct','%'), _bfmt(_bR,'shoSwayPct','%'), _basym('shoSwayPct') ],
         [ '95% sway area', _bfmt(_bL,'ellipseArea'), _bfmt(_bR,'ellipseArea'), _basym('ellipseArea') ],
         [ 'Balance losses (touch-downs)', _bfmt(_bL,'touchdowns'), _bfmt(_bR,'touchdowns'), '—' ],
         [ 'Single-leg hold %', _bfmt(_bL,'singleLegPct','%'), _bfmt(_bR,'singleLegPct','%'), '—' ],
@@ -16574,7 +16648,7 @@ async function exportPDF() {
         });
         y += _BRH;
       });
-      const _bScore = computeBalanceScore(window_balanceMetrics);
+      const _bScore = computeBalanceScore(window_balanceMetrics, (typeof window!=='undefined' ? window._balanceStanceValgus : null));
       if(_bScore && _bScore.worseLeg){
         y += 3; doc.setFont('helvetica','bold'); doc.setFontSize(6.5); setColor(C.amber);
         doc.text(`Weaker side: ${_bScore.worseLeg} leg — priority for targeted balance work.`, ML+3, y); y += 4;
