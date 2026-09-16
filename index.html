@@ -16084,6 +16084,10 @@ async function exportPDF() {
       const lines = doc.splitTextToSize(text.replace(/\n+/g,' '), CW-indent-4);
       lines.forEach(line => {
         guard(6);
+        // Re-apply font/size/colour every line: guard() may have called newPage(), which
+        // leaves the footer/header's (lighter) colour set — without this the text after a
+        // page break renders in a faded, near-illegible shade.
+        doc.setFont('helvetica','normal'); doc.setFontSize(size); setColor(color);
         doc.text(line, ML+indent, y); y += 4.8;
       });
       y += 2;
@@ -16191,11 +16195,21 @@ async function exportPDF() {
     // redraw it here). window._balancePeak is set only during a balance run. (v0.16.1)
     const _balPeakPDF = (window._balancePeak && (window._balancePeak.left || window._balancePeak.right)) ? window._balancePeak : null;
     if(_balPeakPDF) {
-      const GAP = 4, COLS = 2, fW = (CW - (COLS-1)*GAP) / COLS;
+      const GAP = 4, COLS = 2;
       const _anyM = _balPeakPDF.left || _balPeakPDF.right;
       const _wh = (_anyM && _anyM.aspect && isFinite(_anyM.aspect) && _anyM.aspect>0) ? _anyM.aspect : 0.563;
-      const fH = fW * (1/_wh); // fW * (H/W)
-      guard(SECTION_HEAD_H + fH + 22);
+      // Portrait frames at half content-width are very tall (~167mm) — that reserves almost a full
+      // page and forces a premature page break, leaving page 1 blank. Cap the height and, when
+      // there's a decent chunk of the current page left, shrink to fill it instead of paging. (v0.16.2)
+      const NOTE_RESERVE = 16; // section head note + label bar + cushion
+      const _availH = (PAGE_BODY_BOT - y) - SECTION_HEAD_H - NOTE_RESERVE;
+      let fW = (CW - (COLS-1)*GAP) / COLS;
+      let fH = Math.min(fW * (1/_wh), 96); // hard cap so frames never dominate a page
+      if(fH > _availH && _availH >= 65) fH = _availH; // fill the current page rather than leave it blank
+      fW = fH * _wh; // keep aspect after any height change
+      const _rowW = COLS*fW + (COLS-1)*GAP;
+      const _x0 = ML + (CW - _rowW)/2; // centre the (now narrower) pair
+      guard(SECTION_HEAD_H + fH + NOTE_RESERVE);
       sectionHead('Balance - Peak-Sway Frame per Leg');
       doc.setFont('helvetica','italic'); doc.setFontSize(6.5); setColor(C.text);
       const _note = doc.splitTextToSize('Frame = the instant the pelvis was farthest from its average position (peak sway). Solid line = pelvis (lower-body) sway path; dashed line = shoulder-midpoint (torso) drift; white cross = pelvis average; ringed dot = pelvis peak. A large dashed (torso) trail over a small solid (pelvis) one = upper-body/trunk compensation rather than stance-leg control.', CW);
@@ -16203,7 +16217,7 @@ async function exportPDF() {
       y += 3 + Math.min(3,_note.length)*3.4 + 2;
       const rowY = y;
       [['Left', _balPeakPDF.left, [14,165,233]], ['Right', _balPeakPDF.right, [249,115,22]]].forEach(([leg,m,rgb], ci) => {
-        const fx = ML + ci*(fW+GAP);
+        const fx = _x0 + ci*(fW+GAP);
         if(!m || !m.img) {
           setFill(C.surface); doc.rect(fx,rowY,fW,fH,'F');
           setDraw(C.border); doc.setLineWidth(0.2); doc.rect(fx,rowY,fW,fH,'D');
