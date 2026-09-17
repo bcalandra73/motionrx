@@ -8733,11 +8733,33 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     return Math.round(Math.abs(lMean - rMean) / ((lMean + rMean) / 2) * 100);
   })();
 
-  // ── 6. Find best representative stride (median duration) ──
+  // ── 6. Find best representative stride ──
+  // Prefer a MID-CLIP steady-state stride: among strides whose duration is within 15% of the
+  // median (i.e. "typical" strides), pick the one whose centre is closest to the middle of the
+  // clip. This avoids early/warm-up or end strides, which the reliability study (Brian1–5) showed
+  // skew GCT, float, vertical oscillation, shin angle and overstride when they get auto-selected.
+  // Falls back to pure closest-to-median for very short clips. (v0.16.3)
   const medianDur    = median(durations);
-  const bestStrideIdx = strideDetails.reduce((bi, s, i) =>
-    Math.abs(s.durationS - medianDur) < Math.abs(strideDetails[bi].durationS - medianDur) ? i : bi, 0);
+  let bestStrideIdx;
+  {
+    const centerOf = s => (s.startIdx + s.endIdx) / 2;
+    if(N && strideDetails.length > 2){
+      const mid = N / 2;
+      const durTol = medianDur * 0.15;
+      const cand = [];
+      for(let i = 0; i < strideDetails.length; i++){ if(Math.abs(strideDetails[i].durationS - medianDur) <= durTol) cand.push(i); }
+      if(!cand.length){ for(let i = 0; i < strideDetails.length; i++) cand.push(i); }
+      bestStrideIdx = cand[0];
+      for(const i of cand){
+        if(Math.abs(centerOf(strideDetails[i]) - mid) < Math.abs(centerOf(strideDetails[bestStrideIdx]) - mid)) bestStrideIdx = i;
+      }
+    } else {
+      bestStrideIdx = strideDetails.reduce((bi, s, i) =>
+        Math.abs(s.durationS - medianDur) < Math.abs(strideDetails[bi].durationS - medianDur) ? i : bi, 0);
+    }
+  }
   const bestStride    = strideDetails[bestStrideIdx];
+  try { console.log(`[StrideEngine] Best stride: frames ${bestStride?.startIdx}–${bestStride?.endIdx} of ${N} (mid-clip biased; ${strideDetails.length} strides, medianDur=${medianDur?.toFixed(3)}s)`); } catch(_e){}
 
   // ── 7. Stride & step length from speed ──
   const {speedMps=null, inclinePct=0, surface='treadmill', shoe='', experience='', heightCm=null} = runParams;
