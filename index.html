@@ -762,6 +762,20 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
               <label class="tape-loc-chip"><input type="checkbox" name="tapeLocB" value="knee"> Knee</label>
             </div>
           </div>
+          <!-- Per-view override: which markers are actually on the POSTERIOR (2nd) clip.
+               The colours/legs above are shared; this only restricts WHICH locations the posterior
+               pass refines, so a marker you taped on the lateral view but not the posterior (e.g. the
+               knee) won't cause the posterior pass to snap to a wrong blob. (v0.16.3) -->
+          <div id="tapeSecondaryRow" style="margin-bottom:14px;padding:12px 14px;background:var(--navy-light);border-radius:8px;">
+            <div style="font-size:.72rem;font-weight:700;color:var(--navy);margin-bottom:3px;">Posterior (2nd view) markers</div>
+            <div style="font-size:.68rem;color:var(--muted);margin-bottom:8px;">Uncheck any marker you did <strong>not</strong> tape on the posterior clip. (Lateral view always uses all the markers set above.)</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLoc2" value="ankle" checked> Ankle / malleolus</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLoc2" value="heel" checked> Heel</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLoc2" value="toe" checked> Toe / forefoot</label>
+              <label class="tape-loc-chip"><input type="checkbox" name="tapeLoc2" value="knee" checked> Knee</label>
+            </div>
+          </div>
           <!-- Tape detection test button -->
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
             <button onclick="runTapeDetectionTest()" id="tapeTestBtn"
@@ -10342,7 +10356,7 @@ async function runTapeDetectionTest() {
 // Reads the tape marker UI card state into a config object.
 // Returns null if tape refinement is disabled or card is hidden.
 //
-function readTapeConfig() {
+function readTapeConfig(view) {
   const card = document.getElementById('tapeMarkersCard');
   if(!card || card.style.display === 'none') return null;
   if(!document.getElementById('tapeEnabled')?.checked) return null;
@@ -10357,10 +10371,19 @@ function readTapeConfig() {
     both_feet:  {ankle:[27,28], heel:[29,30], toe:[31,32]},
   };
 
+  // Per-view marker filter: the posterior (secondary) clip may carry a different marker set than
+  // the lateral clip. Restrict the secondary pass to the locations the user checked for it, so a
+  // marker taped only on the lateral view (e.g. the knee) can't make the posterior pass snap to a
+  // wrong blob. (v0.16.3)
+  const _secLocs = (view === 'secondary')
+    ? new Set([...document.querySelectorAll('[name="tapeLoc2"]:checked')].map(i => i.value))
+    : null;
+
   const readColor = (suffix) => {
     const color = document.getElementById(`tapeColor${suffix}`)?.value;
     const leg   = document.getElementById(`tapeLeg${suffix}`)?.value;
-    const locs  = [...document.querySelectorAll(`[name="tapeLoc${suffix}"]:checked`)].map(i=>i.value);
+    let   locs  = [...document.querySelectorAll(`[name="tapeLoc${suffix}"]:checked`)].map(i=>i.value);
+    if(_secLocs) locs = locs.filter(l => _secLocs.has(l)); // keep only markers present on this view
     if(!color || !leg || !locs.length) return null;
     const map = LMAP[leg] || LMAP.left;
     const indices = [];
@@ -10627,7 +10650,14 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
       const lm = merged[idx];
       return lm?.source?.includes('tibia-projected') || lm?.source?.includes('tibia-blended');
     };
-    const RADIUS = 0.15; // base — may be widened per-landmark below
+    const RADIUS = 0.15; // base — may be widened/narrowed per-landmark below
+    // The KNEE (LM25/26) is a large, high-confidence MediaPipe joint and is excluded from the
+    // foot-triad geometry check, so it has no anatomical guard. A tape snap far from the MP knee is
+    // almost always the wrong orange blob (e.g. at toe-off), and it directly fabricates valgus /
+    // hip-adduction asymmetry. Give the knee a much tighter search radius so it can only lock onto a
+    // nearby, plausible blob and otherwise keeps the reliable MP estimate. (v0.16.3)
+    const isKnee = (idx) => (idx === 25 || idx === 26);
+    const KNEE_RADIUS = 0.09;
 
     // v0.15.0 — global-minimum assignment (was confidence-ordered greedy). Build every
     // (target,blob) pair within radius, then commit the smallest distances first so a noisy
@@ -10635,7 +10665,7 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
     const pairs = [];
     targets.forEach((tgt, ti) => {
       const prior = merged[tgt.idx]; if(!prior) return;
-      const r = isProjectedPrior(tgt.idx) ? 0.25 : RADIUS;
+      const r = isProjectedPrior(tgt.idx) ? 0.25 : (isKnee(tgt.idx) ? KNEE_RADIUS : RADIUS);
       blobs.forEach((blob, bi) => {
         const dx = blob.x - prior.x, dy = blob.y - prior.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
@@ -12711,7 +12741,7 @@ async function runAnalysis() {
           )
         );
         // ── Stage 3b-ii: Tape marker refinement (posterior view) ─────────────
-        const tapeConf3b = readTapeConfig();
+        const tapeConf3b = readTapeConfig('secondary');
         if(tapeConf3b) {
           statusEl.textContent = 'Applying tape refinement to posterior view...';
           refinedLandmarks2 = await Promise.all(
@@ -12796,7 +12826,7 @@ async function runAnalysis() {
           if(secDenseFrames.length >= (sec_isLanding ? 8 : 10)) {
             const secMpRes = await runMediaPipeOnFrames(secDenseFrames);
             // Apply tape (no crop refinement — geometry different from primary)
-            const secTapeCfg = readTapeConfig();
+            const secTapeCfg = readTapeConfig('secondary');
             // v0.15.0 (#16): segment-length plausibility on the dense posterior scan too, before tape.
             let _secRaw = secMpRes.map(raw => raw ? (raw.poseLandmarks ?? raw) : null);
             try { _secRaw = applySegmentConstraints(_secRaw, cameraView2); } catch(e){ console.warn('[DensePlausibility 3b]', e); }
