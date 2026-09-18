@@ -10718,6 +10718,27 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
       }
     }
 
+    // v0.16.4 — foot-height sanity. The swap guard above only fixes left/right ordering among the
+    // three foot blobs; it can't reject a marker that jumped well ABOVE the foot onto a stray
+    // same-color blob (e.g. a background object at knee height on the posterior view — the ankle &
+    // toe repeatedly snapping to ~y0.58 while the heel is at ~y0.70). A real malleolus sits only
+    // slightly above the heel and the forefoot sits near heel level, so any ankle/toe blob landing
+    // more than 0.10 frame-heights above the (reliably tracked) heel is spurious. Drop it and keep
+    // the MediaPipe estimate — this directly stops fabricated knee-valgus / pronation asymmetry.
+    if(footSlot.heel != null && assignedT.has(footSlot.heel)){
+      const _hB = blobOf(footSlot.heel);
+      for(const _loc of ['ankle','toe']){
+        const _ti = footSlot[_loc];
+        if(_ti == null || !assignedT.has(_ti)) continue;
+        const _b = blobOf(_ti);
+        if(_b && _hB && _b.y < _hB.y - 0.10){
+          used.delete(assignedT.get(_ti));
+          assignedT.delete(_ti);
+          console.log(`[TapeRefine] ${_loc} blob @y${_b.y.toFixed(3)} implausibly high above heel @y${_hB.y.toFixed(3)} — dropping, keeping MP`);
+        }
+      }
+    }
+
     // commit the resolved assignments
     targets.forEach((tgt, ti) => {
       const prior = merged[tgt.idx];
