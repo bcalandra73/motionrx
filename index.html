@@ -10725,16 +10725,23 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
     // slightly above the heel and the forefoot sits near heel level, so any ankle/toe blob landing
     // more than 0.10 frame-heights above the (reliably tracked) heel is spurious. Drop it and keep
     // the MediaPipe estimate — this directly stops fabricated knee-valgus / pronation asymmetry.
-    if(footSlot.heel != null && assignedT.has(footSlot.heel)){
-      const _hB = blobOf(footSlot.heel);
+    {
+      const _hB = (footSlot.heel != null && assignedT.has(footSlot.heel)) ? blobOf(footSlot.heel) : null;
+      // Most-inferior knee prior (larger y). A foot marker can never sit at or above the knee, so
+      // this is a heel-independent ceiling that still works on frames where the heel didn't track.
+      const _kneeYs = [25,26].map(i => merged[i]?.y).filter(y => y != null);
+      const _kneeY  = _kneeYs.length ? Math.max(..._kneeYs) : null;
       for(const _loc of ['ankle','toe']){
         const _ti = footSlot[_loc];
         if(_ti == null || !assignedT.has(_ti)) continue;
         const _b = blobOf(_ti);
-        if(_b && _hB && _b.y < _hB.y - 0.10){
+        if(!_b) continue;
+        const _hiVsHeel = _hB   != null && _b.y < _hB.y - 0.10;
+        const _hiVsKnee = _kneeY != null && _b.y < _kneeY + 0.02; // at/above knee = impossible for a foot
+        if(_hiVsHeel || _hiVsKnee){
           used.delete(assignedT.get(_ti));
           assignedT.delete(_ti);
-          console.log(`[TapeRefine] ${_loc} blob @y${_b.y.toFixed(3)} implausibly high above heel @y${_hB.y.toFixed(3)} — dropping, keeping MP`);
+          console.log(`[TapeRefine] ${_loc} blob @y${_b.y.toFixed(3)} implausibly high (heel ${_hB?_hB.y.toFixed(3):'n/a'}, knee ${_kneeY!=null?_kneeY.toFixed(3):'n/a'}) — dropping, keeping MP`);
         }
       }
     }
