@@ -5472,6 +5472,20 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         const lm = poseResult.poseLandmarks;
         const lw = Math.max(2, W/220);
 
+        // Airborne (reference) leg's foot markers are unreliable in a swing phase. Build the set of
+        // foot landmarks to HIDE this frame once, so both the skeleton bones and the joint dots skip
+        // them together — otherwise a bone would draw a line down to a mislocated swing foot. Per-leg:
+        // the contralateral (planted) foot always stays drawn.
+        const _swingFootAll = !isSwingPhase ? new Set()
+                            : (phase?._side === 'R' ? new Set([28, 30, 32]) : new Set([27, 29, 31]));
+        const _stanceAnkYb  = Math.max(lm[27]?.y ?? 0, lm[28]?.y ?? 0);
+        const _swingLifts   = (phaseId === 'midswing' || phaseId === 'lateswing');
+        const _hiddenFoot   = new Set();
+        _swingFootAll.forEach(i => {
+          if(i === 29 || i === 30 || i === 31 || i === 32) _hiddenFoot.add(i);       // heel/toe: always hidden in swing
+          else if((lm[i]?.y ?? 0) > _stanceAnkYb - 0.04 && _swingLifts) _hiddenFoot.add(i); // ankle: hidden only if it failed to lift
+        });
+
         const connections = [
           [11,12],[11,13],[13,15],[12,14],[14,16],
           [11,23],[12,24],[23,24],
@@ -5481,6 +5495,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         ];
         connections.forEach(([a,b]) => {
           if(!lm[a]||!lm[b]) return;
+          if(_hiddenFoot.has(a) || _hiddenFoot.has(b)) return; // don't draw bones to a hidden swing foot
           const visA = lm[a].visibility, visB = lm[b].visibility;
           if(visA < 0.2 && visB < 0.2) return; // skip very low confidence
           const conf = Math.min(visA, visB);
@@ -5518,6 +5533,17 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
         // Ankle landmarks (27/28) are still drawn (important for skeleton continuity) but
         // shown with a ⚠ annotation to flag that position is estimated during swing.
         const heelToeLandmarks = new Set([29, 30, 31, 32]);
+        // Only the SWINGING (reference) leg's foot is airborne & unreliable during a swing phase — the
+        // contralateral foot is planted and tracks fine. Treat this per-leg so the stance foot stays
+        // clean instead of flagging BOTH feet as "swing". _side is the reference leg ('L'/'R').
+        const _swingSide = phase?._side;
+        const _swingFoot = !isSwingPhase ? new Set()
+                         : (_swingSide === 'R' ? new Set([28, 30, 32]) : new Set([27, 29, 31]));
+        // Planted-foot height = the lower (larger-y) ankle. Used to sanity-check that the swinging
+        // ankle is actually elevated in mid/late swing; if it isn't, the track failed and the marker
+        // would be drawn down near the planted foot — misleading, so suppress it instead.
+        const _stanceAnkY = Math.max(lm[27]?.y ?? 0, lm[28]?.y ?? 0);
+        const _swingShouldLift = (phaseId === 'midswing' || phaseId === 'lateswing');
         lm.forEach((p, i) => {
           // Foot landmarks (ankles 27/28) need a lower visibility gate — during swing they're
           // partially occluded/moving but still useful for the PT to see and correct.
@@ -5525,8 +5551,11 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
           const _footVis = footLandmarks.has(i) ? 0.10 : 0.20;
           if(p.visibility < _footVis) return;
           if(isFrontalView && i >= 1 && i <= 10) return;
-          // Skip heel/toe entirely during swing phases (they're never reliable in-air)
-          if(isSwingPhase && heelToeLandmarks.has(i)) return;
+          // Skip the swinging leg's heel/toe (never reliable in-air); the stance foot draws normally.
+          if(_swingFoot.has(i) && heelToeLandmarks.has(i)) return;
+          // Skip a swinging ankle that failed to lift (drawn at/below the planted foot) in mid/late
+          // swing — it's mistracked and would mislead. A correctly-elevated swing ankle still draws.
+          if(_swingFoot.has(i) && (i === 27 || i === 28) && _swingShouldLift && p.y > _stanceAnkY - 0.04) return;
           const conf = p.visibility;
           const isFoot = footLandmarks.has(i);
           ctx.beginPath();
@@ -5547,7 +5576,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
               ctx.fillStyle = '#c084fc'; // purple = tibia-projected (estimated from knee direction)
             } else if(isGroundCorrected) {
               ctx.fillStyle = '#fb923c'; // orange-red = ground-plane corrected
-            } else if(isSwingPhase && (i === 27 || i === 28)) {
+            } else if(_swingFoot.has(i) && (i === 27 || i === 28)) {
               ctx.fillStyle = '#facc15'; // yellow = ankle during swing (position unreliable)
             } else if(conf >= 0.55) {
               ctx.fillStyle = '#a8ff78'; // lime = heel/toe well-tracked
@@ -5559,7 +5588,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
             // Small label for ankle landmarks (27/28) to help PT identify them
             if((i === 27 || i === 28) && conf >= 0.25) {
               const side = (i === 27) ? 'LA' : 'RA';
-              const srcNote = isSwingPhase ? '?' : isProjected ? '~' : isGroundCorrected ? '↓' : '';
+              const srcNote = _swingFoot.has(i) ? '?' : isProjected ? '~' : isGroundCorrected ? '↓' : '';
               ctx.font = `bold ${Math.max(9, W/85)}px sans-serif`;
               ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.5;
               ctx.strokeText(side+srcNote, p.x*W + r + 3, p.y*H + 4);
@@ -5569,7 +5598,7 @@ function drawSkeleton(imageBase64, poseResult, barPoint=null, view='side', phase
             ctx.beginPath();
             ctx.arc(p.x*W, p.y*H, r, 0, 2*Math.PI);
             ctx.fillStyle = isTapeRefined ? '#ffd700' : isProjected ? '#c084fc' : isGroundCorrected ? '#fb923c'
-                          : (isSwingPhase && (i===27||i===28)) ? '#facc15'
+                          : (_swingFoot.has(i) && (i===27||i===28)) ? '#facc15'
                           : conf >= 0.55 ? '#a8ff78' : conf >= 0.35 ? '#ff9f43' : 'rgba(255,80,80,0.8)';
           } else {
             // v0.14.0: Non-foot joints: REF leg = TEAL, OPP leg = GOLD (faded in side view)
