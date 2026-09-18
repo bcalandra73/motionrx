@@ -10726,7 +10726,11 @@ async function applyTapeRefinement(imageBase64, landmarks, tapeConfig) {
     // more than 0.10 frame-heights above the (reliably tracked) heel is spurious. Drop it and keep
     // the MediaPipe estimate — this directly stops fabricated knee-valgus / pronation asymmetry.
     {
-      const _hB = (footSlot.heel != null && assignedT.has(footSlot.heel)) ? blobOf(footSlot.heel) : null;
+      let _hB = (footSlot.heel != null && assignedT.has(footSlot.heel)) ? blobOf(footSlot.heel) : null;
+      // Ignore an implausibly low heel (y>0.85 = snapped to the floor/shadow, below any real foot):
+      // trusting it would make a good ankle look "too high above heel" and get it dropped. Fall back
+      // to the knee ceiling in that case.
+      if(_hB && _hB.y > 0.85) _hB = null;
       // Most-inferior knee prior (larger y). A foot marker can never sit at or above the knee, so
       // this is a heel-independent ceiling that still works on frames where the heel didn't track.
       const _kneeYs = [25,26].map(i => merged[i]?.y).filter(y => y != null);
