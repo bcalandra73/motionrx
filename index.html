@@ -7725,6 +7725,11 @@ function renderASI(aggregated, movement) {
     'Ankle Dorsiflexion': {min:5, max:25},
   };
 
+  // "Lower is better" frontal-plane metrics: 0° is ideal, so a Limb Symmetry Index (min/max) is
+  // misleading here — e.g. L7°/R0° valgus gives "0% LSI", which reads as a catastrophic deficit when
+  // it actually means the right leg is clean. LSI is a strength/ROM concept (higher = more symmetric
+  // = good); for these we show which side carries more of the fault instead. (v0.16.5)
+  const _LOWER_BETTER_ASI = new Set(['Knee Valgus','Hip Adduction','Pronation']);
   const cards = [];
   pairsToUse.forEach(pair => {
     const L = aggregated[pair.left];
@@ -7748,6 +7753,11 @@ function renderASI(aggregated, movement) {
     const flag = asymPct < 10 ? 'ok' : asymPct < 15 ? 'warn' : 'poor';
     const flagClass = `asi-${flag}`;
     const barClass  = `asi-bar-${flag}`;
+    // Middle chip: true LSI for symmetry-target metrics; worse-side indicator for lower-is-better ones.
+    const _lowerBetter = _LOWER_BETTER_ASI.has(pair.label);
+    const _worseSide   = (lAvg === rAvg) ? null : (lAvg > rAvg ? 'L' : 'R');
+    const _midChip     = _lowerBetter ? (_worseSide ? `${_worseSide} side higher` : 'symmetric') : `${lsi}% LSI`;
+    const _asymLabel   = _lowerBetter ? 'L/R difference' : 'Asymmetry';
 
     // Bar fill: represent deviation from center
     const maxBar = 30; // 30% deviation = full bar
@@ -7763,12 +7773,12 @@ function renderASI(aggregated, movement) {
         </div>
         <div class="asi-values">
           <span>L: <strong>${lAvg}°</strong></span>
-          <span class="asi-lsi-val ${flagClass}">${lsi}% LSI</span>
+          <span class="asi-lsi-val ${flagClass}">${_midChip}</span>
           <span>R: <strong>${rAvg}°</strong></span>
         </div>
         <div class="asi-lsi">
-          <div class="asi-lsi-val ${flagClass}">${asymPct}%</div>
-          <div class="asi-lsi-label">Asymmetry · ${flag === 'ok' ? 'Symmetric' : flag === 'warn' ? 'Monitor' : 'Significant'}</div>
+          <div class="asi-lsi-val asi-headline ${flagClass}">${asymPct}%</div>
+          <div class="asi-lsi-label">${_asymLabel} · ${flag === 'ok' ? 'Symmetric' : flag === 'warn' ? 'Monitor' : 'Significant'}</div>
         </div>
       </div>`);
   });
@@ -13654,8 +13664,8 @@ Return ONLY a JSON object (no markdown, no preamble) in exactly this structure:
   "findings": [
     { "priority": "high|medium|positive", "title": "<short title>", "detail": "<specific observation referencing measured angles${barStats ? ' and/or bar drift' : ''} where possible>" }
   ],
-  "biomechanical_analysis": "<2-3 paragraph narrative referencing angle measurements, symmetry, movement patterns${barStats ? ', and bar path quality' : ''}>",
-  "clinical_impressions": "<1-2 paragraph narrative: clinical significance, risk factors, functional implications>",
+  "biomechanical_analysis": "<2 paragraphs, OBJECTIVE and descriptive, organised by plane (sagittal first, then frontal): describe the movement the measurements add up to, citing specific angles${barStats ? ' and bar path quality' : ''}. Do NOT restate the findings list verbatim, and do NOT give diagnoses, injury risk, prognosis or treatment here — those belong in clinical_impressions and recommendations. This section is 'what the body is doing'.>",
+  "clinical_impressions": "<1 short paragraph, INTERPRETIVE only — this section is 'what it means'. Do NOT re-describe or re-list the measurements (the biomechanical analysis already did). Name the single PRIMARY driver, the injury-risk mechanism it creates, and the functional/prognostic implication. No measurement recap, no exercise prescription (that is in recommendations). Avoid repeating sentences or phrasing used in biomechanical_analysis or the findings.>",
   "recommendations": ["<specific actionable PT recommendation>"],
   "patient_education": ["<simple patient-facing explanation>"],
   "footwear_recommendation": "<2-4 sentence footwear recommendation with shoe category and rationale — only include if footwear recommendation was requested above, otherwise omit this field>"
@@ -15079,7 +15089,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
       : []
     ),
   ];
-  let worstAsymPct = 0, worstAsymLabel = '';
+  let worstAsymPct = 0, worstAsymLabel = '', worstAsymL = null, worstAsymR = null;
   asiPairsForTile.forEach(p => {
     const L = aggregated[p.left], R = aggregated[p.right];
     if(!L || !R) return;
@@ -15091,7 +15101,7 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     if(L.lowConfidence || R.lowConfidence) return; // v0.15.0: don't headline an under-sampled metric
     if(_metricLandmarkDisagree(p.label) > 0.40) return; // v0.15.0: artifact-level model disagreement
     const a = calcAsymmetryPct(lDisp, rDisp, p.minMag);
-    if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; }
+    if(a !== null && a > worstAsymPct) { worstAsymPct = a; worstAsymLabel = p.label; worstAsymL = lDisp; worstAsymR = rDisp; }
   });
   // v0.15.0 (#29): deterministic running score replaces the AI-judged score so a given number
   // means the same thing across patients and re-assessments (model-independent).
@@ -15118,10 +15128,26 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
     } catch(e) { console.warn('[BalanceScore]', e); }
   }
   const asiTileFlag = worstAsymPct < 10 ? 'score-good' : worstAsymPct < 15 ? 'score-warn' : 'score-poor';
+  // v0.16.5: lead the headline with the worse-side ABSOLUTE value + clinical severity, not the raw
+  // L/R ratio. A near-zero opposite side makes the ratio explode (7° vs 0° = "100%"), which reads as
+  // catastrophic when it's a mild finding. Show the magnitude that actually matters, with the % as
+  // secondary context, and colour by severity of the worse side (not the ratio).
+  const _worseVal  = (worstAsymL != null && worstAsymR != null) ? Math.max(worstAsymL, worstAsymR) : null;
+  const _worseSideT = (worstAsymL != null && worstAsymR != null) ? (worstAsymL >= worstAsymR ? 'L' : 'R') : '';
+  const _sevBands  = { 'Knee Valgus':[5,10,15], 'Hip Adduction':[10,15,20], 'Pronation':[5,8,12] }[worstAsymLabel];
+  const _sevWord   = (_worseVal != null && _sevBands)
+    ? (_worseVal < _sevBands[0] ? 'normal' : _worseVal < _sevBands[1] ? 'mild' : _worseVal < _sevBands[2] ? 'moderate' : 'severe')
+    : '';
+  const _sevFlag   = _sevWord === 'normal' ? 'score-good' : _sevWord === 'mild' ? 'score-warn'
+                   : (_sevWord === 'moderate' || _sevWord === 'severe') ? 'score-poor' : asiTileFlag;
+  const _tileVal   = (_worseVal != null) ? `${_worseVal}°` : `${worstAsymPct}%`;
+  const _tileLbl   = (_worseVal != null)
+    ? `Worst Finding: ${_worseSideT} ${worstAsymLabel}${_sevWord ? ' · ' + _sevWord : ''} (${worstAsymPct}% L/R diff)`
+    : `Worst Asymmetry (${worstAsymLabel})`;
   const asiTile = worstAsymLabel ? `
     <div class="score-tile">
-      <div class="score-tile-value ${asiTileFlag}">${worstAsymPct}%</div>
-      <div class="score-tile-label">Worst Asymmetry (${worstAsymLabel})</div>
+      <div class="score-tile-value ${_sevFlag}">${_tileVal}</div>
+      <div class="score-tile-label">${_tileLbl}</div>
     </div>` : '';
 
   const barTile = barStats ? `
@@ -16951,7 +16977,12 @@ async function exportPDF() {
       const _treadmillNote = _isTreadmill && /running|gait/i.test(_pdfMovement)
         ? ' Gallery phases use biomechanical timing (Zeni 2008 / Perry & Burnfield). Treadmill belt movement makes stance phases appear more compressed than overground — focus on the dense-pass measurements, not static gallery frame appearance.'
         : '';
-      const disclaimerText = `Timing metrics estimated from video at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms resolution). ${fpsNote}` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '') + _treadmillNote
+      // Distinguish IMAGE capture resolution (source fps) from SPATIOTEMPORAL timing resolution:
+      // step timing / GCT are read off a fixed down-sampled frame set, so their effective resolution
+      // is coarser than the capture rate. Advertising only "±Xms at 120fps" overstated the precision
+      // of the spatiotemporal metrics next to the ±% step-timing note. (v0.16.5)
+      const _stepRes = sm.stepAsymResolutionPct;
+      const disclaimerText = `Video captured at ${fpsVal}fps (±${Math.round(1000/fpsVal)}ms per-frame image resolution). ${fpsNote} NOTE: spatiotemporal metrics (step timing, GCT, float) are analysed on a down-sampled frame set, so their timing resolution is coarser than the capture rate${_stepRes!=null?` — step-symmetry resolves to ±${_stepRes}% on this clip and is screening-grade`:' — treat step-symmetry as screening-grade'}.` + (ctxParts.length ? ` Parameters: ${ctxParts.join(' · ')}.` : '') + _treadmillNote
         + ` Metrics marked (est.) — ground contact, float, vertical oscillation — are inferred from phase timing, not force sensors. This is a 2-D video screening tool, not a lab: frontal-plane values (valgus, pelvic drop, pronation) flag patterns for clinical follow-up rather than exact diagnosis.`;
       doc.text(disclaimerText, ML+3, y+7, {maxWidth:CW-6});
       y += 20;
@@ -17063,8 +17094,11 @@ async function exportPDF() {
         if(aCol===0) { guard(CARD_H); aRowY=y; }
         const joint = card.querySelector('.asi-joint')?.textContent?.trim()||'';
         const vals  = card.querySelector('.asi-values')?.textContent?.trim()||'';
-        const lsi   = card.querySelector('.asi-lsi-val')?.textContent?.trim()||'';
-        const cls   = card.querySelector('.asi-lsi-val')?.className||'';
+        // Headline = asymmetry % (the .asi-headline element), matching the on-screen card. Previously
+        // this grabbed the first .asi-lsi-val (the middle chip), so the PDF showed "0% LSI" as the big
+        // number for lower-is-better metrics — misleading. (v0.16.5)
+        const lsi   = card.querySelector('.asi-headline')?.textContent?.trim()||'';
+        const cls   = card.querySelector('.asi-headline')?.className||'';
         const rgb   = cls.includes('asi-poor')?C.red:cls.includes('asi-warn')?C.amber:C.teal;
         const ax    = ML+aCol*(aW+4);
         setFill(C.white); setDraw(C.border); doc.setLineWidth(0.25);
