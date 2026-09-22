@@ -8713,6 +8713,12 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
 
   // Step length asymmetry (from horizontal ankle offset at contact, average across strides)
   // Find opposite leg contacts within each stride for step symmetry
+  // Step-asymmetry measurement resolution & reliability, populated by the IIFE below. At low fps the
+  // metric is built from frame-quantized step times, so a 1-frame error already reads as ~10% asym
+  // (the Brian1–5 MDC study measured its run-to-run MDC95 at ~2.5× that resolution). These let the
+  // score, flags and AI narrative treat a sub-floor value as "within measurement error". (v0.16.5)
+  let stepAsymResolutionPct = null;
+  let stepAsymReliable      = null;
   const stepLengthAsym = (() => {
     // On a treadmill, step length asymmetry is best measured from STEP TIMING
     // (time between alternating foot contacts), not spatial X position.
@@ -8773,7 +8779,23 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     const lMean = mean(leftStepTimes);
     const rMean = mean(rightStepTimes);
     if(lMean <= 0 || rMean <= 0) return null;
-    return Math.round(Math.abs(lMean - rMean) / ((lMean + rMean) / 2) * 100);
+    const meanStep = (lMean + rMean) / 2;                 // seconds
+    const asymVal  = Math.round(Math.abs(lMean - rMean) / meanStep * 100);
+    // Frame-timing resolution: a step time is quantized to the sampling grid, so the L−R difference
+    // carries up to ~1 sample of noise → this % is the smallest asymmetry we can even resolve.
+    // IMPORTANT: the grid is how densely the stride engine actually sampled frames (perFrameData
+    // spacing ≈ videoDuration / N), NOT the source video fps. The pipeline analyses a fixed ~N-frame
+    // set, so filming at 120fps does not by itself refine step timing — this self-calibrates to the
+    // real sampling rate and matches the ±29% run-to-run MDC seen in the 5-bout study. (v0.16.5)
+    const _srcFps   = (typeof fps === 'number' && fps > 0) ? fps : 30;
+    const _effFps   = (videoDuration > 0 && N > 1) ? Math.min(N / videoDuration, _srcFps) : _srcFps;
+    const frameDur  = 1 / _effFps;
+    stepAsymResolutionPct = Math.round(frameDur / meanStep * 100);
+    // Reliability floor ≈ MDC95 from the 5-bout study (~2.5× the single-frame resolution). Below it,
+    // a single run's asymmetry is indistinguishable from frame-timing noise. (~25% at 30fps, ~6% at 120fps.)
+    const _asymFloor = Math.max(8, Math.round(stepAsymResolutionPct * 2.5));
+    stepAsymReliable = asymVal >= _asymFloor;
+    return asymVal;
   })();
 
   // ── 6. Find best representative stride ──
@@ -8853,7 +8875,12 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   }
 
   if(stepLengthAsym != null) {
-    if(stepLengthAsym > 15)  flags.asym = {level:'poor', msg:'Step length asymmetry >15% — clinically significant, warrants further assessment'};
+    // v0.16.5: below the frame-timing reliability floor, a single-run asymmetry is within measurement
+    // error at this fps — don't call it "clinically significant". Report it as screening-only instead.
+    if(stepAsymReliable === false) {
+      flags.asym = {level:'warn', msg:`Step asymmetry ${stepLengthAsym}% is within measurement resolution (±${stepAsymResolutionPct ?? '?'}% at this frame rate) — screening only; re-record at 60fps+ to confirm`};
+    }
+    else if(stepLengthAsym > 15)  flags.asym = {level:'poor', msg:'Step length asymmetry >15% — clinically significant, warrants further assessment'};
     else if(stepLengthAsym > 8) flags.asym = {level:'warn', msg:'Mild step length asymmetry — monitor across sessions'};
     else                     flags.asym = {level:'ok',   msg:'Step length symmetry within acceptable range (<8%)'};
   }
@@ -9054,6 +9081,8 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     hipExtAtToeoff:   avgHipExt,
     fsConsensus,
     stepLengthAsymPct: stepLengthAsym,
+    stepAsymResolutionPct,          // smallest resolvable asym at this fps (frame-timing quantization)
+    stepAsymReliable,               // false = within measurement error at this fps → screening only
     // Stride length (requires speed input)
     strideLengthM, stepLengthM, legLengthM, strideLengthNorm, overstrideFlag,
     // Running context
@@ -13439,7 +13468,7 @@ RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete st
 - Foot strike pattern: ${window_strideMetrics.fsConsensus} (${window_strideMetrics.fsConsensus==='heel'?'higher impact, consider midfoot cues':window_strideMetrics.fsConsensus==='midfoot'?'optimal pattern':'forefoot strike'})
 ${window_strideMetrics.kneeFlexAtContact!=null ? `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})` : ''}
 ${window_strideMetrics.backKneeFlexAtContact!=null ? `- Trailing-leg (back) knee flexion at contact: ${window_strideMetrics.backKneeFlexAtContact}° — leg-recovery/leg-cycle screening metric; a more flexed trailing knee = tighter, more efficient recovery, a near-straight ("open") trailing knee = restricted recovery. NOTE: trailing leg is the far limb in lateral view → treat as lower-confidence context, do not headline.` : ''}
-${window_strideMetrics.stepLengthAsymPct!=null ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)` : ''}
+${window_strideMetrics.stepLengthAsymPct!=null ? (window_strideMetrics.stepAsymReliable === false ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% — ⚠️ WITHIN MEASUREMENT ERROR at this frame rate (resolution ±${window_strideMetrics.stepAsymResolutionPct ?? '?'}%; run-to-run MDC ~2.5×). This is NOT a reliable finding — do NOT headline it, do NOT build a pain/loading narrative on it, and do NOT list it as a key finding. At most note in passing that step symmetry could not be reliably assessed at this frame rate and would need 60fps+ to confirm.` : `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)`) : ''}
 ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
 ${(() => {
@@ -13561,7 +13590,9 @@ ${(() => {
     hipAddL != null ? `Left hip adduction (swing): ${hipAddL}° (normal 0-8°, crossover risk >10°)` : null,
     hipAddR != null ? `Right hip adduction (swing): ${hipAddR}° (normal 0-8°, crossover risk >10°)` : null,
     `Foot strike pattern: ${fs}`,
-    stepAsym != null ? `Step asymmetry: ${stepAsym}%` : null,
+    stepAsym != null ? (window_strideMetrics?.stepAsymReliable === false
+        ? `Step asymmetry: ${stepAsym}% (WITHIN MEASUREMENT ERROR at this frame rate — screening only, do NOT treat as a real asymmetry)`
+        : `Step asymmetry: ${stepAsym}%`) : null,
   ].filter(Boolean).join('\n  ');
   return `
 FOOTWEAR RECOMMENDATION REQUEST:
@@ -14946,7 +14977,12 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
     if(hi < minAbs || Math.abs(l - r) < minAbs) return null;
     return Math.round(Math.abs(l - r) / hi * 100);
   };
-  const _stepAsym = (sm.stepLengthAsymPct != null) ? Math.round(sm.stepLengthAsymPct) : null;
+  // Only trust step-length asymmetry when it clears the frame-timing reliability floor (v0.16.5).
+  // At <60fps a sub-floor value is within measurement error (per the Brian1–5 MDC study), so it must
+  // not deduct from the score or unlock the kinematic-asymmetry penalty. stepAsymReliable===false
+  // means unreliable; null (spatial fallback / older data) is treated as usable.
+  const _stepAsymRaw = (sm.stepLengthAsymPct != null) ? Math.round(sm.stepLengthAsymPct) : null;
+  const _stepAsym = (_stepAsymRaw != null && sm.stepAsymReliable !== false) ? _stepAsymRaw : null;
   const _corroborated = (_stepAsym != null && _stepAsym >= 10); // step length confirms a real asymmetry
   const _kneeAsym = _corroborated ? _asymPct(mv('Left Knee Flexion'), mv('Right Knee Flexion'), 8) : null;
   const _hipAsym  = _corroborated ? _asymPct(mv('Left Hip Flexion'),  mv('Right Hip Flexion'),  6) : null;
@@ -16841,7 +16877,7 @@ async function exportPDF() {
                                           '⚠ High — guarding/compensation',
         flag: sm.kneeFlexAtContact < 5 || sm.kneeFlexAtContact > 30 ? 'warn' : 'ok',
       });
-      if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub:'L/R step timing'});
+      if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub: sm.stepAsymReliable === false ? `± ${sm.stepAsymResolutionPct ?? '?'}% resolution — screening only` : 'L/R step timing', flag: sm.stepAsymReliable === false ? 'warn' : undefined});
       if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
       if(sm.strideLengthNorm!=null)  kpiDefs.push({label:'Stride/Leg Ratio', value:`${sm.strideLengthNorm}×`, sub: sm.overstrideFlag==='overstride'?'! overstriding':sm.overstrideFlag==='understride'?'! understriding':'optimal range'});
       if(sm.verticalOscillationCm!=null) kpiDefs.push({
