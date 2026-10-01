@@ -2849,14 +2849,17 @@ function startFrameExtraction(file, vid) {
                     // Sparse frame density (~110ms/frame) still causes TO detection errors, so we
                     // only correct when stance falls OUTSIDE the band-appropriate range.
                     const _sb2 = _runSpeedBand();
+                    let _zeniStanceClamped = false;
                     if(_stancePct < _sb2.stanceMin) {
                       const _correctedTo = _icFrac + (_sb2.stanceMin + 0.05) * _strideDurFrac;
                       console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% < ${Math.round(_sb2.stanceMin*100)}% (${_sb2.band} band) — correcting TO to ${Math.round((_sb2.stanceMin+0.05)*100)}% (${_correctedTo.toFixed(3)})`);
                       _sDur = _correctedTo - _icFrac;
+                      _zeniStanceClamped = true;
                     } else if(_stancePct > _sb2.stanceMax) {
                       const _correctedTo = _icFrac + (_sb2.stanceMax - 0.04) * _strideDurFrac;
                       console.log(`[Zeni2008] ⚠ Stance ${Math.round(_stancePct*100)}% > ${Math.round(_sb2.stanceMax*100)}% (${_sb2.band} band) — correcting TO to ${Math.round((_sb2.stanceMax-0.04)*100)}% (${_toFrac.toFixed(3)} → ${_correctedTo.toFixed(3)})`);
                       _sDur = _correctedTo - _icFrac;
+                      _zeniStanceClamped = true;
                     }
                     // CRITICAL: use corrected TO fraction (icFrac + sDur) for ALL swing phase
                     // calculations, not the raw _toFrac which may be pre-correction.
@@ -2892,7 +2895,13 @@ function startFrameExtraction(file, vid) {
                       window_strideMetrics.floatPct = Math.max(0, 100 - 2 * _stPct);
                       window_strideMetrics.hasFloat = window_strideMetrics.floatPct > 5;
                       window_strideMetrics._gctReconciled = true;
-                      console.log(`[GCTReconcile] GCT ${_ogc}%→${_stPct}%, float ${_ofl}%→${window_strideMetrics.floatPct}% (phase-engine stance)`);
+                      // v0.16.5: GCT/float are LOW CONFIDENCE when the raw phase-engine stance had to be
+                      // clamped into the physiological band (raw was impossible for running), or when the
+                      // two independent methods disagree by >8% — both mean the coarse-fps contact timing
+                      // can't resolve stance/flight (common at slow pace). Float in particular is then just
+                      // 100−2×clamped-stance, not an observation.
+                      window_strideMetrics._gctLowConfidence = _zeniStanceClamped || (_ogc != null && Math.abs(_ogc - _stPct) >= 8);
+                      console.log(`[GCTReconcile] GCT ${_ogc}%→${_stPct}%, float ${_ofl}%→${window_strideMetrics.floatPct}% (phase-engine stance)${window_strideMetrics._gctLowConfidence ? ' — LOW CONFIDENCE (clamped/disagreement)' : ''}`);
                     }
                     console.log('[Zeni2008] Fractions: ' + Object.entries(_zF).map(([k,v])=>k.slice(0,4)+'='+v.toFixed(3)).join(' '));
                   }
@@ -9366,19 +9375,21 @@ function renderStrideMetrics(metrics, aggregated={}) {
       label:'Ground Contact (est.)',
       value: metrics.gcPct != null ? metrics.gcPct+'%' : '—',
       unit:'of cycle',
-      sub: metrics.gcPct != null
+      sub: metrics._gctLowConfidence ? 'low confidence — slow pace / frame rate'
+        : metrics.gcPct != null
         ? `~${Math.round(metrics.strideDurationS*metrics.gcPct/100*1000)}ms est.`
         : 'insufficient data',
-      flag: metrics.flags.gct?.level ?? 'ok',
+      flag: metrics._gctLowConfidence ? 'warn' : (metrics.flags.gct?.level ?? 'ok'),
     },
     {
       label:'Float Time (est.)',
-      value: metrics.hasFloat ? metrics.floatPct+'%' : 'None',
-      unit: metrics.hasFloat ? 'of cycle' : 'detected',
-      sub: metrics.hasFloat
+      value: metrics._gctLowConfidence ? '—' : (metrics.hasFloat ? metrics.floatPct+'%' : 'None'),
+      unit: metrics._gctLowConfidence ? 'not resolvable' : (metrics.hasFloat ? 'of cycle' : 'detected'),
+      sub: metrics._gctLowConfidence ? 'low confidence — slow pace / frame rate'
+        : metrics.hasFloat
         ? `~${Math.round(metrics.strideDurationS*metrics.floatPct/100*1000)}ms est.`
         : 'No bilateral float phase',
-      flag: 'ok',
+      flag: metrics._gctLowConfidence ? 'warn' : 'ok',
     },
     ...(metrics.peakKneeFlex != null ? [{
       label:'Peak Knee Flex',
@@ -13481,8 +13492,8 @@ ${window_strideMetrics ? `
 RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete strides detected):
 - Cadence: ${window_strideMetrics.cadenceSpm != null ? window_strideMetrics.cadenceSpm + ' steps/min (optimal range: 160-180 spm)' : 'Could not be reliably measured — likely a frame-rate or detection limitation. Do NOT report a cadence value.'}
 - Stride duration: ${Math.round(window_strideMetrics.strideDurationS*1000)}ms avg${window_strideMetrics.cvStridePct!=null ? `, CV=${window_strideMetrics.cvStridePct}% stride-to-stride variability` : ''}
-- Ground contact: ${window_strideMetrics.gcPct!=null ? (window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' + (window_strideMetrics.gcPct < 30 ? ' [LIKELY UNDER-DETECTED, below typical range - do NOT praise as efficient; treat GCT and float as low-confidence]' : '')) : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
-- Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics.hasFloat ? (window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' + (window_strideMetrics.floatPct > 40 ? ' [IMPLAUSIBLY HIGH for a sub-elite pace - likely derived from an under-detected GCT; do NOT report as a finding]' : '')) : '0% detected (may indicate shuffle-run or 30fps limitation)') : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
+- Ground contact: ${window_strideMetrics.gcPct!=null ? (window_strideMetrics._gctLowConfidence ? window_strideMetrics.gcPct+'% of cycle — ⚠️ LOW CONFIDENCE: contact timing could not be reliably resolved on this clip (coarse effective frame rate / slow pace; the two detection methods disagreed and the value was clamped into range). Do NOT headline "prolonged stance" or a protective/load-avoidance narrative on it, and do NOT list GCT or float as a key finding. At most note that stance/flight timing needs higher-frame-rate footage to assess.' : (window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' + (window_strideMetrics.gcPct < 30 ? ' [LIKELY UNDER-DETECTED, below typical range - do NOT praise as efficient; treat GCT and float as low-confidence]' : ''))) : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
+- Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics._gctLowConfidence ? 'not reliably measurable on this clip (derived from the low-confidence stance above) — do NOT report a float value or infer a shuffle/no-flight pattern from it' : (window_strideMetrics.hasFloat ? (window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' + (window_strideMetrics.floatPct > 40 ? ' [IMPLAUSIBLY HIGH for a sub-elite pace - likely derived from an under-detected GCT; do NOT report as a finding]' : '')) : '0% detected (may indicate shuffle-run or 30fps limitation)')) : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
 - Foot strike pattern: ${window_strideMetrics.fsConsensus} (${window_strideMetrics.fsConsensus==='heel'?'higher impact, consider midfoot cues':window_strideMetrics.fsConsensus==='midfoot'?'optimal pattern':'forefoot strike'})
 ${window_strideMetrics.kneeFlexAtContact!=null ? (window_strideMetrics.kneeFlexContactReliable === false ? `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° — ⚠️ LOW CONFIDENCE: this is a single-frame estimate (multi-stride detection was unreliable on this clip). Do NOT headline it, do NOT build a guarding / pain-avoidance narrative on it, and do NOT list it as a key finding. At most mention in passing that knee-flexion-at-contact could not be reliably measured and would need clearer footage to confirm.` : `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})`) : ''}
 ${window_strideMetrics.backKneeFlexAtContact!=null ? `- Trailing-leg (back) knee flexion at contact: ${window_strideMetrics.backKneeFlexAtContact}° — leg-recovery/leg-cycle screening metric; a more flexed trailing knee = tighter, more efficient recovery, a near-straight ("open") trailing knee = restricted recovery. NOTE: trailing leg is the far limb in lateral view → treat as lower-confidence context, do not headline.` : ''}
@@ -16902,23 +16913,25 @@ async function exportPDF() {
           label:'Ground Contact (est.)',
           value: sm.gcPct!=null ? `${sm.gcPct}%` : '60fps+',
           unit: sm.gcPct!=null ? 'of gait cycle' : 'required',
-          sub: sm.gcPct!=null
+          sub: sm._gctLowConfidence ? 'low confidence — slow pace / frame rate'
+            : sm.gcPct!=null
             ? `~${Math.round(sm.strideDurationS*sm.gcPct/100*1000)}ms est.`
             : sm.gctFpsOk
               ? 'Signal too flat to detect toe-off (treadmill geometry)'
               : `Requires 60fps+ video (recorded at ${sm.fps||30}fps)`,
-          flag: sm.gcPct==null ? 'info' : (sm.flags.gct?.level ?? 'ok'),
+          flag: sm._gctLowConfidence ? 'warn' : (sm.gcPct==null ? 'info' : (sm.flags.gct?.level ?? 'ok')),
         },
         {
           label:'Float Time (est.)',
-          value: sm.floatPct!=null ? (sm.hasFloat ? `${sm.floatPct}%` : '0%') : '60fps+',
-          unit: sm.floatPct!=null ? 'of cycle' : 'required',
-          sub: sm.floatPct!=null
+          value: sm._gctLowConfidence ? '—' : (sm.floatPct!=null ? (sm.hasFloat ? `${sm.floatPct}%` : '0%') : '60fps+'),
+          unit: sm._gctLowConfidence ? 'not resolvable' : (sm.floatPct!=null ? 'of cycle' : 'required'),
+          sub: sm._gctLowConfidence ? 'low confidence — slow pace / frame rate'
+            : sm.floatPct!=null
             ? (sm.hasFloat ? `~${Math.round(sm.strideDurationS*sm.floatPct/100*1000)}ms est.` : 'No bilateral float phase detected')
             : sm.floatFpsOk
               ? 'Signal too flat to detect float (treadmill geometry)'
               : `Requires 60fps+ video (recorded at ${sm.fps||30}fps)`,
-          flag: sm.floatPct==null ? 'info' : 'ok',
+          flag: sm._gctLowConfidence ? 'warn' : (sm.floatPct==null ? 'info' : 'ok'),
         },
         {label:'Strides Detected', value: `${sm.stridesDetected}`,                  sub:`in ${sm.videoDurationS.toFixed(1)}s clip`},
         {label:'Foot Strike',      value: sm.fsConsensus.charAt(0).toUpperCase()+sm.fsConsensus.slice(1), sub:'consensus pattern'},
