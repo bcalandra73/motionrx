@@ -435,9 +435,11 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div class="two-col">
       <!-- Patient Info -->
       <div class="card no-mb">
-        <div class="card-header">
+        <div class="card-header" style="display:flex;align-items:center;gap:10px;">
           <div class="card-header-icon">👤</div>
-          <div><h2>Patient Information</h2><p>Demographics and clinical context</p></div>
+          <div style="flex:1"><h2>Patient Information</h2><p>Demographics and clinical context</p></div>
+          <button type="button" onclick="clearPatientInfo()" title="Clear name, age, height, complaint and symptomatic side before assessing a new patient"
+            style="font-size:.72rem;font-weight:600;color:var(--navy);background:#fff;border:1px solid var(--border);border-radius:7px;padding:6px 11px;cursor:pointer;white-space:nowrap;">↺ New Patient</button>
         </div>
         <div class="form-grid">
           <div class="form-group">
@@ -3047,7 +3049,11 @@ function startFrameExtraction(file, vid) {
                   if(_kicFlex >= 0 && _kicFlex <= 55) {
                     window_strideMetrics.kneeFlexAtContact = _kicFlex;
                     window_strideMetrics._kneeFlexContactSource = 'phase-engine-IC';
-                    console.log(`[KneeFlexContact] Recovered from phase-engine IC: ${_kicFlex}° (included ${Math.round(_kicIncl)}° at refined IC frame ${_zIcIdx ?? _icIdx})`);
+                    // Single-frame recovery = LOW CONFIDENCE. The multi-stride engine had already
+                    // suppressed this metric as unreliable, so it must not headline a clinical finding
+                    // (e.g. a "guarding / pain-avoidance" narrative off one IC frame). (v0.16.5)
+                    window_strideMetrics.kneeFlexContactReliable = false;
+                    console.log(`[KneeFlexContact] Recovered from phase-engine IC: ${_kicFlex}° (included ${Math.round(_kicIncl)}° at refined IC frame ${_zIcIdx ?? _icIdx}) — LOW CONFIDENCE (single frame)`);
                   }
                 }
               } catch(_kfcErr){}
@@ -9087,6 +9093,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // Kinematics
     peakKneeFlex:     avgPeakKnee,
     kneeFlexAtContact,             // degrees of flexion at initial contact (5–20° norm)
+    kneeFlexContactReliable: _kcfReliable, // true = multi-stride median; false/recovered = single-frame, low conf
     backKneeFlexAtContact,         // trailing-leg knee flexion at contralateral IC (leg recovery; far-leg = lower conf)
     hipExtAtToeoff:   avgHipExt,
     fsConsensus,
@@ -9384,11 +9391,12 @@ function renderStrideMetrics(metrics, aggregated={}) {
       label:'Knee Flex at Contact',
       value: metrics.kneeFlexAtContact+'°',
       unit:'initial contact',
-      sub: metrics.kneeFlexAtContact < 5  ? '⚠️ Near-straight — higher impact' :
+      sub: metrics.kneeFlexContactReliable === false ? 'low confidence — single-frame estimate' :
+           metrics.kneeFlexAtContact < 5  ? '⚠️ Near-straight — higher impact' :
            metrics.kneeFlexAtContact <= 20 ? '✓ Normal range (5–20°)' :
            metrics.kneeFlexAtContact <= 30 ? 'Elevated — forefoot/midfoot pattern' :
                                              '⚠️ High — guarding or compensation',
-      flag: metrics.kneeFlexAtContact < 5 || metrics.kneeFlexAtContact > 30 ? 'warn' : 'ok',
+      flag: metrics.kneeFlexContactReliable === false ? 'warn' : (metrics.kneeFlexAtContact < 5 || metrics.kneeFlexAtContact > 30 ? 'warn' : 'ok'),
     }] : []),
     ...(metrics.backKneeFlexAtContact != null ? [{
       label:'Back Knee at Contact',
@@ -13476,7 +13484,7 @@ RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete st
 - Ground contact: ${window_strideMetrics.gcPct!=null ? (window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' + (window_strideMetrics.gcPct < 30 ? ' [LIKELY UNDER-DETECTED, below typical range - do NOT praise as efficient; treat GCT and float as low-confidence]' : '')) : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
 - Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics.hasFloat ? (window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' + (window_strideMetrics.floatPct > 40 ? ' [IMPLAUSIBLY HIGH for a sub-elite pace - likely derived from an under-detected GCT; do NOT report as a finding]' : '')) : '0% detected (may indicate shuffle-run or 30fps limitation)') : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
 - Foot strike pattern: ${window_strideMetrics.fsConsensus} (${window_strideMetrics.fsConsensus==='heel'?'higher impact, consider midfoot cues':window_strideMetrics.fsConsensus==='midfoot'?'optimal pattern':'forefoot strike'})
-${window_strideMetrics.kneeFlexAtContact!=null ? `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})` : ''}
+${window_strideMetrics.kneeFlexAtContact!=null ? (window_strideMetrics.kneeFlexContactReliable === false ? `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° — ⚠️ LOW CONFIDENCE: this is a single-frame estimate (multi-stride detection was unreliable on this clip). Do NOT headline it, do NOT build a guarding / pain-avoidance narrative on it, and do NOT list it as a key finding. At most mention in passing that knee-flexion-at-contact could not be reliably measured and would need clearer footage to confirm.` : `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})`) : ''}
 ${window_strideMetrics.backKneeFlexAtContact!=null ? `- Trailing-leg (back) knee flexion at contact: ${window_strideMetrics.backKneeFlexAtContact}° — leg-recovery/leg-cycle screening metric; a more flexed trailing knee = tighter, more efficient recovery, a near-straight ("open") trailing knee = restricted recovery. NOTE: trailing leg is the far limb in lateral view → treat as lower-confidence context, do not headline.` : ''}
 ${window_strideMetrics.stepLengthAsymPct!=null ? (window_strideMetrics.stepAsymReliable === false ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% — ⚠️ WITHIN MEASUREMENT ERROR at this frame rate (resolution ±${window_strideMetrics.stepAsymResolutionPct ?? '?'}%; run-to-run MDC ~2.5×). This is NOT a reliable finding — do NOT headline it, do NOT build a pain/loading narrative on it, and do NOT list it as a key finding. At most note in passing that step symmetry could not be reliably assessed at this frame rate and would need 60fps+ to confirm.` : `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)`) : ''}
 ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') : ''}
@@ -13566,11 +13574,13 @@ ${(() => {
     const rPron = getPeak('Right Pronation', true);
     // v0.15.0: gate these dense lines by the same low-confidence flags as the table, so a
     // flagged far-leg ankle/pronation value can't leak into the model's reasoning here.
-    if(lADF!=null && !aggregated['Left Ankle Dorsiflexion']?.lowConfidence)  lines.push(`Left ankle DF (dense refined): ${lADF}° (foot-refinement applied)`);
-    if(rADF!=null && !aggregated['Right Ankle Dorsiflexion']?.lowConfidence) lines.push(`Right ankle DF (dense refined): ${rADF}°`);
+    // NOTE: ankle DF intentionally NOT pushed here. getPeak(...,false) returns the cycle MINIMUM DF
+    // (occurs at push-off plantarflexion, not loading), which both misrepresents "DF at loading" and
+    // contradicts the phase-accurate value already in the joint-angle table. Let the table value be the
+    // single source of truth for ankle DF to avoid a self-contradictory report. (v0.16.5)
     if(lPron!=null && !aggregated['Left Pronation']?.lowConfidence)  lines.push(`Left pronation (dense): ${lPron}°`);
     if(rPron!=null && !aggregated['Right Pronation']?.lowConfidence) lines.push(`Right pronation (dense): ${rPron}°`);
-    lines.push('Ankle values from dense pass have improved foot landmark precision from multi-scale crop refinement — prefer these over 8-frame estimates. Pronation values come from phase-accurate gallery frames (contact+loading+midstance only) and may not appear in the dense pass.');
+    lines.push('Pronation values come from phase-accurate gallery frames (contact+loading+midstance only) and may not appear in the dense pass. For ankle dorsiflexion, use the value in the measured joint-angle table (phase-accurate loading-response DF).');
   }
 
   return '\nDENSE DYNAMIC PASS RESULTS:\n' + lines.map(l=>'- '+l).join('\n');
@@ -15134,7 +15144,9 @@ function renderReport(r, movement, trackedFrames, barStats=null, aggregated={}) 
   // secondary context, and colour by severity of the worse side (not the ratio).
   const _worseVal  = (worstAsymL != null && worstAsymR != null) ? Math.max(worstAsymL, worstAsymR) : null;
   const _worseSideT = (worstAsymL != null && worstAsymR != null) ? (worstAsymL >= worstAsymR ? 'L' : 'R') : '';
-  const _sevBands  = { 'Knee Valgus':[5,10,15], 'Hip Adduction':[10,15,20], 'Pronation':[5,8,12] }[worstAsymLabel];
+  // Severity onsets [mild, moderate, severe] matched to the clinical scales cited elsewhere in the
+  // report (calcaneal eversion: neutral 0-4°, mild 5-10°; so pronation moderate starts at 10, not 8).
+  const _sevBands  = { 'Knee Valgus':[5,10,15], 'Hip Adduction':[10,15,20], 'Pronation':[5,10,15] }[worstAsymLabel];
   const _sevWord   = (_worseVal != null && _sevBands)
     ? (_worseVal < _sevBands[0] ? 'normal' : _worseVal < _sevBands[1] ? 'mild' : _worseVal < _sevBands[2] ? 'moderate' : 'severe')
     : '';
@@ -15339,6 +15351,24 @@ document.addEventListener('DOMContentLoaded', autoSaveCheckRestore);
 // Saves form state + rendered report HTML after each successful analysis.
 // On next page load, offers a one-click restore so PTs can pick up where they left off.
 // Stored under a separate key from session comparison snapshots.
+
+// Reset per-patient identity & clinical-context fields so one patient's demographics/complaint can
+// never carry into the next (these inputs otherwise persist across analyses in the same page session —
+// e.g. an age left in the box appearing on a different patient's report). Analysis settings that are
+// reused across patients at the same station (movement, fps, tape config, treadmill speed) are kept.
+function clearPatientInfo() {
+  const _set = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
+  ['patientName','patientAge','patientHeight','diagnosis'].forEach(id => _set(id, ''));
+  _set('injuredSide', '');
+  // Clear any Patient-Reported-Outcome entry inputs (pain scores etc.) — they are per-patient.
+  document.querySelectorAll('#promsPanel input, #promsPanel select').forEach(el => {
+    if(el.type === 'checkbox' || el.type === 'radio') el.checked = false; else el.value = '';
+  });
+  try { localStorage.removeItem(AUTOSAVE_KEY); } catch(_e){}
+  const _btn = document.querySelector('button[onclick="clearPatientInfo()"]');
+  if(_btn){ const _t = _btn.textContent; _btn.textContent = '✓ Cleared'; setTimeout(() => { _btn.textContent = _t; }, 1500); }
+  const _nm = document.getElementById('patientName'); if(_nm) _nm.focus();
+}
 
 function autoSaveCurrent() {
   try {
@@ -16897,11 +16927,12 @@ async function exportPDF() {
       if(sm.kneeFlexAtContact!=null) kpiDefs.push({
         label:'Knee Flex at Contact',
         value:`${sm.kneeFlexAtContact}°`,
-        sub: sm.kneeFlexAtContact < 5  ? '⚠ Near-straight — impact risk' :
+        sub: sm.kneeFlexContactReliable === false ? 'low confidence — single-frame estimate' :
+             sm.kneeFlexAtContact < 5  ? '⚠ Near-straight — impact risk' :
              sm.kneeFlexAtContact <= 20 ? 'Normal (5–20°)' :
              sm.kneeFlexAtContact <= 30 ? 'Elevated — forefoot pattern' :
                                           '⚠ High — guarding/compensation',
-        flag: sm.kneeFlexAtContact < 5 || sm.kneeFlexAtContact > 30 ? 'warn' : 'ok',
+        flag: sm.kneeFlexContactReliable === false ? 'warn' : (sm.kneeFlexAtContact < 5 || sm.kneeFlexAtContact > 30 ? 'warn' : 'ok'),
       });
       if(sm.stepLengthAsymPct!=null) kpiDefs.push({label:'Step Asym', value:`${sm.stepLengthAsymPct}%`, sub: sm.stepAsymReliable === false ? `± ${sm.stepAsymResolutionPct ?? '?'}% resolution — screening only` : 'L/R step timing', flag: sm.stepAsymReliable === false ? 'warn' : undefined});
       if(sm.strideLengthM!=null)     kpiDefs.push({label:'Stride Length', value:`${sm.strideLengthM}m`, sub: sm.stepLengthM ? `Step: ${sm.stepLengthM}m` : 'per full cycle'});
