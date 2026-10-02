@@ -456,7 +456,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </div>
           <div class="form-group full">
             <label class="form-label">Movement Being Assessed <span class="req">*</span></label>
-            <select id="movementType" onchange="(function(v){var c=document.getElementById('runningInputsCard');if(c)c.style.display=/running|gait|walk/i.test(v)?'block':'none';var j=document.getElementById('jumpInputsCard');if(j)j.style.display=/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';var t=document.getElementById('tapeMarkersCard');if(t)t.style.display=/running|gait|walk|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';})(this.value)">
+            <select id="movementType" onchange="(function(v){var c=document.getElementById('runningInputsCard');if(c)c.style.display=/running|gait|walk/i.test(v)?'block':'none';var j=document.getElementById('jumpInputsCard');if(j)j.style.display=/drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';var t=document.getElementById('tapeMarkersCard');if(t)t.style.display=/running|gait|walk|drop jump|countermovement jump|single-leg landing|tuck jump/i.test(v)?'block':'none';if(/running|gait|walk/i.test(v)&&typeof applyRunningViewDefaults==='function')applyRunningViewDefaults();})(this.value)">
               <option value="">Select movement type...</option>
               <optgroup label="Lower Extremity">
                 <option>Gait / Walking</option>
@@ -17560,9 +17560,16 @@ function setCameraView(view, btn) {
     const b = document.getElementById(id);
     if(b) b.classList.remove('active');
   });
-  btn.classList.add('active');
-  document.getElementById('viewHint').textContent = VIEW_HINTS[view] || '';
+  // btn may be null when called programmatically (e.g. applying movement defaults)
+  (btn || document.getElementById({side:'viewSide',front:'viewFront',posterior:'viewPost'}[view]))?.classList.add('active');
+  const _vh = document.getElementById('viewHint'); if(_vh) _vh.textContent = VIEW_HINTS[view] || '';
+}
 
+// For running/gait/walk, Brian's preferred filming is lateral (primary) + posterior (secondary).
+// Set these as the defaults whenever a running-type movement is chosen; all options stay selectable. (v0.16.6)
+function applyRunningViewDefaults() {
+  setCameraView('side', null);
+  setCameraView2('posterior', null);
 }
 
 
@@ -17573,7 +17580,8 @@ function setCameraView2(view, btn) {
     const b = document.getElementById(id);
     if(b) b.classList.remove('active');
   });
-  btn.classList.add('active');
+  // btn may be null when called programmatically (e.g. applying movement defaults)
+  (btn || document.getElementById({side:'view2Side',front:'view2Front',posterior:'view2Post'}[view]))?.classList.add('active');
   const hints = {
     side: '📐 Side: sagittal plane — hip hinge, squat depth, bar path',
     front: '📐 Front: frontal plane — valgus, pelvic tilt, symmetry',
