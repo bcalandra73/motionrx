@@ -7758,6 +7758,11 @@ function renderASI(aggregated, movement) {
     const lsi = calcLSI(lAvg, rAvg, pair.minMag);
     const asymPct = calcAsymmetryPct(lAvg, rAvg, pair.minMag);
     if(lsi === null || asymPct === null) return;
+    // Ankle DF (2D video) is noisy and "higher = better": an asymmetry between two AMPLE values is
+    // not a clinical finding — restriction only matters when the LOWER side is actually limited.
+    // Suppress unless the lesser side is below ~15° (restricted). Prevents a normal 21° vs 26° from
+    // being flagged as a "significant dorsiflexion deficit". (v0.16.5)
+    if(pair.label === 'Ankle Dorsiflexion' && Math.min(lAvg, rAvg) >= 15) return;
     // Suppress ASI card when both sides are within normal range — only flag when
     // at least one side is abnormal (prevents normal-but-asymmetric false alarms)
     const nr = ASYM_NORMAL_RANGES[pair.label];
@@ -7829,6 +7834,9 @@ function asiToPromptText(aggregated, movement) {
     const lsi = calcLSI(lDisp, rDisp, p.minMag);
     const asym = calcAsymmetryPct(lDisp, rDisp, p.minMag);
     if(lsi === null || asym === null) return; // suppressed — values within noise floor
+    // Ankle DF (2D, noisy, higher=better): only a restricted LOWER side is clinically meaningful —
+    // don't feed the model a "deficit" when both sides have ample dorsiflexion (lesser ≥15°). (v0.16.5)
+    if(/Ankle/.test(p.label) && Math.min(lDisp, rDisp) >= 15) return;
     const flag = asym < 10 ? 'symmetric' : asym < 15 ? 'monitor' : 'SIGNIFICANT ASYMMETRY';
     lines.push(`  ${p.label}: L=${lDisp}° R=${rDisp}° → LSI ${lsi}% (${asym}% asymmetry — ${flag})`);
   });
