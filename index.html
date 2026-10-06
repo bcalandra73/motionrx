@@ -16892,12 +16892,20 @@ async function exportPDF() {
           setFill(rowCls.includes('high')?C.red:C.amber); doc.rect(ML, y, 2, ROW_H, 'F');
         }
         cx = ML+3;
+        // A low-confidence cell renders its number in a .val span but carries a
+        // "⚠ low confidence" marker in sibling .ref text. The PDF previously grabbed
+        // only the .val number and dropped the marker — printing a bare value for a
+        // metric the narrative says was not reported (e.g. a far-leg-gated ankle DF).
+        // Detect it and tag + amber-colour the value so the table matches the narrative.
         row.querySelectorAll('td').forEach((cell,ci)=>{
           const valEl = cell.querySelector('.val');
-          const txt   = (valEl?valEl.textContent:cell.textContent).trim().substring(0,42);
+          const cellLowConf = /low confidence/i.test(cell.textContent || '');
+          let txt   = (valEl?valEl.textContent:cell.textContent).trim().substring(0,42);
           const cls   = valEl?.className||'';
-          setColor(cls.includes('flag-high')?C.red:cls.includes('flag-med')?C.amber:cls.includes('flag-ok')?C.teal:C.text);
-          doc.setFont('helvetica',ci===1?'bold':'normal'); doc.setFontSize(7.5);
+          if(cellLowConf && (ci===1 || ci===2) && valEl){ txt = txt + ' (low conf.)'; }
+          setColor(cellLowConf && (ci===1||ci===2) ? C.amber
+            : cls.includes('flag-high')?C.red:cls.includes('flag-med')?C.amber:cls.includes('flag-ok')?C.teal:C.text);
+          doc.setFont('helvetica',ci===1?'bold':'normal'); doc.setFontSize(ci>=1 && cellLowConf ? 6.8 : 7.5);
           doc.text(txt, cx, y+4.5, {maxWidth:colW[ci]-3}); cx+=colW[ci];
         });
         y += ROW_H;
