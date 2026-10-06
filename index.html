@@ -1732,7 +1732,12 @@ function startFrameExtraction(file, vid) {
       const estStrideRate = 88 / 60; // strides/sec at typical 176spm
       const estStrides = dur * estStrideRate;
       const _srcFps = parseInt(document.getElementById('videoFps')?.value || '30') || 30;
-      const DENSE_CEIL = 256;                 // practical cap (seek time + browser memory)
+      // Ceiling raised 256→512 (v0.17.1). The 128→256 step moved real findings (shin
+      // angle 28°→9°), so we push further to test for CONVERGENCE: if a metric barely
+      // changes 256→512 it has settled and is trustworthy; if it still moves, the clip
+      // needs an even denser analysis. Accuracy is prioritised over compute time here;
+      // seek time grows roughly linearly with this number (512 frames ≈ a minute).
+      const DENSE_CEIL = 512;                 // practical cap (seek time + browser memory)
       const _availFrames = Math.max(1, Math.floor(_srcFps * dur)); // distinct frames the source can supply
       const _perStrideMin = Math.ceil(estStrides * 14); // legacy minimum to catch contact events
       // Use the source's frames up to the ceiling; never below the legacy per-stride
@@ -16962,10 +16967,16 @@ async function exportPDF() {
         doc.setTextColor(r,g,b);
         const archLabel = _pa.label + (_ps ? ' + ' + _ps.label : '') + (sm._lowStrideCount ? '  (low confidence)' : '');
         doc.text(archLabel, ML+8, y+13);
+        // Measure the label width NOW, while the bold 9pt font is still active — measuring
+        // it after shrinking to the 5.5pt tagline font (the previous bug) gave a width far
+        // too small, so the tagline x-offset overlapped the label and both garbled together.
+        const _archLabelW = doc.getTextWidth(archLabel);
         // Tagline
         setColor(C.muted); doc.setFont('helvetica','normal'); doc.setFontSize(5.5);
+        const _taglineX = ML + 8 + _archLabelW + 6;
+        const _taglineMaxW = (ML + CW) - _taglineX - 4;   // clip to the card's right edge
         const tagline = _pa.tagline.length > 90 ? _pa.tagline.slice(0,87)+'...' : _pa.tagline;
-        doc.text(tagline, ML+8 + doc.getTextWidth(archLabel) + 6, y+13);
+        doc.text(tagline, _taglineX, y+13, {maxWidth: Math.max(20, _taglineMaxW)});
         // Driver pills
         if(_pa.drivers.length > 0) {
           doc.setFontSize(5); setColor(C.muted);
