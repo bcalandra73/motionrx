@@ -2000,6 +2000,20 @@ function startFrameExtraction(file, vid) {
                    shoe: shoeVal, experience: expVal, heightCm}
                 );
                 if(window_strideMetrics) {
+                  // ── Low-stride-count reliability gate ──────────────────────
+                  // Spatiotemporal metrics (cadence, stride length, overstride,
+                  // vertical oscillation) and the running archetype are trial-count
+                  // dependent (Collings 2024 plateaus ~4). Below ~5 clean strides,
+                  // and especially when many half-strides were rejected as noise,
+                  // these values rest on too thin/noisy a base to present confidently.
+                  {
+                    const _nStr = window_strideMetrics.stridesDetected || 0;
+                    const _rej  = window_strideMetrics.strideOutliersRejected || 0;
+                    const _noisy = _rej >= _nStr; // as many rejected as kept = unstable detection
+                    window_strideMetrics._lowStrideCount = (_nStr < 5) || _noisy;
+                    if(window_strideMetrics._lowStrideCount)
+                      console.log(`[StrideEngine] LOW STRIDE COUNT — ${_nStr} valid stride(s)${_rej?', '+_rej+' rejected':''}: cadence/stride-length/overstride/vertical-oscillation and the running archetype flagged low-confidence`);
+                  }
                   console.log(`[StrideEngine] ${window_strideMetrics.stridesDetected} strides, cadence=${window_strideMetrics.cadenceSpm}spm, GCT=${window_strideMetrics.gcPct}%, float=${window_strideMetrics.floatPct}%`);
                   // If we have a best stride, restrict the cycle to those frames for gallery
                   // (override cycleStart/cycleEnd later in GaitFSM v4)
@@ -9317,11 +9331,11 @@ function renderStrideMetrics(metrics, aggregated={}) {
   } else if(n >= 6) {
     reliabilityLabel = 'Good reliability';
     reliabilityColor = '#fbbf24';
-  } else if(n >= 3) {
+  } else if(n >= 5) {
     reliabilityLabel = 'Acceptable — longer clip improves accuracy';
     reliabilityColor = '#fb923c';
   } else {
-    reliabilityLabel = 'Low — capture 10+ strides for reliable results';
+    reliabilityLabel = 'Low — spatiotemporal metrics & archetype not reliable; capture 10+ strides';
     reliabilityColor = '#f87171';
   }
 
@@ -9354,23 +9368,27 @@ function renderStrideMetrics(metrics, aggregated={}) {
       + '<div style="display:flex;gap:5px;flex-wrap:wrap;">'
       + _drvHtml(_p.drivers, _p.color)
       + (_s ? _drvHtml(_s.drivers.slice(0,2), _s.color) : '')
-      + '</div></div>';
+      + '</div>'
+      + (metrics._lowStrideCount ? '<div style="margin-top:10px;font-size:.72rem;color:#b45309;background:#fef3c7;border-radius:6px;padding:6px 10px;line-height:1.5;">⚠️ Low confidence — only ' + metrics.stridesDetected + ' clean stride' + (metrics.stridesDetected===1?'':'s') + ' detected. Archetype and spatiotemporal metrics (cadence, stride length, overstride) need a longer, cleaner clip (10+ continuous strides) to be reliable.</div>' : '')
+      + '</div>';
   }
 
   // ── KPI tiles ──
   const kpis = [
     {
       label:'Cadence',
-      value: metrics.cadenceSpm != null ? metrics.cadenceSpm : '—',
-      unit: metrics.cadenceSpm != null ? 'spm' : 'unreliable',
+      value: (metrics.cadenceSpm != null && !metrics._lowStrideCount) ? metrics.cadenceSpm : '—',
+      unit: (metrics.cadenceSpm != null && !metrics._lowStrideCount) ? 'spm' : metrics._lowStrideCount ? 'low confidence' : 'unreliable',
       // Show the measured precision (±1 SD of cadence across the detected strides) — a defensible
       // "test-retest"-style number to state out loud. Derived from the stride-time CV. (v0.16.0)
-      sub: metrics.cadenceSpm != null
+      sub: metrics._lowStrideCount
+        ? `only ${metrics.stridesDetected} clean stride${metrics.stridesDetected===1?'':'s'} — needs 10+`
+        : metrics.cadenceSpm != null
         ? (metrics.cvStridePct != null
             ? `± ${Math.max(1, Math.round(metrics.cadenceSpm*metrics.cvStridePct/100))} spm across ${metrics.stridesDetected} strides`
             : `${metrics.cadenceStride} strides/min`)
         : 'Could not be reliably measured',
-      flag: metrics.flags.cadence?.level ?? 'ok',
+      flag: metrics._lowStrideCount ? 'warn' : (metrics.flags.cadence?.level ?? 'ok'),
     },
     {
       label:'Stride Duration',
@@ -9436,12 +9454,14 @@ function renderStrideMetrics(metrics, aggregated={}) {
       label:'Stride Length',
       value: metrics.strideLengthM+'m',
       unit: metrics.stepLengthM ? `Step: ${metrics.stepLengthM}m` : 'per full cycle',
-      sub: metrics.strideLengthNorm
+      sub: metrics._lowStrideCount
+        ? `low confidence — only ${metrics.stridesDetected} clean stride${metrics.stridesDetected===1?'':'s'}`
+        : metrics.strideLengthNorm
         ? `${metrics.strideLengthNorm}× leg length — ${
             metrics.overstrideFlag==='overstride' ? '⚠️ overstriding' :
             metrics.overstrideFlag==='understride' ? '⚠️ understriding' : '✓ optimal range'}`
         : `at ${(metrics.speedMps*3.6).toFixed(1)} km/h`,
-      flag: metrics.overstrideFlag==='overstride'||metrics.overstrideFlag==='understride' ? 'warn' : 'ok',
+      flag: metrics._lowStrideCount ? 'warn' : (metrics.overstrideFlag==='overstride'||metrics.overstrideFlag==='understride' ? 'warn' : 'ok'),
     }] : []),
   ];
 
@@ -13469,7 +13489,7 @@ HIP STRATEGY: Only flag inadequate hip flexion if Hip Flexion (peak) < 30°. Val
 - Vertical Oscillation: hip centre-of-mass excursion per stride in cm. Normal 6–10cm recreational; elite <6cm; >10cm indicates energy-wasting bounce pattern, often paired with hip abductor weakness or cadence issues. Note: requires height input for calibration — only reported when height is entered.
 - Overstride: distance (cm) the foot lands ahead of the hip at initial contact. None (<5cm) = optimal. Mild (5–15cm) = monitor. Moderate (15–25cm) = increased braking impulse and knee extensor moment risk. Severe (>25cm) = significant intervention needed. Overstride is more clinically meaningful than stride length alone.
 - Shin Angle at Contact: tibia angle from vertical at initial contact. Normal 5–15° forward. >20° strongly associated with overstriding and high braking forces (increases GRF and knee extensor moment). Correlates with overstride distance.
-- Running style archetype: ${(() => { try { const a=classifyRunningArchetype(window_strideMetrics,aggregated); return a?.primary ? a.primary.label+(a.secondary?" + "+a.secondary.label:"")+" ("+a.primary.drivers.slice(0,2).join(", ")+")" : "not classified"; } catch(e){return "not classified";} })()}
+- Running style archetype: ${(() => { try { const a=classifyRunningArchetype(window_strideMetrics,aggregated); const base = a?.primary ? a.primary.label+(a.secondary?" + "+a.secondary.label:"")+" ("+a.primary.drivers.slice(0,2).join(", ")+")" : "not classified"; return (window_strideMetrics && window_strideMetrics._lowStrideCount) ? base + " — ⚠️ LOW CONFIDENCE: archetype is derived from spatiotemporal metrics that are unreliable on this few-stride clip. Do NOT use it as the anchor for clinical impressions or headline it." : base; } catch(e){return "not classified";} })()}
 - Knee Flexion (RUNNING CONVENTION — CRITICAL): Values are peak swing-phase flexion degrees (0°=straight, higher=more bent). A HIGHER value = MORE flexion = BETTER shock absorption and stride mechanics. A value of 123° means MORE knee bend than 115° — do NOT describe the 123° limb as having 'reduced' or 'restricted' flexion compared to the 115° limb. Asymmetry is only clinically significant if one side is >15° lower (less bent) than the other, suggesting restricted swing mechanics on that side. When a stride engine peak value is available (from dense 64-128 frame analysis), it supersedes gallery-frame estimates for the reference leg.
 ${(() => {
   // Running context from manual inputs
@@ -13498,7 +13518,7 @@ ${(() => {
 })()}
 ${window_strideMetrics ? `
 RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete strides detected):
-- Cadence: ${window_strideMetrics.cadenceSpm != null ? window_strideMetrics.cadenceSpm + ' steps/min (optimal range: 160-180 spm)' : 'Could not be reliably measured — likely a frame-rate or detection limitation. Do NOT report a cadence value.'}
+${window_strideMetrics._lowStrideCount ? `⚠️ LOW STRIDE COUNT (${window_strideMetrics.stridesDetected} clean stride${window_strideMetrics.stridesDetected===1?'':'s'} detected${window_strideMetrics.strideOutliersRejected?', '+window_strideMetrics.strideOutliersRejected+' half-strides rejected as noise':''}). The spatiotemporal metrics below — cadence, stride/step length, overstride, vertical oscillation — and the running-style archetype are TRIAL-COUNT DEPENDENT and rest on too few/too noisy strides to be reliable on this clip. Do NOT headline any of them, do NOT build an "overstrider"/"bouncer"/archetype narrative on them, and do NOT list them as key findings. At most note in passing that these need a longer, cleaner clip (10+ continuous strides) to assess. Joint-angle and alignment findings (pelvic drop, trunk lean, valgus, etc.) are NOT affected by stride count and may be reported normally.\n` : ''}- Cadence: ${window_strideMetrics.cadenceSpm != null ? window_strideMetrics.cadenceSpm + ' steps/min (optimal range: 160-180 spm)' + (window_strideMetrics._lowStrideCount ? ' — ⚠️ LOW CONFIDENCE (few clean strides; likely inflated by over-counted contacts). Do NOT report this cadence as a finding.' : '') : 'Could not be reliably measured — likely a frame-rate or detection limitation. Do NOT report a cadence value.'}
 - Stride duration: ${Math.round(window_strideMetrics.strideDurationS*1000)}ms avg${window_strideMetrics.cvStridePct!=null ? `, CV=${window_strideMetrics.cvStridePct}% stride-to-stride variability` : ''}
 - Ground contact: ${window_strideMetrics.gcPct!=null ? (window_strideMetrics._gctLowConfidence ? window_strideMetrics.gcPct+'% of cycle — ⚠️ LOW CONFIDENCE: contact timing could not be reliably resolved on this clip (coarse effective frame rate / slow pace; the two detection methods disagreed and the value was clamped into range). Do NOT headline "prolonged stance" or a protective/load-avoidance narrative on it, and do NOT list GCT or float as a key finding. At most note that stance/flight timing needs higher-frame-rate footage to assess.' : (window_strideMetrics.gcPct+'% of cycle (norm 30-45%)' + (window_strideMetrics.gcPct < 30 ? ' [LIKELY UNDER-DETECTED, below typical range - do NOT praise as efficient; treat GCT and float as low-confidence]' : ''))) : 'Could not be determined — 30fps insufficient for reliable GCT. Do NOT report a GCT value.'}
 - Float time: ${window_strideMetrics.floatPct!=null ? (window_strideMetrics._gctLowConfidence ? 'not reliably measurable on this clip (derived from the low-confidence stance above) — do NOT report a float value or infer a shuffle/no-flight pattern from it' : (window_strideMetrics.hasFloat ? (window_strideMetrics.floatPct+'% of cycle (bilateral float detected)' + (window_strideMetrics.floatPct > 40 ? ' [IMPLAUSIBLY HIGH for a sub-elite pace - likely derived from an under-detected GCT; do NOT report as a finding]' : '')) : '0% detected (may indicate shuffle-run or 30fps limitation)')) : 'Could not be determined — 30fps insufficient. Do NOT report float time.'}
@@ -13506,7 +13526,7 @@ RUNNING STRIDE METRICS (from ${window_strideMetrics.stridesDetected} complete st
 ${window_strideMetrics.kneeFlexAtContact!=null ? (window_strideMetrics.kneeFlexContactReliable === false ? `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° — ⚠️ LOW CONFIDENCE: this is a single-frame estimate (multi-stride detection was unreliable on this clip). Do NOT headline it, do NOT build a guarding / pain-avoidance narrative on it, and do NOT list it as a key finding. At most mention in passing that knee-flexion-at-contact could not be reliably measured and would need clearer footage to confirm.` : `- Knee flexion at initial contact (lead/front leg): ${window_strideMetrics.kneeFlexAtContact}° (norm 5–20°; heel strikers ~5–10°, midfoot ~10–20°, forefoot ~15–25°${window_strideMetrics.kneeFlexAtContact<5?' — ⚠️ near-straight, increased impact risk':window_strideMetrics.kneeFlexAtContact>30?' — ⚠️ high, possible guarding or compensation':''})`) : ''}
 ${window_strideMetrics.backKneeFlexAtContact!=null ? `- Trailing-leg (back) knee flexion at contact: ${window_strideMetrics.backKneeFlexAtContact}° — leg-recovery/leg-cycle screening metric; a more flexed trailing knee = tighter, more efficient recovery, a near-straight ("open") trailing knee = restricted recovery. NOTE: trailing leg is the far limb in lateral view → treat as lower-confidence context, do not headline.` : ''}
 ${window_strideMetrics.stepLengthAsymPct!=null ? (window_strideMetrics.stepAsymReliable === false ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% — ⚠️ WITHIN MEASUREMENT ERROR at this frame rate (resolution ±${window_strideMetrics.stepAsymResolutionPct ?? '?'}%; run-to-run MDC ~2.5×). This is NOT a reliable finding — do NOT headline it, do NOT build a pain/loading narrative on it, and do NOT list it as a key finding. At most note in passing that step symmetry could not be reliably assessed at this frame rate and would need 60fps+ to confirm.` : `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)`) : ''}
-${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') : ''}
+${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') + (window_strideMetrics._lowStrideCount ? ' — ⚠️ LOW CONFIDENCE (few clean strides); do NOT headline stride length or overstride.' : '') : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
 ${(() => {
   // Jump context — only for landing movements
@@ -16898,7 +16918,7 @@ async function exportPDF() {
         };
         const [r,g,b] = hexToRgb(_pa.color);
         doc.setTextColor(r,g,b);
-        const archLabel = _pa.label + (_ps ? ' + ' + _ps.label : '');
+        const archLabel = _pa.label + (_ps ? ' + ' + _ps.label : '') + (sm._lowStrideCount ? '  (low confidence)' : '');
         doc.text(archLabel, ML+8, y+13);
         // Tagline
         setColor(C.muted); doc.setFont('helvetica','normal'); doc.setFontSize(5.5);
@@ -16915,7 +16935,7 @@ async function exportPDF() {
 
       // KPI grid: 3 per row
       const kpiDefs = [
-        {label:'Cadence',          value: sm.cadenceSpm!=null ? `${sm.cadenceSpm} spm` : '—',   sub: sm.cadenceSpm!=null ? (sm.cvStridePct!=null ? `± ${Math.max(1,Math.round(sm.cadenceSpm*sm.cvStridePct/100))} spm across ${sm.stridesDetected} strides` : `${sm.cadenceStride} strides/min`) : 'low confidence'},
+        {label:'Cadence',          value: (sm.cadenceSpm!=null && !sm._lowStrideCount) ? `${sm.cadenceSpm} spm` : '—',   sub: sm._lowStrideCount ? `only ${sm.stridesDetected} clean stride${sm.stridesDetected===1?'':'s'} — needs 10+` : (sm.cadenceSpm!=null ? (sm.cvStridePct!=null ? `± ${Math.max(1,Math.round(sm.cadenceSpm*sm.cvStridePct/100))} spm across ${sm.stridesDetected} strides` : `${sm.cadenceStride} strides/min`) : 'low confidence'), flag: sm._lowStrideCount ? 'warn' : (sm.flags.cadence?.level ?? 'ok')},
         {label:'Stride Duration',  value:`${Math.round(sm.strideDurationS*1000)} ms`, sub: sm.cvStridePct!=null ? `CV ${sm.cvStridePct}%` : `avg of ${sm.stridesDetected} strides`},
         {
           label:'Ground Contact (est.)',
