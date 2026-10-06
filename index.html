@@ -1732,12 +1732,16 @@ function startFrameExtraction(file, vid) {
       const estStrideRate = 88 / 60; // strides/sec at typical 176spm
       const estStrides = dur * estStrideRate;
       const _srcFps = parseInt(document.getElementById('videoFps')?.value || '30') || 30;
-      // Ceiling raised 256→512 (v0.17.1). The 128→256 step moved real findings (shin
-      // angle 28°→9°), so we push further to test for CONVERGENCE: if a metric barely
-      // changes 256→512 it has settled and is trustworthy; if it still moves, the clip
-      // needs an even denser analysis. Accuracy is prioritised over compute time here;
-      // seek time grows roughly linearly with this number (512 frames ≈ a minute).
-      const DENSE_CEIL = 512;                 // practical cap (seek time + browser memory)
+      // Ceiling settled at 256 (v0.17.2) after a 128/256/512 convergence test on a real
+      // clip. Finding: AGGREGATE metrics (pelvic drop, pronation, trunk lean, hip/knee
+      // flexion) converge by 256 and are stable. But SINGLE-INSTANT event metrics
+      // (shin angle/overstride, foot-strike, cadence, stride-CV, GCT/float) do NOT
+      // converge at any density — they oscillated 28°→9°→34° on shin angle and actually
+      // got WORSE at 512 (stride-CV 14%→29%), because the initial-contact detection
+      // pinpoints one frame and the IC-refinement search window grows with frame count.
+      // So 512 buys nothing for the stable metrics and destabilises the event metrics;
+      // 256 is the sweet spot. The event metrics are handled as screening-only elsewhere.
+      const DENSE_CEIL = 256;                 // practical cap (seek time + browser memory)
       const _availFrames = Math.max(1, Math.floor(_srcFps * dur)); // distinct frames the source can supply
       const _perStrideMin = Math.ceil(estStrides * 14); // legacy minimum to catch contact events
       // Use the source's frames up to the ceiling; never below the legacy per-stride
@@ -8661,7 +8665,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     const kneeContactIncluded = refKSm[trueIcIdx] ?? null;
     return {
       durationS, gcPct, floatPct, peakKneeFlex, hipAtToeoff, footStrike,
-      stepAsymProxy, startIdx, endIdx, toeoffIdx,
+      stepAsymProxy, startIdx, endIdx, toeoffIdx, trueIcIdx,
       kneeContactIncluded,
       oppKneeContactIncluded: oppKAtContact, // trailing-leg knee at contralateral IC (leg recovery)
     };
@@ -9115,11 +9119,18 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // uses the ref-leg contacts with the ref-leg's own landmarks, and takes the MEDIAN across strides
   // for robustness to single-frame outliers.
   let shinAngleAtContactDeg = null;
+  let shinAngleReliable = null;   // null = n/a; true/false set when we have strides
   {
     const _aspect = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
-    const shinAngles = [], shinCorrected = [];
-    refContacts.forEach(ci => {
-      const f = perFrameData[ci];
+    const shinCorrected = [];
+    // v0.17.2 FIX: measure the shin angle at each stride's REFINED true initial-contact
+    // frame (trueIcIdx — displacement + knee-extension), NOT the raw contact peaks
+    // (refContacts ≈ mid-stance, where the shin is near-vertical and the detected instant
+    // jitters with frame density). Measuring at the kinematically-defined touchdown is the
+    // correct instant AND is consistent across densities. One value per valid stride.
+    strideDetails.forEach(sd => {
+      const ci = sd.trueIcIdx;
+      const f = (ci != null) ? perFrameData[ci] : null;
       if(!f) return;
       const kneeY = REF==='L' ? f.lKneeY : f.rKneeY;
       const ankY  = REF==='L' ? f.lAnkY  : f.rAnkY;
@@ -9129,21 +9140,26 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       const dy = ankY - kneeY; // positive = ankle below knee (correct anatomy)
       const dx = ankX - kneeX; // horizontal knee→ankle offset
       if(dy < 0.01) return;    // shin pointing up = bad landmark
-      const angle = Math.atan2(Math.abs(dx), dy) * 180 / Math.PI;
-      if(angle >= 0 && angle < 60) {
-        shinAngles.push(angle);
-        // #36 diagnostic: aspect-corrected shin. dx is normalized over WIDTH, dy over HEIGHT,
-        // so the true angle-from-vertical scales dx by (width/height). Logged for comparison only —
-        // NOT yet applied to the score, pending confirmation of filming orientation.
-        shinCorrected.push(Math.atan2(Math.abs(dx) * _aspect, dy) * 180 / Math.PI);
-      }
+      // aspect-corrected shin angle from vertical (dx normalized over width, dy over height)
+      const angle = Math.atan2(Math.abs(dx) * _aspect, dy) * 180 / Math.PI;
+      if(angle >= 0 && angle < 60) shinCorrected.push(angle);
     });
-    const _med = (arr) => { if(arr.length < 2) return null; const s=[...arr].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return Math.round(s.length%2 ? s[m] : (s[m-1]+s[m])/2); };
-    const _rawShin = _med(shinAngles);
-    // #36 APPLIED: the aspect-corrected value is the reported one (portrait video inflates the raw
-    // from-vertical angle; correcting scales the horizontal component by width/height).
-    shinAngleAtContactDeg = _med(shinCorrected) ?? _rawShin;
-    console.log(`[StrideEngine] Shin angle at contact: ${shinAngleAtContactDeg ?? 'n/a'}° (aspect-corrected; raw ${_rawShin ?? 'n/a'}°, aspect=${_aspect.toFixed(3)}, median of ${shinAngles.length} ${REF}-leg contacts)`);
+    const _med = (arr) => { if(arr.length < 1) return null; const s=[...arr].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; };
+    const _iqr = (arr) => { if(arr.length < 4) return null; const s=[...arr].sort((a,b)=>a-b); return s[Math.floor(s.length*0.75)] - s[Math.floor(s.length*0.25)]; };
+    const _medShin = _med(shinCorrected);
+    shinAngleAtContactDeg = _medShin != null ? Math.round(_medShin) : null;
+    // ── Self-validating reliability gate (per clip) ──────────────────────────
+    // The convergence test proved shin angle can be internally noisy. Rather than a
+    // blanket suppression, gate on whether the individual strides AGREE: a tight
+    // stride-to-stride spread means the value is trustworthy on THIS clip; a wide
+    // spread means the landing instant could not be pinned down and the number is noise.
+    const _spread = _iqr(shinCorrected);
+    if(shinCorrected.length >= 4 && _spread != null) {
+      shinAngleReliable = _spread <= 10;  // ≤10° inter-quartile agreement across strides
+    } else {
+      shinAngleReliable = false;          // too few strides to judge → not reliable
+    }
+    console.log(`[StrideEngine] Shin angle at contact: ${shinAngleAtContactDeg ?? 'n/a'}° (at refined true-IC; n=${shinCorrected.length} strides, IQR=${_spread!=null?_spread.toFixed(1):'n/a'}°, reliable=${shinAngleReliable}) ${shinCorrected.length?('vals='+shinCorrected.map(v=>Math.round(v)).join(',')):''}`);
   }
 
   return {
@@ -9153,7 +9169,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // New metrics
     verticalOscillationCm,
     overstrideDistCm, overstrideGrade,
-    shinAngleAtContactDeg,
+    shinAngleAtContactDeg, shinAngleReliable,
     cadenceStride,
     cvStridePct:      cvDuration,
     gcPct:            avgGcPct,    // null = unreliable at this fps
@@ -9258,8 +9274,12 @@ function classifyRunningArchetype(sm, aggregated) {
   if(!sm) return null;
   const cadence    = sm.cadenceSpm ?? null; // null = unreliable; cadence-based scoring is skipped below
   const vo         = sm.verticalOscillationCm ?? null;
-  const overstride = (_overstrideSeverity(sm) ?? 'none'); // #37: shared severity — matches the score
-  const shinAngle  = sm.shinAngleAtContactDeg ?? null;
+  // v0.17.2: shin angle / overstride only feed the archetype when the per-clip stride
+  // agreement gate passed. On a clip where the landing instant couldn't be pinned down
+  // (the convergence-test failure mode), these are noise and must not drive "Overstrider".
+  const _shinOk    = sm.shinAngleReliable !== false;
+  const overstride = _shinOk ? (_overstrideSeverity(sm) ?? 'none') : 'none';
+  const shinAngle  = _shinOk ? (sm.shinAngleAtContactDeg ?? null) : null;
   const footStrike = sm.fsConsensus ?? 'unknown';
   const hipExt     = sm.hipExtAtToeoff ?? null;
   const peakKnee   = sm.peakKneeFlex ?? null;
@@ -9610,8 +9630,8 @@ function renderStrideMetrics(metrics, aggregated={}) {
     ${metrics.verticalOscillationCm!=null ? `<div style="margin-bottom:6px;padding:8px 12px;background:var(--teal-light);border-radius:6px;font-size:.73rem;color:var(--teal);">
       📊 <strong>Vertical oscillation ${metrics.verticalOscillationCm}cm</strong> — hip excursion per stride.
       ${metrics.verticalOscillationCm < 6 ? 'Elite-level economy.' : metrics.verticalOscillationCm <= 10 ? 'Normal recreational range.' : 'High bounce — energy inefficient. Check hip abductor strength and cadence.'}
-      ${metrics.overstrideGrade && metrics.overstrideGrade !== 'none' ? `<br>⚠ <strong>Overstride ${metrics.overstrideDistCm ?? ''}cm (${metrics.overstrideGrade})</strong> — foot landing ahead of hip at contact. ${metrics.overstrideGrade === 'severe' ? 'Significant braking impulse risk.' : 'Consider shorter stride cue and cadence increase.'}` : ''}
-      ${metrics.shinAngleAtContactDeg!=null ? `<br>📐 <strong>Shin angle at contact: ${metrics.shinAngleAtContactDeg}°</strong> — ${metrics.shinAngleAtContactDeg <= 15 ? 'within normal range.' : metrics.shinAngleAtContactDeg <= 20 ? 'borderline — monitor landing position.' : 'excessive forward lean at contact — braking force risk.'}` : ''}
+      ${metrics.shinAngleReliable !== false && metrics.overstrideGrade && metrics.overstrideGrade !== 'none' ? `<br>⚠ <strong>Overstride ${metrics.overstrideDistCm ?? ''}cm (${metrics.overstrideGrade})</strong> — foot landing ahead of hip at contact. ${metrics.overstrideGrade === 'severe' ? 'Significant braking impulse risk.' : 'Consider shorter stride cue and cadence increase.'}` : ''}
+      ${metrics.shinAngleAtContactDeg!=null ? (metrics.shinAngleReliable === false ? `<br>📐 <strong>Shin angle at contact: —</strong> — landing instant varied stride-to-stride; not reliably measurable on this clip (needs higher frame rate / force plate).` : `<br>📐 <strong>Shin angle at contact: ${metrics.shinAngleAtContactDeg}°</strong> — ${metrics.shinAngleAtContactDeg <= 15 ? 'within normal range.' : metrics.shinAngleAtContactDeg <= 20 ? 'borderline — monitor landing position.' : 'excessive forward lean at contact — braking force risk.'}`) : ''}
     </div>` : ''}
     ⚠️ Cadence and stride duration are directly measured and accurate at any frame rate. Values marked <strong>(est.)</strong> —
     ground contact, float time, vertical oscillation — are inferred from phase timing rather than force/contact sensors; treat them as estimates.
@@ -13566,6 +13586,7 @@ ${window_strideMetrics.kneeFlexAtContact!=null ? (window_strideMetrics.kneeFlexC
 ${window_strideMetrics.backKneeFlexAtContact!=null ? `- Trailing-leg (back) knee flexion at contact: ${window_strideMetrics.backKneeFlexAtContact}° — leg-recovery/leg-cycle screening metric; a more flexed trailing knee = tighter, more efficient recovery, a near-straight ("open") trailing knee = restricted recovery. NOTE: trailing leg is the far limb in lateral view → treat as lower-confidence context, do not headline.` : ''}
 ${window_strideMetrics.stepLengthAsymPct!=null ? (window_strideMetrics.stepAsymReliable === false ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% — ⚠️ WITHIN MEASUREMENT ERROR at this frame rate (resolution ±${window_strideMetrics.stepAsymResolutionPct ?? '?'}%; run-to-run MDC ~2.5×). This is NOT a reliable finding — do NOT headline it, do NOT build a pain/loading narrative on it, and do NOT list it as a key finding. At most note in passing that step symmetry could not be reliably assessed at this frame rate and would need 60fps+ to confirm.` : `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)`) : ''}
 ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') + (window_strideMetrics._lowStrideCount ? ' — ⚠️ LOW CONFIDENCE (few clean strides); do NOT headline stride length or overstride.' : '') : ''}
+${window_strideMetrics.shinAngleReliable === false ? `- ⚠️ Shin angle / overstride: NOT reliably measurable on this clip — the landing instant varied too much stride-to-stride (foot-strike angle changes faster than the frame rate can pin down). Do NOT report a shin angle or overstride value, do NOT classify the runner as an overstrider, and do NOT build a braking-impulse narrative. At most note that landing-position assessment needs higher-frame-rate or force-plate data.` : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
 ${(() => {
   // Jump context — only for landing movements
@@ -15043,8 +15064,12 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   // shows — so the two never disagree. It reconciles the distance-based grade with the band-aware
   // shin angle (floor-of-mean), so a single high shin no longer over-calls "severe".
   const shin = sm.shinAngleAtContactDeg;
-  const _ovr = _overstrideSeverity(sm, _sb);
-  const shinNote = (shin!=null) ? ` (shin ${Math.round(shin)}°)` : '';
+  // v0.17.2: only deduct for overstride when the shin angle passed the per-clip stride
+  // agreement gate. On clips where the landing instant is unstable (shin IQR >10°), the
+  // overstride severity is noise — don't move the score on it either way.
+  const _shinOk = sm.shinAngleReliable !== false;
+  const _ovr = _shinOk ? _overstrideSeverity(sm, _sb) : null;
+  const shinNote = (_shinOk && shin!=null) ? ` (shin ${Math.round(shin)}°)` : '';
   if(_ovr==='severe')        add(-2.0, `severe overstride${shinNote}`, 'injury');
   else if(_ovr==='moderate') add(-1.0, `moderate overstride${shinNote}`, 'injury');
   else if(_ovr==='mild')     add(-0.5, `mild overstride${shinNote}`, 'injury');
@@ -17037,7 +17062,8 @@ async function exportPDF() {
         sub: sm.verticalOscillationCm < 6 ? 'Elite (<6cm)' : sm.verticalOscillationCm <= 10 ? 'Normal (6–10cm)' : '⚠ High bounce (>10cm)',
         flag: sm.verticalOscillationCm <= 10 ? 'ok' : 'warn',
       });
-      if(sm.overstrideGrade!=null && sm.overstrideGrade !== 'none') kpiDefs.push({
+      const _shinReliable = sm.shinAngleReliable !== false;
+      if(_shinReliable && sm.overstrideGrade!=null && sm.overstrideGrade !== 'none') kpiDefs.push({
         label:'Overstride',
         value: sm.overstrideDistCm!=null ? `${sm.overstrideDistCm}cm` : sm.overstrideGrade,
         sub: sm.overstrideGrade === 'mild' ? 'Mild — monitor' : sm.overstrideGrade === 'moderate' ? '⚠ Moderate — increased braking' : '⚠ Severe — high braking impulse',
@@ -17045,9 +17071,11 @@ async function exportPDF() {
       });
       if(sm.shinAngleAtContactDeg!=null) kpiDefs.push({
         label:'Shin Angle at Contact',
-        value:`${sm.shinAngleAtContactDeg}°`,
-        sub: sm.shinAngleAtContactDeg <= 15 ? 'Normal (5–15°)' : sm.shinAngleAtContactDeg <= 20 ? '⚠ Borderline (15–20°)' : '⚠ Excessive (>20°) — braking risk',
-        flag: sm.shinAngleAtContactDeg <= 15 ? 'ok' : sm.shinAngleAtContactDeg <= 20 ? 'warn' : 'poor',
+        value: _shinReliable ? `${sm.shinAngleAtContactDeg}°` : '—',
+        sub: _shinReliable
+          ? (sm.shinAngleAtContactDeg <= 15 ? 'Normal (5–15°)' : sm.shinAngleAtContactDeg <= 20 ? '⚠ Borderline (15–20°)' : '⚠ Excessive (>20°) — braking risk')
+          : 'landing instant varied stride-to-stride — not reliably measurable on this clip',
+        flag: _shinReliable ? (sm.shinAngleAtContactDeg <= 15 ? 'ok' : sm.shinAngleAtContactDeg <= 20 ? 'warn' : 'poor') : 'info',
       });
 
       const KPI_COLS = 3;
