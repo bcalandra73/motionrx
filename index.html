@@ -1721,12 +1721,26 @@ function startFrameExtraction(file, vid) {
 
     let times, effectiveLabels, effectiveProportions;
     if(isGaitMovement && dur >= 1.0) {
-      // Scale dense frame count with clip duration: ~14 frames/stride target for running
-      // (up from 10 — running at 30fps needs more frames to reliably catch contact events)
-      // cap at 128 (browser memory); floor at 64 (minimum for reliable peak detection in running)
+      // Dense frame count — adaptive to the SOURCE frame rate (v0.17.0).
+      // Previously capped at a flat 128, which on a 120fps clip meant the pipeline
+      // analysed only ~17 effective fps (128/dur) and threw away ~85% of the captured
+      // frames — forcing low-confidence labels on every timing-difference metric
+      // (GCT, float, step asymmetry, stride-time CV, knee-flex-at-contact) and starving
+      // the far-leg occlusion recovery of clean candidate frames. We now sample as
+      // densely as the source actually provides, up to a higher ceiling, so a 120fps
+      // clip is analysed near ~35 effective fps and a 30fps clip uses all 30.
       const estStrideRate = 88 / 60; // strides/sec at typical 176spm
       const estStrides = dur * estStrideRate;
-      const denseCount = Math.min(128, Math.max(64, Math.ceil(estStrides * 14)));
+      const _srcFps = parseInt(document.getElementById('videoFps')?.value || '30') || 30;
+      const DENSE_CEIL = 256;                 // practical cap (seek time + browser memory)
+      const _availFrames = Math.max(1, Math.floor(_srcFps * dur)); // distinct frames the source can supply
+      const _perStrideMin = Math.ceil(estStrides * 14); // legacy minimum to catch contact events
+      // Use the source's frames up to the ceiling; never below the legacy per-stride
+      // minimum or 64 — but never ask for more distinct frames than the source has.
+      let denseCount = Math.min(DENSE_CEIL, _availFrames);
+      denseCount = Math.max(denseCount, Math.min(Math.max(64, _perStrideMin), _availFrames));
+      denseCount = Math.min(denseCount, DENSE_CEIL);
+      console.log(`[FrameExtract] dense frames: ${denseCount} (source ${_srcFps}fps × ${dur.toFixed(1)}s = ${_availFrames} avail; effFps≈${(denseCount/dur).toFixed(1)}; prev cap was 128)`);
       effectiveProportions = Array.from({length:denseCount}, (_,i) => 0.03 + (i/(denseCount-1))*0.94);
       times = effectiveProportions.map(t => t * dur);
       // Placeholder labels — GaitFSM will overwrite these
