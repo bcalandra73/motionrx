@@ -8241,8 +8241,19 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   })();
   const minProm = Math.max(0.08, compositeRange * 0.15);
 
+  // Refractory spacing: the same foot physically cannot re-contact the ground
+  // faster than ~one stride. At the fastest human cadence (240 spm) a stride is
+  // 0.50s, so two detected contacts on the SAME leg closer than ~0.42s are almost
+  // always a double-detection of one real contact (a secondary bump in the ankle/
+  // knee composite). Without this guard, those double-bumps produced sub-0.50s
+  // "half-strides" that got rejected downstream — inflating cadence and collapsing
+  // the usable stride count even on clean, high-quality clips.
+  const _effFps = (videoDuration > 0 && N > 1) ? (N / videoDuration) : 30;
+  const _minContactSpacing = Math.max(2, Math.round(0.42 * _effFps));
+
   const findContacts = (compArr, minProm) => {
-    const peaks = [];
+    // 1. collect all qualifying local maxima with their prominence
+    const cand = [];
     for(let i=1; i<compArr.length-1; i++) {
       if(compArr[i]==null) continue;
       const prev = compArr.slice(Math.max(0,i-3),i).filter(x=>x!=null);
@@ -8251,14 +8262,23 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       const isLocalMax = compArr[i] > Math.max(...prev) && compArr[i] >= Math.max(...next);
       if(isLocalMax) {
         const minSurround = Math.min(...prev,...next);
-        if(compArr[i] - minSurround >= minProm) peaks.push(i);
+        const prom = compArr[i] - minSurround;
+        if(prom >= minProm) cand.push({i, prom});
       }
     }
-    return peaks;
+    // 2. non-maximum suppression: within a refractory window keep the most
+    //    prominent peak and drop the rest (collapses double-detections).
+    cand.sort((a,b) => b.prom - a.prom);
+    const kept = [];
+    for(const c of cand) {
+      if(kept.every(k => Math.abs(k - c.i) >= _minContactSpacing)) kept.push(c.i);
+    }
+    return kept.sort((a,b) => a - b);
   };
 
   const lContactIdxs = findContacts(lComposite, minProm);
   const rContactIdxs = findContacts(rComposite, minProm);
+  console.log(`[StrideEngine] contact refractory: effFps=${_effFps.toFixed(1)}, minSpacing=${_minContactSpacing} frames (~${(_minContactSpacing/_effFps).toFixed(2)}s)`);
   console.log(`[StrideEngine] ankRange=${ankYRange.toFixed(3)} weak=${ankSignalWeak} compRange=${compositeRange.toFixed(3)} minProm=${minProm.toFixed(3)} contacts L=${lContactIdxs.length} R=${rContactIdxs.length}`);
 
   // Float phase detection is now done per-stride inside the strideDetails loop (signal reliability check)
