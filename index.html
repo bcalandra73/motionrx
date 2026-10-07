@@ -3946,6 +3946,27 @@ async function startFrameExtraction2(file, vid) {
             // Find consecutive peak pair with stride-like spacing (0.4-1.2s at video duration)
             let _bestCycleStart = null, _bestCycleEnd = null;
             const _targetStrideDur = window_strideMetrics?.strideDurationS || 0.67; // from primary
+            // v0.17.3 FIX: the saved posterior anchor used to be restored into
+            // window._secManualAnchorSec only LATE — when the landmark-review panel builds,
+            // after analysis — but it is CONSUMED right here, early in frame extraction. So on
+            // every fresh run of a clip it hadn't loaded yet, auto-detection ran, and the PT
+            // had to re-set the anchor each time. Restore it from localStorage here, before use
+            // (only if not already set this session, so a just-applied anchor isn't clobbered).
+            if(window._secManualAnchorSec == null || !isFinite(window._secManualAnchorSec)) {
+              try {
+                const _ck = window._currentCorrKey || (typeof _corrVideoKey === 'function'
+                  ? _corrVideoKey(uploadedFile, (window._primaryVidEl && isFinite(window._primaryVidEl.duration) && window._primaryVidEl.duration > 0) ? window._primaryVidEl.duration : null)
+                  : null);
+                if(_ck) {
+                  const _savedAnchor = parseFloat(localStorage.getItem('mrx_secAnchor_' + _ck));
+                  if(isFinite(_savedAnchor)) {
+                    window._secManualAnchorSec = _savedAnchor;
+                    window._secManualAnchorActive = true;
+                    console.log(`[FrameExtract2] Restored saved posterior anchor ${_savedAnchor.toFixed(2)}s (key=${_ck}) before extraction — will auto-apply without re-setting.`);
+                  }
+                }
+              } catch(_e){ console.warn('[FrameExtract2] posterior anchor restore failed:', _e.message); }
+            }
             // v0.16.0 MANUAL ANCHOR: if the PT set a posterior heel-strike, trust it over
             // auto peak-detection. Rear-view foot tracking is often too noisy/undersampled to
             // find a stride automatically (confidence=low), and the PT's eye is more reliable.
@@ -4248,6 +4269,9 @@ function resetAll() {
   resetUpload();
   resetUpload2();
   window._currentCorrKey = null;
+  // v0.17.3: clear the in-memory posterior anchor too, so a new clip doesn't inherit the
+  // previous clip's heel-strike anchor (the early-restore then loads the correct clip's saved value).
+  window._secManualAnchorSec = undefined; window._secManualAnchorActive = false; window._secPhaseTimes = null;
   // Clear auto-save — user explicitly chose to start fresh
   try { localStorage.removeItem(AUTOSAVE_KEY); } catch(e) {}
   window.scrollTo({top:0,behavior:'smooth'});
