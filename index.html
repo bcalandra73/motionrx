@@ -12380,18 +12380,18 @@ async function runAnalysis() {
       _raw: mpResults[i]
     }));
 
-    // ── [ShinProof] READ-ONLY diagnostic (v0.17.3) ───────────────────────────
-    // Compares the reported shin angle (computed on the COARSE MoveNet dense scan)
-    // against a shin angle recomputed from the TAPE-REFINED gallery landmarks at the
-    // Initial-Contact frame — the exact accurate dots the PT sees on the overlay.
-    // Pure console.log: it does not write to window_strideMetrics, aggregated, the
-    // score, the report, or anything downstream. Safe to run on any patient clip.
+    // ── Shin angle: tape-refined IC override (v0.17.3 INTERIM) ────────────────
+    // The coarse MoveNet dense scan inflates the shin angle (Alana: 30° coarse vs 12°
+    // tape-refined, matching the PT's visual). As an interim fix until the full
+    // MediaPipe dense-scan migration, recompute the shin angle from the TAPE-REFINED
+    // Initial-Contact gallery frame — the accurate landmarks the overlay draws — and
+    // use THAT as the reported value. One accurate contact beats eight coarse ones.
+    // Falls back to the coarse multi-stride value when no tape-refined IC is available.
     try {
       if(/running|gait|walk/i.test(movement) && typeof window_strideMetrics === 'object' && window_strideMetrics) {
         const _asp = (window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
         const _near = window_strideMetrics.cameraNearLeg === 'R' ? 'R' : 'L';
         const _kI = _near === 'L' ? 25 : 26, _aI = _near === 'L' ? 27 : 28;
-        // locate the Initial-Contact gallery frame by phase label/id
         let _icIdx = extractedFrames.findIndex(f => {
           const p = f?.phase || {}; const s = (p._baseId || p.id || p.label || '').toLowerCase();
           return s.includes('contact') && !s.includes('loading');
@@ -12402,12 +12402,22 @@ async function runAnalysis() {
           if(!lm || !lm[_kI] || !lm[_aI]) return null;
           const dy = lm[_aI].y - lm[_kI].y, dx = lm[_aI].x - lm[_kI].x;
           if(dy < 0.01) return null;
-          return Math.round(Math.atan2(Math.abs(dx) * _asp, dy) * 180 / Math.PI);
+          const a = Math.round(Math.atan2(Math.abs(dx) * _asp, dy) * 180 / Math.PI);
+          return (a >= 0 && a < 60) ? a : null;
         };
+        const _coarseShin = window_strideMetrics.shinAngleAtContactDeg;
         const _tapeShin = _shinFrom(_lm);
-        console.log(`[ShinProof] near-leg=${_near} | reported shin (coarse MoveNet dense scan) = ${window_strideMetrics.shinAngleAtContactDeg ?? 'n/a'}° | recomputed from TAPE-REFINED IC gallery frame (#${_icIdx+1}, ${extractedFrames[_icIdx]?.phase?.label || '?'}) = ${_tapeShin ?? 'n/a'}° — if these diverge, the coarse landmarks are the culprit and the MediaPipe dense-scan migration is warranted.`);
+        if(_tapeShin != null) {
+          // Override with the accurate tape-refined value and mark it trustworthy.
+          window_strideMetrics.shinAngleAtContactDeg = _tapeShin;
+          window_strideMetrics.shinAngleReliable = true;
+          window_strideMetrics._shinSource = 'tape-IC';
+          console.log(`[ShinFix] shin angle: coarse MoveNet = ${_coarseShin ?? 'n/a'}° → OVERRIDDEN to tape-refined IC gallery frame (#${_icIdx+1}, ${extractedFrames[_icIdx]?.phase?.label || '?'}) = ${_tapeShin}° (near-leg=${_near}). Interim fix pending MediaPipe dense-scan migration. NOTE: overstride DISTANCE is still coarse-landmark-based.`);
+        } else {
+          console.log(`[ShinFix] no tape-refined IC landmarks available — keeping coarse value ${_coarseShin ?? 'n/a'}° with its stride-agreement gate.`);
+        }
       }
-    } catch(_e){ console.warn('[ShinProof] skipped:', _e.message); }
+    } catch(_e){ console.warn('[ShinFix] skipped:', _e.message); }
 
     for(let i=0; i<extractedFrames.length; i++) {
       const frame = extractedFrames[i];
