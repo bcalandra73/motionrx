@@ -9116,6 +9116,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // direction of travel, then classify.
   // Expressed in cm using the same height calibration as stride length.
   let overstrideDistCm = null;
+  let overstridePctLeg = null; // overstride as % of leg length (morphology-normalized)
   let overstrideGrade  = null; // 'none' | 'mild' | 'moderate' | 'severe'
   if(runParams.heightCm && (lContactIdxs.length + rContactIdxs.length) > 0) {
     const contactOffsets = []; // positive = foot ahead of hip (overstride)
@@ -9149,10 +9150,17 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
           // portrait video inflates the overstride distance. offset × (width/height) × cmPerFrac.
           const _oaspect = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
           overstrideDistCm = Math.round(Math.abs(meanOffset) * _oaspect * cmPerFrac);
-          // Threshold: <5cm = none, 5-15cm = mild, 15-25cm = moderate, >25cm = severe
-          overstrideGrade = overstrideDistCm < 5  ? 'none'
-                          : overstrideDistCm < 15 ? 'mild'
-                          : overstrideDistCm < 25 ? 'moderate' : 'severe';
+          // v0.17.3: grade overstride as % of LEG LENGTH (morphology-normalized) so a short
+          // runner who lands the foot well ahead is flagged proportionally rather than
+          // under-called by absolute cm. Thresholds map the prior cm bands onto a reference
+          // leg length (~83cm ≈ a 175cm runner): 5/15/25cm ≈ 6/18/30% of leg length.
+          const _overPctLeg = legLenCm > 0 ? (overstrideDistCm / legLenCm) * 100 : null;
+          overstridePctLeg = _overPctLeg != null ? Math.round(_overPctLeg) : null;
+          overstrideGrade = _overPctLeg == null
+            ? (overstrideDistCm < 5 ? 'none' : overstrideDistCm < 15 ? 'mild' : overstrideDistCm < 25 ? 'moderate' : 'severe')
+            : _overPctLeg < 6  ? 'none'
+            : _overPctLeg < 18 ? 'mild'
+            : _overPctLeg < 30 ? 'moderate' : 'severe';
         }
       }
     }
@@ -9169,6 +9177,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // for robustness to single-frame outliers.
   let shinAngleAtContactDeg = null;
   let shinAngleReliable = null;   // null = n/a; true/false set when we have strides
+  let shinAngleIQR = null;        // inter-quartile spread of per-stride shin (°); tight = robust
   {
     const _aspect = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
     const shinCorrected = [];
@@ -9203,6 +9212,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // stride-to-stride spread means the value is trustworthy on THIS clip; a wide
     // spread means the landing instant could not be pinned down and the number is noise.
     const _spread = _iqr(shinCorrected);
+    shinAngleIQR = _spread;
     if(shinCorrected.length >= 4 && _spread != null) {
       shinAngleReliable = _spread <= 10;  // ≤10° inter-quartile agreement across strides
     } else {
@@ -9217,8 +9227,8 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     cadenceSpm,
     // New metrics
     verticalOscillationCm,
-    overstrideDistCm, overstrideGrade,
-    shinAngleAtContactDeg, shinAngleReliable,
+    overstrideDistCm, overstridePctLeg, overstrideGrade,
+    shinAngleAtContactDeg, shinAngleReliable, shinAngleIQR,
     cadenceStride,
     cvStridePct:      cvDuration,
     gcPct:            avgGcPct,    // null = unreliable at this fps
@@ -12460,12 +12470,22 @@ async function runAnalysis() {
         };
         const _coarseShin = window_strideMetrics.shinAngleAtContactDeg;
         const _tapeShin = _shinFrom(_lm);
-        if(_tapeShin != null) {
-          // Override with the accurate tape-refined value and mark it trustworthy.
+        // v0.17.3: the tape-refined IC value is a SINGLE frame and can be noisy run-to-run
+        // (Leslie bounced 16°→11° between runs while the multi-stride value held at 11–12°).
+        // So only let it OVERRIDE when the multi-stride shin is NOT already tight: a tight
+        // inter-quartile spread (≤3°) means the many-stride value is robust (Leslie: IQR 0.8°)
+        // — keep it. A loose spread means the coarse landmarks are unreliable (Alana: IQR 7°,
+        // coarse 30° vs true ~12°) — the accurate single tape frame is the better anchor.
+        const _iqr = window_strideMetrics.shinAngleIQR;
+        const _coarseTight = (typeof _iqr === 'number' && _iqr <= 3 && window_strideMetrics.shinAngleReliable !== false);
+        if(_tapeShin != null && !_coarseTight) {
           window_strideMetrics.shinAngleAtContactDeg = _tapeShin;
           window_strideMetrics.shinAngleReliable = true;
           window_strideMetrics._shinSource = 'tape-IC';
-          console.log(`[ShinFix] shin angle: coarse MoveNet = ${_coarseShin ?? 'n/a'}° → OVERRIDDEN to tape-refined IC gallery frame (#${_icIdx+1}, ${extractedFrames[_icIdx]?.phase?.label || '?'}) = ${_tapeShin}° (near-leg=${_near}). Interim fix pending MediaPipe dense-scan migration. NOTE: overstride DISTANCE is still coarse-landmark-based.`);
+          console.log(`[ShinFix] shin angle: coarse MoveNet = ${_coarseShin ?? 'n/a'}° (IQR=${_iqr!=null?_iqr.toFixed(1):'n/a'}° — not tight) → OVERRIDDEN to tape-refined IC frame (#${_icIdx+1}) = ${_tapeShin}° (near-leg=${_near}). Interim fix pending MediaPipe migration.`);
+        } else if(_coarseTight) {
+          window_strideMetrics._shinSource = 'multi-stride';
+          console.log(`[ShinFix] keeping robust multi-stride shin ${_coarseShin}° (IQR=${_iqr.toFixed(1)}° — tight/reliable); tape single-frame read ${_tapeShin ?? 'n/a'}° not used (single-frame noise).`);
         } else {
           console.log(`[ShinFix] no tape-refined IC landmarks available — keeping coarse value ${_coarseShin ?? 'n/a'}° with its stride-agreement gate.`);
         }
@@ -17165,7 +17185,7 @@ async function exportPDF() {
       if(_shinReliable && sm.overstrideGrade!=null && sm.overstrideGrade !== 'none') kpiDefs.push({
         label:'Overstride',
         value: sm.overstrideDistCm!=null ? `${sm.overstrideDistCm}cm` : sm.overstrideGrade,
-        sub: sm.overstrideGrade === 'mild' ? 'Mild — monitor' : sm.overstrideGrade === 'moderate' ? '⚠ Moderate — increased braking' : '⚠ Severe — high braking impulse',
+        sub: (sm.overstrideGrade === 'mild' ? 'Mild — monitor' : sm.overstrideGrade === 'moderate' ? '⚠ Moderate — increased braking' : '⚠ Severe — high braking impulse') + (sm.overstridePctLeg != null ? ` · ${sm.overstridePctLeg}% leg length` : ''),
         flag: sm.overstrideGrade === 'mild' ? 'warn' : 'poor',
       });
       if(sm.shinAngleAtContactDeg!=null) kpiDefs.push({
