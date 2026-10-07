@@ -9378,8 +9378,8 @@ function classifyRunningArchetype(sm, aggregated) {
     return {
       primary:{id:'efficient',label:'Efficient',icon:'&#x2705;',color:'#10b981',
         tagline:'Well-rounded mechanics \u2014 minor coaching points only',
-        drivers:bl.length>0?['Good overall form',...bl.flatMap(k=>drivers[k]).slice(0,3)]
-          :drivers.efficient.length>0?drivers.efficient:['Good overall form']},
+        drivers:bl.length>0?['Good overall form',...[...new Set(bl.flatMap(k=>drivers[k]))].slice(0,3)]
+          :drivers.efficient.length>0?[...new Set(drivers.efficient)]:['Good overall form']},
       secondary:null
     };
   }
@@ -14809,7 +14809,11 @@ function _runSpeedBand(mphArg){
   let band = 'moderate';
   if(mph!=null){ if(mph < 5.5) band='slow'; else if(mph > 8.5) band='fast'; }
   const T = {
-    slow:     { cadHard:148, cadSoft:156, shinSevere:35, shinMod:28, shinMild:22, stanceMin:0.40, stanceMax:0.55, voSoft:11, voHard:13, bkOpen:45, bkSlight:58 },
+    // v0.17.3: shin/overstride thresholds no longer relaxed for slow pace (clinical call, Brian).
+    // A forward shin at contact is overstriding regardless of pace — the old slow-band relaxation
+    // (shin had to exceed 22° to flag) washed out real overstride in slow joggers. Shin values now
+    // match the moderate band. Cadence/stance/bounce relaxations are kept (those ARE pace-dependent).
+    slow:     { cadHard:148, cadSoft:156, shinSevere:25, shinMod:20, shinMild:15, stanceMin:0.40, stanceMax:0.55, voSoft:11, voHard:13, bkOpen:45, bkSlight:58 },
     moderate: { cadHard:160, cadSoft:168, shinSevere:25, shinMod:20, shinMild:15, stanceMin:0.35, stanceMax:0.45, voSoft:10, voHard:12, bkOpen:50, bkSlight:65 },
     fast:     { cadHard:166, cadSoft:174, shinSevere:22, shinMod:18, shinMild:14, stanceMin:0.32, stanceMax:0.42, voSoft:10, voHard:12, bkOpen:55, bkSlight:70 },
   }[band];
