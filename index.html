@@ -1750,7 +1750,24 @@ function startFrameExtraction(file, vid) {
       denseCount = Math.max(denseCount, Math.min(Math.max(64, _perStrideMin), _availFrames));
       denseCount = Math.min(denseCount, DENSE_CEIL);
       console.log(`[FrameExtract] dense frames: ${denseCount} (source ${_srcFps}fps × ${dur.toFixed(1)}s = ${_availFrames} avail; effFps≈${(denseCount/dur).toFixed(1)}; prev cap was 128)`);
-      effectiveProportions = Array.from({length:denseCount}, (_,i) => 0.03 + (i/(denseCount-1))*0.94);
+      // v0.17.3 WINDOW GATING for long clips: effFps = denseCount / sampled-span. Smearing
+      // the fixed ~256-frame budget across a long clip starves the timing metrics (Leslie's
+      // 15.7s → 16 effFps). Instead, concentrate the budget on a steady-state middle window
+      // so effFps stays high (≈256/9s ≈ 28) for the SAME frame/compute cost. The stride engine
+      // forms a stride only between two consecutive ref-leg contacts, so any partial stride at
+      // a window edge is never counted — a centered steady window needs no IC-snapping to stay
+      // clean. (The IC-aligned / most-consistent-cadence refinement is a two-pass, deferred to
+      // the MediaPipe migration which restructures this extraction path.)
+      const TARGET_WINDOW_S = 9.0; // ~11 strides at jog pace; keeps effFps ≈ denseCount/9
+      let _winStart = 0.03 * dur, _winEnd = 0.97 * dur;
+      if(dur > TARGET_WINDOW_S + 1.5) {
+        const _mid = dur * 0.5;
+        _winStart = Math.max(0.05, _mid - TARGET_WINDOW_S / 2);
+        _winEnd   = Math.min(dur - 0.05, _mid + TARGET_WINDOW_S / 2);
+        console.log(`[FrameExtract] long clip ${dur.toFixed(1)}s → sampling a ${(_winEnd-_winStart).toFixed(1)}s steady-middle window [${_winStart.toFixed(1)}–${_winEnd.toFixed(1)}s]: effFps≈${(denseCount/(_winEnd-_winStart)).toFixed(1)} (was ${(denseCount/dur).toFixed(1)} across the full clip)`);
+      }
+      const _winSpan = _winEnd - _winStart;
+      effectiveProportions = Array.from({length:denseCount}, (_,i) => (_winStart + (i/(denseCount-1))*_winSpan) / dur);
       times = effectiveProportions.map(t => t * dur);
       // Placeholder labels — GaitFSM will overwrite these
       effectiveLabels = effectiveProportions.map((_,i) => ({
@@ -8217,6 +8234,14 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   const lHipSmooth  = smooth3(perFrameData.map(f=>f.lHip));
   const rHipSmooth  = smooth3(perFrameData.map(f=>f.rHip));
   const N = perFrameData.length;
+  // v0.17.3: actual sampled span in seconds. With window-gating the dense frames may cover
+  // only a sub-window of the clip, so effective fps must key off the REAL frame span, not the
+  // full clip duration (otherwise it under-reads density and mis-sizes the contact refractory
+  // and the timing-resolution gates). perFrameData[i].t is a fraction of the full clip.
+  const _spanT0 = perFrameData[0]?.t, _spanT1 = perFrameData[N-1]?.t;
+  const _sampledSpanS = (videoDuration > 0 && _spanT0 != null && _spanT1 != null && _spanT1 > _spanT0)
+    ? (_spanT1 - _spanT0) * videoDuration : videoDuration;
+  const _sampledEffFps = (_sampledSpanS > 0 && N > 1) ? ((N - 1) / _sampledSpanS) : 30;
 
   // ── 1. Composite contact detection (ankle Y + knee extension confirmation) ──
   // Pure ankle-Y peak detection fails when MediaPipe/MoveNet misplaces the ankle —
@@ -8295,7 +8320,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // knee composite). Without this guard, those double-bumps produced sub-0.50s
   // "half-strides" that got rejected downstream — inflating cadence and collapsing
   // the usable stride count even on clean, high-quality clips.
-  const _effFps = (videoDuration > 0 && N > 1) ? (N / videoDuration) : 30;
+  const _effFps = _sampledEffFps; // span-aware: correct under window-gating
   const _minContactSpacing = Math.max(2, Math.round(0.42 * _effFps));
 
   const findContacts = (compArr, minProm) => {
@@ -8902,7 +8927,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // set, so filming at 120fps does not by itself refine step timing — this self-calibrates to the
     // real sampling rate and matches the ±29% run-to-run MDC seen in the 5-bout study. (v0.16.5)
     const _srcFps   = (typeof fps === 'number' && fps > 0) ? fps : 30;
-    const _effFps   = (videoDuration > 0 && N > 1) ? Math.min(N / videoDuration, _srcFps) : _srcFps;
+    const _effFps   = Math.min(_sampledEffFps, _srcFps); // span-aware under window-gating
     const frameDur  = 1 / _effFps;
     stepAsymResolutionPct = Math.round(frameDur / meanStep * 100);
     // Reliability floor ≈ MDC95 from the 5-bout study (~2.5× the single-frame resolution). Below it,
