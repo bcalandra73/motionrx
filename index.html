@@ -9308,10 +9308,14 @@ function classifyRunningArchetype(sm, aggregated) {
   else if(shinAngle!=null&&shinAngle>15){scores.overstrider+=1;drivers.overstrider.push('shin angle '+shinAngle+'\u00b0');}
   if(footStrike==='heel'){scores.overstrider+=1;drivers.overstrider.push('heel strike');}
 
-  // Bouncer
-  if(vo!=null&&vo>12)    {scores.bouncer+=3;drivers.bouncer.push('VO '+vo+'cm — excessive');}
-  else if(vo!=null&&vo>10){scores.bouncer+=2;drivers.bouncer.push('VO '+vo+'cm — elevated');}
-  else if(vo!=null&&vo>8) {scores.bouncer+=1;drivers.bouncer.push('VO '+vo+'cm — borderline');}
+  // Bouncer — v0.17.3: VO is derived from the COARSE MoveNet hip landmarks and drifts
+  // ~1cm run-to-run, so a value a hair over the 10cm norm is within measurement noise.
+  // Require a clear margin (≥1.5cm over norm) before VO drives a "Bouncer" classification;
+  // 10–11.5cm is treated as mildly-elevated/monitor, not an "elevated" Bouncer driver.
+  // (Proper fix: MediaPipe dense-scan migration.)
+  if(vo!=null&&vo>13.5)      {scores.bouncer+=3;drivers.bouncer.push('VO '+vo+'cm — excessive');}
+  else if(vo!=null&&vo>11.5) {scores.bouncer+=2;drivers.bouncer.push('VO '+vo+'cm — elevated');}
+  else if(vo!=null&&vo>10)   {scores.bouncer+=1;drivers.bouncer.push('VO '+vo+'cm — mildly elevated (coarse estimate — monitor)');}
   if(cadence!=null&&cadence<160)        {scores.bouncer+=1;drivers.bouncer.push('cadence '+cadence+' spm');}
 
   // Collapser
@@ -9629,7 +9633,7 @@ function renderStrideMetrics(metrics, aggregated={}) {
     </div>
     ${metrics.verticalOscillationCm!=null ? `<div style="margin-bottom:6px;padding:8px 12px;background:var(--teal-light);border-radius:6px;font-size:.73rem;color:var(--teal);">
       📊 <strong>Vertical oscillation ${metrics.verticalOscillationCm}cm</strong> — hip excursion per stride.
-      ${metrics.verticalOscillationCm < 6 ? 'Elite-level economy.' : metrics.verticalOscillationCm <= 10 ? 'Normal recreational range.' : 'High bounce — energy inefficient. Check hip abductor strength and cadence.'}
+      ${metrics.verticalOscillationCm < 6 ? 'Elite-level economy.' : metrics.verticalOscillationCm <= 10 ? 'Normal recreational range.' : metrics.verticalOscillationCm <= 11.5 ? 'Mildly elevated — monitor (coarse estimate, ±1cm).' : 'High bounce — energy inefficient. Check hip abductor strength and cadence.'}
       ${metrics.shinAngleReliable !== false && metrics.overstrideGrade && metrics.overstrideGrade !== 'none' ? `<br>⚠ <strong>Overstride ${metrics.overstrideDistCm ?? ''}cm (${metrics.overstrideGrade})</strong> — foot landing ahead of hip at contact. ${metrics.overstrideGrade === 'severe' ? 'Significant braking impulse risk.' : 'Consider shorter stride cue and cadence increase.'}` : ''}
       ${metrics.shinAngleAtContactDeg!=null ? (metrics.shinAngleReliable === false ? `<br>📐 <strong>Shin angle at contact: —</strong> — landing instant varied stride-to-stride; not reliably measurable on this clip (needs higher frame rate / force plate).` : `<br>📐 <strong>Shin angle at contact: ${metrics.shinAngleAtContactDeg}°</strong> — ${metrics.shinAngleAtContactDeg <= 15 ? 'within normal range.' : metrics.shinAngleAtContactDeg <= 20 ? 'borderline — monitor landing position.' : 'excessive forward lean at contact — braking force risk.'}`) : ''}
     </div>` : ''}
@@ -13626,6 +13630,7 @@ ${window_strideMetrics.backKneeFlexAtContact!=null ? `- Trailing-leg (back) knee
 ${window_strideMetrics.stepLengthAsymPct!=null ? (window_strideMetrics.stepAsymReliable === false ? `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% — ⚠️ WITHIN MEASUREMENT ERROR at this frame rate (resolution ±${window_strideMetrics.stepAsymResolutionPct ?? '?'}%; run-to-run MDC ~2.5×). This is NOT a reliable finding — do NOT headline it, do NOT build a pain/loading narrative on it, and do NOT list it as a key finding. At most note in passing that step symmetry could not be reliably assessed at this frame rate and would need 60fps+ to confirm.` : `- Step length asymmetry: ${window_strideMetrics.stepLengthAsymPct}% L/R offset (>10% = clinically significant)`) : ''}
 ${window_strideMetrics.strideLengthM ? `- Stride length: ${window_strideMetrics.strideLengthM}m, step length: ${window_strideMetrics.stepLengthM}m` + (window_strideMetrics.strideLengthNorm ? ` (${window_strideMetrics.strideLengthNorm}× leg length — ${window_strideMetrics.overstrideFlag||'unknown'})` : '') + (window_strideMetrics._lowStrideCount ? ' — ⚠️ LOW CONFIDENCE (few clean strides); do NOT headline stride length or overstride.' : '') : ''}
 ${window_strideMetrics.shinAngleReliable === false ? `- ⚠️ Shin angle / overstride: NOT reliably measurable on this clip — the landing instant varied too much stride-to-stride (foot-strike angle changes faster than the frame rate can pin down). Do NOT report a shin angle or overstride value, do NOT classify the runner as an overstrider, and do NOT build a braking-impulse narrative. At most note that landing-position assessment needs higher-frame-rate or force-plate data.` : ''}
+${(window_strideMetrics.verticalOscillationCm != null && window_strideMetrics.verticalOscillationCm > 10 && window_strideMetrics.verticalOscillationCm <= 11.5) ? `- ⚠️ Vertical oscillation ${window_strideMetrics.verticalOscillationCm}cm is only mildly over the 10cm norm and is a COARSE-landmark estimate (±~1cm run-to-run). Treat it as "mildly elevated — monitor", NOT as a headline finding. Do NOT classify the runner as a "Bouncer" or build an energy-waste/bounce narrative on it, and do NOT make vertical-oscillation reduction a primary recommendation. Higher-fidelity tracking is needed to confirm.` : ''}
 Include these stride metrics in your biomechanical analysis and recommendations where clinically relevant.` : ''}
 ${(() => {
   // Jump context — only for landing movements
@@ -15156,7 +15161,9 @@ function computeRunningQualityScore(aggregated, sm, movement, worstAsymPct, gdv)
   if(cad!=null){ if(cad<_sb.cadHard) add(-1.0,`low cadence ${Math.round(cad)} spm`,'economy'); else if(cad<_sb.cadSoft) add(-0.5,`cadence ${Math.round(cad)} spm (sub-optimal for ${_sb.label} pace)`,'economy'); else str.push(`cadence ${Math.round(cad)} spm`); }
 
   const vo = sm.verticalOscillationCm;
-  if(vo!=null){ if(vo>_sb.voHard) add(-1.0,`high vertical oscillation ${vo}cm`,'economy'); else if(vo>=_sb.voSoft) add(-0.5,`vertical oscillation ${vo}cm`,'economy'); }
+  // v0.17.3: VO is a coarse-landmark estimate (~1cm run-to-run noise) — require a clear
+  // margin over the band's soft threshold before deducting, so a hair over norm doesn't cost points.
+  if(vo!=null){ if(vo>_sb.voHard) add(-1.0,`high vertical oscillation ${vo}cm`,'economy'); else if(vo>=_sb.voSoft+1.5) add(-0.5,`vertical oscillation ${vo}cm`,'economy'); }
 
   const cv = sm.cvStridePct;
   if(cv!=null){ if(cv>8) add(-0.75,`stride-time variability ${Math.round(cv)}%`,'economy'); else if(cv>5) add(-0.5,`stride-time variability ${Math.round(cv)}%`,'economy'); }
@@ -17098,8 +17105,8 @@ async function exportPDF() {
       if(sm.verticalOscillationCm!=null) kpiDefs.push({
         label:'Vertical Oscillation (est.)',
         value:`${sm.verticalOscillationCm}cm`,
-        sub: sm.verticalOscillationCm < 6 ? 'Elite (<6cm)' : sm.verticalOscillationCm <= 10 ? 'Normal (6–10cm)' : '⚠ High bounce (>10cm)',
-        flag: sm.verticalOscillationCm <= 10 ? 'ok' : 'warn',
+        sub: sm.verticalOscillationCm < 6 ? 'Elite (<6cm)' : sm.verticalOscillationCm <= 10 ? 'Normal (6–10cm)' : sm.verticalOscillationCm <= 11.5 ? 'Mildly elevated — monitor (coarse est.)' : '⚠ High bounce (>11.5cm)',
+        flag: sm.verticalOscillationCm <= 11.5 ? 'ok' : 'warn',
       });
       const _shinReliable = sm.shinAngleReliable !== false;
       if(_shinReliable && sm.overstrideGrade!=null && sm.overstrideGrade !== 'none') kpiDefs.push({
