@@ -14866,11 +14866,15 @@ function _runSpeedBand(mphArg){
 }
 
 // Single source of truth for overstride severity (#37): reconciles the distance-based grade
-// (overstrideGrade) with the band-aware shin angle, so the deterministic score and the archetype
-// card always agree. Returns 'none' | 'mild' | 'moderate' | 'severe', or null when no data.
-// Uses floor-of-mean: grade AND shin must concur to reach a level, so a single high shin reading
-// no longer over-calls "severe" (e.g. Brian at 7mph: grade moderate + shin 29° → moderate, not
-// severe). Shin thresholds are speed-band-aware, so this is also speed-contextual.
+// (overstrideGrade — now % of leg length) with the band-aware shin angle. Returns
+// 'none' | 'mild' | 'moderate' | 'severe', or null when no data.
+// v0.17.3 (clinical call, Brian): take the WORSE of the two signals rather than averaging.
+// Overstride can present as a REACH (foot lands well ahead — high distance %) WITHOUT an
+// excessive shin lean (Leslie: 16% leg length, heel strike, shin a normal 12°). The old
+// floor-of-mean cancelled a real distance-overstride against a normal shin and reported
+// "none". Max-of-signals catches reach-based overstriders. The single-high-shin over-call
+// the averaging guarded against is now much less likely: the shin value is a robust
+// multi-stride median (and is excluded entirely when its reliability gate fails).
 function _overstrideSeverity(sm, sb){
   if(!sm) return null;
   sb = sb || _runSpeedBand(sm.speedMps!=null ? sm.speedMps*2.23694 : null);
@@ -14881,7 +14885,7 @@ function _overstrideSeverity(sm, sb){
   const shin = sm.shinAngleAtContactDeg;
   if(shin!=null) ranks.push(shin>sb.shinSevere?3 : shin>sb.shinMod?2 : shin>sb.shinMild?1 : 0);
   if(!ranks.length) return null;
-  return NAME[Math.floor(ranks.reduce((a,b)=>a+b,0) / ranks.length)];
+  return NAME[Math.max(...ranks)]; // worse of distance / shin
 }
 // ── Balance / single-leg-stance analysis (v0.16.0) ──────────────────────────
 // From a dense per-frame landmark scan of a quasi-static hold, derive postural-sway
