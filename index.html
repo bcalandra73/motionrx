@@ -557,6 +557,15 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             </select>
           </div>
           <div class="form-group">
+            <label class="form-label">Dense-scan model <span style="font-weight:400;color:var(--muted)">(#29 test — report unchanged)</span></label>
+            <select id="denseModel" onchange="try{localStorage.setItem('mrx_denseModel',this.value)}catch(e){}">
+              <option value="movenet" selected>MoveNet Thunder (current)</option>
+              <option value="mp-full-video">+ shadow: MediaPipe Full (VIDEO mode)</option>
+              <option value="mp-heavy-video">+ shadow: MediaPipe Heavy (VIDEO mode)</option>
+              <option value="mp-heavy-image">+ shadow: MediaPipe Heavy (IMAGE mode, as gallery)</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label class="form-label">Shoe Type</label>
             <select id="shoeType">
               <option value="">Not specified</option>
@@ -1365,6 +1374,37 @@ let mpReady = false;
 let moveNetDetector = null;
 let moveNetReady = false;
 
+// ── #29 Step 0: wall-clock instrumentation ──────────────────────────────────
+// _mrxT.mark(label) logs the time since the previous mark (and cumulative). Summary
+// table printed at Stage 5 ([Timing]). Measurement only — no behaviour change.
+window._mrxT = {
+  rows: [], t0: 0, last: 0,
+  start(){ this.rows = []; this.t0 = this.last = performance.now(); },
+  mark(label, note){
+    if(!this.t0) this.start();
+    const n = performance.now();
+    const row = { step: label, ms: Math.round(n - this.last), cum_s: +((n - this.t0)/1000).toFixed(1) };
+    if(note) row.note = note;
+    this.rows.push(row); this.last = n;
+    console.log(`[Timing] ${label}: ${row.ms} ms (cum ${row.cum_s}s)${note ? ' — ' + note : ''}`);
+  },
+  summary(){
+    if(!this.rows.length) return;
+    console.log('[Timing] ── summary ──'); console.table(this.rows);
+    const total = this.rows.filter(r => !/^\(/.test(r.step)).reduce((a, r) => a + r.ms, 0);
+    console.log(`[Timing] total active ${(total/1000).toFixed(1)}s (idle waits excluded)`);
+  }
+};
+// ── #29 Step 0: dense-model toggle + lazily-created MediaPipe instances ─────
+// The loader stashes window._mpNs / window._mpVision so a second PoseLandmarker (different
+// model and/or VIDEO running mode) can be created without re-downloading WASM. The shared
+// poseLandmarkerInstance stays IMAGE-mode for the gallery path — it is never flipped.
+window._mpDenseInstances = {};
+(function _restoreDenseModelPref(){
+  const apply = () => { try { const v = localStorage.getItem('mrx_denseModel'); const el = document.getElementById('denseModel'); if(v && el && [...el.options].some(o => o.value === v)) el.value = v; } catch(e){} };
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', apply); else apply();
+})();
+
 document.getElementById('headerDate').textContent =
   new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
 
@@ -1492,6 +1532,7 @@ async function initMediaPipe() {
       catch(e) { console.warn('[PoseLandmarker] WASM CDN failed:', wasmUrl, e.message); }
     }
     if(!vision) throw new Error('All WASM CDNs failed');
+    window._mpNs = ns; window._mpVision = vision; // #29 Step 0: reused by getDensePoseInstance()
 
     badge.textContent = '⏳ Downloading model...';
     const opts = { runningMode: 'IMAGE', numPoses: 1, minPoseDetectionConfidence: 0.30, minPosePresenceConfidence: 0.30, minTrackingConfidence: 0.30, outputSegmentationMasks: false };
@@ -1678,6 +1719,7 @@ function startFrameExtraction(file, vid) {
 
   async function doExtract() {
     if(started) return; started = true;
+    window._mrxT.start();
     const dur = vid.duration;
     if(!dur || !isFinite(dur) || dur === 0) {
       statusText.textContent = 'Trying playback capture...';
@@ -1785,6 +1827,7 @@ function startFrameExtraction(file, vid) {
       if(b64) frames.push({imageData: b64, phase: effectiveLabels[i]});
       barFill.style.width = `${Math.round(((i+1)/times.length)*90)}%`;
     }
+    window._mrxT.mark('dense frame seek + JPEG capture', `${frames.length} frames`);
     if(frames.length > 0) {
       extractedFrames = frames;
       barFill.style.width = '100%';
@@ -1811,6 +1854,29 @@ function startFrameExtraction(file, vid) {
             // This is the fast pre-analysis pass. MediaPipe Heavy runs later (in runAnalysis)
             // on only the 8 phase-selected frames — at the right biomechanical moments.
             quickFused = await coarseScanWithMoveNet(frames, statusText);
+            window._mrxT.mark('MoveNet dense scan', `${frames.length} frames`);
+            // ── #29 Step 0: optional SHADOW scan on MediaPipe (timing / coverage only) ──
+            // Selected via the "Dense-scan model" dropdown. quickFused stays MoveNet; the
+            // MediaPipe result is parked on window._denseShadow for inspection.
+            try {
+              const _dm = document.getElementById('denseModel')?.value || 'movenet';
+              if(_dm !== 'movenet' && mpReady && poseLandmarkerInstance) {
+                const _shadow = await denseScanWithMediaPipe(frames, times, _dm, statusText);
+                window._mrxT.mark(`MediaPipe dense scan (${_dm})`, `${frames.length} frames`);
+                if(_shadow?.results) {
+                  window._denseShadow = _shadow;
+                  // Coarse-vs-MP landmark offset on knees/ankles (normalised image units ×1000).
+                  let dSum = 0, dN = 0;
+                  _shadow.results.forEach((mp, fi) => {
+                    const mn = quickFused[fi]; if(!mp || !mn) return;
+                    [25,26,27,28].forEach(k => {
+                      if(mp[k] && mn[k] && mp[k].visibility > 0.3 && mn[k].visibility > 0.3) { dSum += Math.hypot(mp[k].x - mn[k].x, mp[k].y - mn[k].y); dN++; }
+                    });
+                  });
+                  if(dN) console.log(`[DenseMP] mean MoveNet↔MediaPipe knee/ankle offset: ${(1000 * dSum / dN).toFixed(1)}‰ of frame (${dN} joint samples)`);
+                }
+              }
+            } catch(e) { console.warn('[DenseMP] shadow scan failed (non-fatal):', e.message); }
           } else if(needsGaitLabel) {
             // ── MediaPipe fallback for gait (MoveNet unavailable) ─────────────
             // Running MediaPipe Heavy on 128 dense frames is too slow/memory-heavy.
@@ -2039,6 +2105,7 @@ function startFrameExtraction(file, vid) {
                   {speedMps, inclinePct: inclineRaw, surface: surfaceVal,
                    shoe: shoeVal, experience: expVal, heightCm}
                 );
+                window._mrxT.mark('stride engine (detectStridesAndComputeMetrics)');
                 if(window_strideMetrics) {
                   // ── Low-stride-count reliability gate ──────────────────────
                   // Spatiotemporal metrics (cadence, stride length, overstride,
@@ -6806,6 +6873,82 @@ async function coarseScanWithMoveNet(frames, statusEl) {
 
   // Light temporal smoothing for a cleaner contact/toeoff signal (same as MediaPipe path)
   return applyTemporalSmoothing(results);
+}
+
+// ── #29 Step 0: MediaPipe dense scan (SHADOW — timing / coverage only) ──────
+// Runs the SAME dense frames through a dedicated MediaPipe PoseLandmarker so wall-clock and
+// landmark coverage can be compared against coarseScanWithMoveNet. Output shape matches the
+// MoveNet path (33-slot array of {x,y,visibility}) plus z / world landmarks and feet (29–32).
+// In Step 0 the result is stored on window._denseShadow and logged — never fed to the stride
+// engine. Phase A (shadow metrics) and Phase B (cut-over) build on this function.
+//   variant: 'mp-full-video' | 'mp-heavy-video' | 'mp-heavy-image' | 'mp-lite-video'
+const MP_MODEL_URLS = {
+  heavy: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task',
+  full:  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task',
+  lite:  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task',
+};
+async function getDensePoseInstance(variant) {
+  const m = /^mp-(heavy|full|lite)-(video|image)$/.exec(variant || '');
+  if(!m) return null;
+  const model = m[1], mode = m[2], key = `${model}-${mode}`;
+  if(window._mpDenseInstances[key]) return window._mpDenseInstances[key];
+  const ns = window._mpNs, vision = window._mpVision;
+  if(!ns?.PoseLandmarker || !vision) { console.warn('[DenseMP] loader globals unavailable (legacy fallback active?) — cannot create', key); return null; }
+  const opts = { runningMode: mode.toUpperCase(), numPoses: 1, minPoseDetectionConfidence: 0.30, minPosePresenceConfidence: 0.30, minTrackingConfidence: 0.30, outputSegmentationMasks: false };
+  const t0 = performance.now();
+  let inst = null;
+  try {
+    inst = await ns.PoseLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: MP_MODEL_URLS[model], delegate: 'GPU' }, ...opts });
+  } catch(e) {
+    console.warn(`[DenseMP] GPU create failed for ${key}: ${e.message} — trying CPU`);
+    inst = await ns.PoseLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: MP_MODEL_URLS[model], delegate: 'CPU' }, ...opts });
+  }
+  console.log(`[DenseMP] created ${key} in ${Math.round(performance.now() - t0)} ms`);
+  window._mpDenseInstances[key] = inst;
+  return inst;
+}
+async function denseScanWithMediaPipe(frames, timesSec, variant, statusEl) {
+  const inst = await getDensePoseInstance(variant);
+  if(!inst) return null;
+  const isVideo = /video$/.test(variant);
+  const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(null), ms))]);
+  const results = [];
+  const stats = { variant, n: frames.length, hit: 0, feet: 0, infMs: 0, decodeMs: 0 };
+  let lastTs = -1; // VIDEO mode requires strictly increasing timestamps (ms)
+  for(let i = 0; i < frames.length; i++) {
+    if(statusEl) statusEl.textContent = `Shadow scan (${variant}) — frame ${i+1}/${frames.length}...`;
+    const tD = performance.now();
+    const img = await withTimeout(new Promise(res => {
+      const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null);
+      im.src = 'data:image/jpeg;base64,' + frames[i].imageData;
+    }), 2000);
+    stats.decodeMs += performance.now() - tD;
+    if(!img) { results.push(null); continue; }
+    let r = null;
+    const tI = performance.now();
+    try {
+      if(isVideo) {
+        let ts = Math.round(((timesSec && timesSec[i] != null) ? timesSec[i] : i / 30) * 1000);
+        if(ts <= lastTs) ts = lastTs + 1;
+        lastTs = ts;
+        r = inst.detectForVideo(img, ts);
+      } else {
+        r = inst.detect(img);
+      }
+    } catch(e) { console.warn('[DenseMP] frame', i, 'error:', e.message); }
+    stats.infMs += performance.now() - tI;
+    const lm = r?.landmarks?.[0], wl = r?.worldLandmarks?.[0];
+    if(!lm) { results.push(null); continue; }
+    stats.hit++;
+    const arr = Array.from({length: 33}, (_, k) => lm[k]
+      ? { x: lm[k].x, y: lm[k].y, z: lm[k].z, visibility: lm[k].visibility ?? 0, world: wl?.[k] || null, source: 'mediapipe' }
+      : null);
+    if([29,30,31,32].every(k => (arr[k]?.visibility ?? 0) > 0.30)) stats.feet++;
+    results.push(arr);
+  }
+  stats.msPerFrame = +(stats.infMs / Math.max(1, stats.n)).toFixed(1);
+  console.log(`[DenseMP] ${variant}: pose on ${stats.hit}/${stats.n} frames; all four foot landmarks (29–32, vis>0.30) on ${stats.feet}; inference ${Math.round(stats.infMs)} ms (${stats.msPerFrame} ms/frame), JPEG decode ${Math.round(stats.decodeMs)} ms`);
+  return { results, stats };
 }
 
 function extractAngles(lm, view='side', movement='') {
@@ -12342,6 +12485,7 @@ function renderDenseCurves(curves, movement) {
 }
 
 async function runAnalysis() {
+  window._mrxT.mark('(wait: extraction → Analyze click)');
   const movement = document.getElementById('movementType').value;
   const apiKey = document.getElementById('apiKey').value.trim();
   const statusEl = document.getElementById('loadingStatus') || document.createElement('span');
@@ -12394,6 +12538,7 @@ async function runAnalysis() {
   if(mpReady && poseInstance) {
     const mpResults = await runMediaPipeOnFrames(extractedFrames);
     console.log('[Analysis] Stage 1 complete: MP done, results:', mpResults?.length);
+    window._mrxT.mark('gallery MediaPipe Heavy', `${extractedFrames?.length ?? 0} frames`);
 
     // ── Landmark Fusion Pipeline ──
     // Fuses MediaPipe + MoveNet, applies segment constraints, bilateral fallback, temporal smoothing
@@ -12631,6 +12776,7 @@ async function runAnalysis() {
   }
 
   // Step 3: Aggregate angles — pass frame phases so ankle DF uses stance frames only
+  window._mrxT.mark('fusion + foot + tape refinement (gallery)');
   console.log('[Analysis] Stage 3: Aggregating angles, allAngles:', allAngles.length);
 
   // ── Use dense frames for angle aggregation when available ─────────────────
@@ -12857,6 +13003,7 @@ async function runAnalysis() {
       if(vidElForDense && durForDense && isFinite(durForDense)) {
         statusEl.textContent = 'Running dense movement analysis pass...';
         denseCurves = await runDenseDynamicPass(movement, vidElForDense, durForDense, cameraView, statusEl, readTapeConfig());
+        window._mrxT.mark('dense dynamic pass (MediaPipe Heavy)', `${denseCurves?.length ?? 0} frames`);
 
         // Upgrade aggregated angles with dense-pass peak values for valgus/adduction/ankle
         // These benefit most from the extra frames and foot refinement
@@ -13311,6 +13458,7 @@ async function runAnalysis() {
       `${k}: avg ${v.avg}° (range ${v.min}°–${v.max}° across ${allAngles2.length} frames)`
     ).join('\n');
     console.log('[Analysis] Stage 3b complete:', Object.keys(aggregated2).length, 'angles from second view');
+    window._mrxT.mark('secondary view (Stage 3b)');
   }
 
   // ── Merge angles: prefer sagittal-dominant angles from side view, frontal from front/posterior ──
@@ -13953,6 +14101,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
       aiFailed = true; report = null; raw = '';
     }
 
+    window._mrxT.mark('AI report (API round-trip)');
     console.log('[Analysis] Stage 4: Hiding spinner, showing results');
     document.getElementById('loadingState').style.display='none';
     document.getElementById('resultsSection').style.display='block';
@@ -14590,6 +14739,7 @@ Include 3-5 findings, 4-6 recommendations, 2-3 patient education points.`;
     }
 
     console.log('[Analysis] Stage 5: Calling renderReport, report:', !!report);
+    window._mrxT.summary();
     try {
       // Store for session comparison snapshot
       window._lastAggregated = aggregated;
