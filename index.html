@@ -1870,6 +1870,7 @@ function startFrameExtraction(file, vid) {
                   // smoother bumps so the shadow pass can't alter the real run's diagnostics.
                   try { const _g = window._interpGapFrames; _shadow.results = applyTemporalSmoothing(_shadow.results); window._interpGapFrames = _g; } catch(e) { console.warn('[DenseMP] shadow smoothing failed:', e.message); }
                   _shadow.times = times.slice();
+                  _shadow.variant = _dm;
                   window._denseMoveNet = { results: quickFused, times: times.slice() }; // reference for the gallery-accuracy check
                   // Coarse-vs-MP landmark offset on knees/ankles (normalised image units ×1000).
                   let dSum = 0, dN = 0;
@@ -7025,6 +7026,7 @@ function _logMigrateCompare(smA, smB, variant) {
     return { metric: label, movenet: a ?? '—', [variant]: b ?? '—', delta: num ? +(b - a).toFixed(2) : (a === b ? '' : '≠') };
   });
   console.log(`[MigrateCompare] stride engine on MoveNet vs ${variant} (same frames, same smoothing) — report uses MoveNet`);
+  rows.forEach(r => console.log(`[MigrateCompare]   ${r.metric}: movenet=${r.movenet} | ${variant}=${r[variant]} | delta=${r.delta}`));
   console.table(rows);
   window._migrateCompare = { variant, movenet: smA, shadow: smB, rows };
 }
@@ -7082,6 +7084,7 @@ function _logDenseVsGallery(galleryLms, galleryFrames) {
       }
     }
     console.log(`[DenseVsGallery] dense landmarks interpolated to the ${galleryLms.filter(Boolean).length} gallery frame times; distance to gallery landmark in ‰ of frame height${cmPerUnit ? ' and cm' : ' (enter height for cm)'}. Tape-refined column is the real reference.`);
+    rows.forEach(r => console.log(`[DenseVsGallery]   ${r.source} ${r.joint}: tape=${r['vs TAPE-refined (median)']} | non-tape=${r['vs gallery non-tape (median)']}`));
     console.table(rows);
     window._denseVsGallery = rows;
   } catch(e) { console.warn('[DenseVsGallery] failed (non-fatal):', e.message); }
