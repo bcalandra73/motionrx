@@ -1865,6 +1865,12 @@ function startFrameExtraction(file, vid) {
                 window._mrxT.mark(`MediaPipe dense scan (${_dm})`, `${frames.length} frames`);
                 if(_shadow?.results) {
                   window._denseShadow = _shadow;
+                  // Phase A: smooth the shadow landmarks exactly as the MoveNet path is smoothed, so the
+                  // two stride-engine runs differ only in landmark SOURCE. Snapshot the gap counter the
+                  // smoother bumps so the shadow pass can't alter the real run's diagnostics.
+                  try { const _g = window._interpGapFrames; _shadow.results = applyTemporalSmoothing(_shadow.results); window._interpGapFrames = _g; } catch(e) { console.warn('[DenseMP] shadow smoothing failed:', e.message); }
+                  _shadow.times = times.slice();
+                  window._denseMoveNet = { results: quickFused, times: times.slice() }; // reference for the gallery-accuracy check
                   // Coarse-vs-MP landmark offset on knees/ankles (normalised image units ×1000).
                   let dSum = 0, dN = 0;
                   _shadow.results.forEach((mp, fi) => {
@@ -2105,6 +2111,20 @@ function startFrameExtraction(file, vid) {
                   {speedMps, inclinePct: inclineRaw, surface: surfaceVal,
                    shoe: shoeVal, experience: expVal, heightCm}
                 );
+                // ── #29 Phase A: SHADOW stride engine on the MediaPipe dense landmarks ──
+                // Same frames, same smoothing, same inputs; only the landmark source differs.
+                // Pure function (no global writes) so the real window_strideMetrics is untouched.
+                try {
+                  const _sh = window._denseShadow;
+                  if(_sh?.results?.length === quickFused.length && window_strideMetrics) {
+                    const _tAt = (fi) => (effectiveProportions||phaseTimeProportions)[fi] ?? (fi/Math.max(1,frames.length-1));
+                    const _shPerFrame = _gaitPerFrameFromLandmarks(_sh.results, _tAt);
+                    const _shSm = detectStridesAndComputeMetrics(_shPerFrame, actualDur, userFpsInput, cameraView,
+                      {speedMps, inclinePct: inclineRaw, surface: surfaceVal, shoe: shoeVal, experience: expVal, heightCm});
+                    _sh.strideMetrics = _shSm;
+                    _logMigrateCompare(window_strideMetrics, _shSm, _sh.variant || 'mediapipe');
+                  }
+                } catch(e) { console.warn('[MigrateCompare] shadow stride engine failed (non-fatal):', e.message); }
                 window._mrxT.mark('stride engine (detectStridesAndComputeMetrics)');
                 if(window_strideMetrics) {
                   // ── Low-stride-count reliability gate ──────────────────────
@@ -3383,6 +3403,7 @@ function startFrameExtraction(file, vid) {
                 for(const _tgt of _reextTargets) {
                   if(_tgt.captured && _tgt.b64) {
                     frames[_tgt.idx] = {...frames[_tgt.idx], imageData: _tgt.b64};
+                    frames[_tgt.idx].tSec = _tgt.time; // #29 Phase A: gallery frame time (for dense-vs-gallery accuracy check)
                     const _drift = _tgt.actualTime !== null ? `actual=${_tgt.actualTime.toFixed(3)}s drift=${((_tgt.actualTime-_tgt.time)*1000).toFixed(1)}ms` : '';
                     console.log(`  Frame ${_tgt.idx+1} [${_tgt.label}]: target=${_tgt.time.toFixed(3)}s ${_drift} ✓`);
                   } else {
@@ -6949,6 +6970,121 @@ async function denseScanWithMediaPipe(frames, timesSec, variant, statusEl) {
   stats.msPerFrame = +(stats.infMs / Math.max(1, stats.n)).toFixed(1);
   console.log(`[DenseMP] ${variant}: pose on ${stats.hit}/${stats.n} frames; all four foot landmarks (29–32, vis>0.30) on ${stats.feet}; inference ${Math.round(stats.infMs)} ms (${stats.msPerFrame} ms/frame), JPEG decode ${Math.round(stats.decodeMs)} ms`);
   return { results, stats };
+}
+
+// ── #29 Phase A: build the stride engine's per-frame kinematics from ANY 33-slot landmark array ──
+// A faithful port of the inline MoveNet `perFrame` mapping in doExtract() (same fields, same
+// thresholds), plus heel/toe fields (29–32) that only MediaPipe can supply. The stride engine
+// ignores the extra fields today; Phase B's IC / toe-off work reads them. Used for the SHADOW
+// run only in Phase A — the real run still uses the inline mapping.
+function _gaitPerFrameFromLandmarks(lmsArr, tAt) {
+  return lmsArr.map((lms, fi) => {
+    if(!lms) return null;
+    const v = (n) => lms[n] && (lms[n].visibility||0) > 0.18 ? lms[n] : null;
+    const lH=v(23),lK=v(25),lA=v(27), rH=v(24),rK=v(26),rA=v(28);
+    const nose=v(0);
+    const lHe=v(29), rHe=v(30), lTo=v(31), rTo=v(32);
+    return {
+      fi,
+      t: tAt(fi),
+      lAnkY: lA?.y ?? null, rAnkY: rA?.y ?? null,
+      lAnkX: lA?.x ?? null, rAnkX: rA?.x ?? null,
+      noseX: nose?.x ?? null,
+      lKnee: lH&&lK&&lA ? calcAngle(lH,lK,lA) : null,
+      rKnee: rH&&rK&&rA ? calcAngle(rH,rK,rA) : null,
+      lHip: (lH&&lK && lK.y-lH.y > -0.10) ? Math.min(90, Math.round(Math.atan2(Math.abs(lK.x-lH.x), lK.y-lH.y)*180/Math.PI)) : null,
+      rHip: (rH&&rK && rK.y-rH.y > -0.10) ? Math.min(90, Math.round(Math.atan2(Math.abs(rK.x-rH.x), rK.y-rH.y)*180/Math.PI)) : null,
+      hipMidY: (lH&&rH) ? (lH.y+rH.y)/2 : (lH?.y ?? rH?.y ?? null),
+      hipMidX: (lH&&rH) ? (lH.x+rH.x)/2 : (lH?.x ?? rH?.x ?? null),
+      lKneeX: lK?.x ?? null, lAnkXFull: lA?.x ?? null, lKneeY: lK?.y ?? null,
+      rKneeX: rK?.x ?? null, rKneeY: rK?.y ?? null,
+      lHipVis:  lms[23]?.visibility ?? 0, lKneeVis: lms[25]?.visibility ?? 0, lAnkVis: lms[27]?.visibility ?? 0,
+      rHipVis:  lms[24]?.visibility ?? 0, rKneeVis: lms[26]?.visibility ?? 0, rAnkVis: lms[28]?.visibility ?? 0,
+      // MediaPipe-only (null on MoveNet): feet for IC / toe-off / foot-strike work (#29 Phase B)
+      lHeelY: lHe?.y ?? null, rHeelY: rHe?.y ?? null, lHeelX: lHe?.x ?? null, rHeelX: rHe?.x ?? null,
+      lToeY:  lTo?.y ?? null, rToeY:  rTo?.y ?? null, lToeX:  lTo?.x ?? null, rToeX:  rTo?.x ?? null,
+    };
+  }).filter(Boolean);
+}
+
+// ── #29 Phase A: side-by-side stride metrics, MoveNet (current) vs MediaPipe shadow ──
+function _logMigrateCompare(smA, smB, variant) {
+  if(!smA || !smB) { console.warn('[MigrateCompare] missing metrics', !!smA, !!smB); return; }
+  const fields = [
+    ['stridesDetected','strides'], ['strideOutliersRejected','rejected'], ['cadenceSpm','cadence spm'],
+    ['strideDurationS','stride s'], ['cvStridePct','stride CV %'], ['gcPct','GCT %'], ['floatPct','float %'],
+    ['shinAngleAtContactDeg','shin @IC °'], ['shinAngleIQR','shin IQR °'], ['shinAngleReliable','shin reliable'],
+    ['overstrideDistCm','overstride cm'], ['overstridePctLeg','overstride %leg'], ['overstrideGrade','overstride grade'],
+    ['verticalOscillationCm','VO cm'], ['stepLengthAsymPct','step asym %'], ['kneeFlexAtContact','knee @IC °'],
+    ['backKneeFlexAtContact','back knee @IC °'], ['hipExtAtToeoff','hip ext @TO °'], ['peakKneeFlex','peak knee °'],
+    ['fsConsensus','foot strike'], ['refSide','ref side'], ['cameraNearLeg','near leg'],
+  ];
+  const rows = fields.map(([k, label]) => {
+    const a = smA[k], b = smB[k];
+    const num = typeof a === 'number' && typeof b === 'number';
+    return { metric: label, movenet: a ?? '—', [variant]: b ?? '—', delta: num ? +(b - a).toFixed(2) : (a === b ? '' : '≠') };
+  });
+  console.log(`[MigrateCompare] stride engine on MoveNet vs ${variant} (same frames, same smoothing) — report uses MoveNet`);
+  console.table(rows);
+  window._migrateCompare = { variant, movenet: smA, shadow: smB, rows };
+}
+
+// ── #29 Phase A: dense-landmark accuracy vs the tape-refined GALLERY (the best landmarks we have) ──
+// For each gallery frame with a known time, linearly interpolate each dense source (MoveNet,
+// MediaPipe shadow) to that exact time and measure the distance to the gallery landmark.
+// Distances are in ‰ of frame HEIGHT (x scaled by aspect), and in cm when patient height is known
+// (scale = gallery hip→ankle length vs legLen ≈ 0.475 × height). Tape-refined gallery landmarks
+// are reported separately — those are the true reference; the rest is "Heavy + foot-crop".
+function _logDenseVsGallery(galleryLms, galleryFrames) {
+  try {
+    const srcs = [];
+    if(window._denseMoveNet?.results?.length) srcs.push({ name: 'movenet', ...window._denseMoveNet });
+    if(window._denseShadow?.results?.length && window._denseShadow.times) srcs.push({ name: window._denseShadow.variant, results: window._denseShadow.results, times: window._denseShadow.times });
+    if(!srcs.length) return;
+    const asp = (window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
+    const heightCm = parseFloat(document.getElementById('patientHeight')?.value || '');
+    const hUnit = document.getElementById('heightUnit')?.value || 'in';
+    const legLenCm = (heightCm > 0) ? (hUnit === 'in' ? heightCm * 2.54 : heightCm) * 0.475 : null;
+    // frame-height-normalised scale from the gallery: median hip→ankle length
+    const legNorm = [];
+    galleryLms.forEach(g => { if(!g) return; [[23,27],[24,28]].forEach(([h,a]) => { if(g[h] && g[a] && g[h].visibility > 0.5 && g[a].visibility > 0.5) legNorm.push(Math.hypot((g[h].x-g[a].x)*asp, g[h].y-g[a].y)); }); });
+    legNorm.sort((a,b)=>a-b);
+    const legNormMed = legNorm.length ? legNorm[Math.floor(legNorm.length/2)] : null;
+    const cmPerUnit = (legLenCm && legNormMed) ? legLenCm / legNormMed : null;
+    const GROUPS = { knee:[25,26], ankle:[27,28], heel:[29,30], toe:[31,32] };
+    const interp = (src, k, t) => {
+      const T = src.times, R = src.results;
+      let j = 0; while(j < T.length - 1 && T[j+1] < t) j++;
+      const a = R[j]?.[k], b = R[Math.min(j+1, R.length-1)]?.[k];
+      if(!a || (a.visibility ?? 0) < 0.3) return null;
+      if(!b || (b.visibility ?? 0) < 0.3 || T[j+1] == null || T[j+1] === T[j]) return a;
+      const w = Math.max(0, Math.min(1, (t - T[j]) / (T[j+1] - T[j])));
+      return { x: a.x + (b.x - a.x) * w, y: a.y + (b.y - a.y) * w };
+    };
+    const rows = [];
+    for(const src of srcs) {
+      for(const [grp, idxs] of Object.entries(GROUPS)) {
+        const dTape = [], dOther = [];
+        galleryLms.forEach((g, gi) => {
+          const t = galleryFrames[gi]?.tSec; if(t == null || !g) return;
+          if(t < src.times[0] - 0.05 || t > src.times[src.times.length-1] + 0.05) return; // outside the dense window
+          idxs.forEach(k => {
+            const ref = g[k]; if(!ref || (ref.visibility ?? 0) < 0.5) return;
+            const p = interp(src, k, t); if(!p) return;
+            const d = Math.hypot((p.x - ref.x) * asp, p.y - ref.y) * 1000;
+            (/^tape-/.test(ref.source || '') ? dTape : dOther).push(d);
+          });
+        });
+        const stat = arr => { if(!arr.length) return null; const s = [...arr].sort((a,b)=>a-b); return { n: arr.length, med: s[Math.floor(s.length/2)], mean: arr.reduce((a,b)=>a+b,0)/arr.length }; };
+        const st = stat(dTape), so = stat(dOther);
+        const fmt = (x) => x == null ? '—' : `${x.med.toFixed(1)}‰${cmPerUnit ? ` (${(x.med/1000*cmPerUnit).toFixed(1)} cm)` : ''} n=${x.n}`;
+        rows.push({ source: src.name, joint: grp, 'vs TAPE-refined (median)': fmt(st), 'vs gallery non-tape (median)': fmt(so) });
+      }
+    }
+    console.log(`[DenseVsGallery] dense landmarks interpolated to the ${galleryLms.filter(Boolean).length} gallery frame times; distance to gallery landmark in ‰ of frame height${cmPerUnit ? ' and cm' : ' (enter height for cm)'}. Tape-refined column is the real reference.`);
+    console.table(rows);
+    window._denseVsGallery = rows;
+  } catch(e) { console.warn('[DenseVsGallery] failed (non-fatal):', e.message); }
 }
 
 function extractAngles(lm, view='side', movement='') {
@@ -12582,6 +12718,7 @@ async function runAnalysis() {
       }
     }
 
+    if(/running|gait|walk/i.test(movement)) _logDenseVsGallery(refinedLandmarks, extractedFrames); // #29 Phase A (log only)
     // Wrap refined landmarks back into result-like objects for downstream compatibility
     const fusedResults = refinedLandmarks.map((lms, i) => ({
       poseLandmarks: lms,
