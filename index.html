@@ -2122,10 +2122,13 @@ function startFrameExtraction(file, vid) {
                   if(_sh?.results?.length === quickFused.length && window_strideMetrics) {
                     const _tAt = (fi) => (effectiveProportions||phaseTimeProportions)[fi] ?? (fi/Math.max(1,frames.length-1));
                     const _shPerFrame = _gaitPerFrameFromLandmarks(_sh.results, _tAt);
-                    const _shSm = detectStridesAndComputeMetrics(_shPerFrame, actualDur, userFpsInput, cameraView,
-                      {speedMps, inclinePct: inclineRaw, surface: surfaceVal, shoe: shoeVal, experience: expVal, heightCm});
-                    _sh.strideMetrics = _shSm;
-                    _logMigrateCompare(window_strideMetrics, _shSm, _sh.variant || 'mediapipe');
+                    const _shParams = {speedMps, inclinePct: inclineRaw, surface: surfaceVal, shoe: shoeVal, experience: expVal, heightCm};
+                    const _shSm  = detectStridesAndComputeMetrics(_shPerFrame, actualDur, userFpsInput, cameraView, _shParams);
+                    const _shSmF = detectStridesAndComputeMetrics(_shPerFrame, actualDur, userFpsInput, cameraView, {..._shParams, contactMode: 'feet'});
+                    _sh.strideMetrics = _shSm; _sh.strideMetricsFeet = _shSmF;
+                    const _vn = _sh.variant || 'mediapipe';
+                    _logMigrateCompare(window_strideMetrics, _shSm, _vn, _shSmF, _vn + ' +FEET');
+                    if(_shSmF?.allStrideDetails) console.log('[StrideEngine:feet] per-stride foot-strike ratio (heel−toe)/footLen: ' + _shSmF.allStrideDetails.map(d => d.footStrikeRatio ?? '—').join(', ') + ' → ' + (_shSmF.fsConsensus ?? '?'));
                   }
                 } catch(e) { console.warn('[MigrateCompare] shadow stride engine failed (non-fatal):', e.message); }
                 window._mrxT.mark('stride engine (detectStridesAndComputeMetrics)');
@@ -7043,7 +7046,7 @@ function _gaitPerFrameFromLandmarks(lmsArr, tAt) {
 }
 
 // ── #29 Phase A: side-by-side stride metrics, MoveNet (current) vs MediaPipe shadow ──
-function _logMigrateCompare(smA, smB, variant) {
+function _logMigrateCompare(smA, smB, variant, smC = null, variantC = null) {
   if(!smA || !smB) { console.warn('[MigrateCompare] missing metrics', !!smA, !!smB); return; }
   const fields = [
     ['stridesDetected','strides'], ['strideOutliersRejected','rejected'], ['cadenceSpm','cadence spm'],
@@ -7052,15 +7055,17 @@ function _logMigrateCompare(smA, smB, variant) {
     ['overstrideDistCm','overstride cm'], ['overstridePctLeg','overstride %leg'], ['overstrideGrade','overstride grade'],
     ['verticalOscillationCm','VO cm'], ['stepLengthAsymPct','step asym %'], ['kneeFlexAtContact','knee @IC °'],
     ['backKneeFlexAtContact','back knee @IC °'], ['hipExtAtToeoff','hip ext @TO °'], ['peakKneeFlex','peak knee °'],
-    ['fsConsensus','foot strike'], ['refSide','ref side'], ['cameraNearLeg','near leg'],
+    ['fsConsensus','foot strike'], ['refSide','ref side'], ['cameraNearLeg','near leg'], ['contactMode','contact mode'],
   ];
   const rows = fields.map(([k, label]) => {
     const a = smA[k], b = smB[k];
     const num = typeof a === 'number' && typeof b === 'number';
-    return { metric: label, movenet: a ?? '—', [variant]: b ?? '—', delta: num ? +(b - a).toFixed(2) : (a === b ? '' : '≠') };
+    const row = { metric: label, movenet: a ?? '—', [variant]: b ?? '—', delta: num ? +(b - a).toFixed(2) : (a === b ? '' : '≠') };
+    if(smC) { const c = smC[k]; row[variantC] = c ?? '—'; row['delta(feet)'] = (typeof a === 'number' && typeof c === 'number') ? +(c - a).toFixed(2) : (a === c ? '' : '≠'); }
+    return row;
   });
   console.log(`[MigrateCompare] stride engine on MoveNet vs ${variant} (same frames, same smoothing) — report uses MoveNet`);
-  rows.forEach(r => console.log(`[MigrateCompare]   ${r.metric}: movenet=${r.movenet} | ${variant}=${r[variant]} | delta=${r.delta}`));
+  rows.forEach(r => console.log(`[MigrateCompare]   ${r.metric}: movenet=${r.movenet} | ${variant}=${r[variant]} | delta=${r.delta}` + (smC ? ` | ${variantC}=${r[variantC]} | delta(feet)=${r['delta(feet)']}` : '')));
   console.table(rows);
   window._migrateCompare = { variant, movenet: smA, shadow: smB, rows };
 }
@@ -8543,8 +8548,26 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     return (p+v+n)/3;
   });
 
-  const lAnkSmooth = smooth3(perFrameData.map(f=>f.lAnkY));
-  const rAnkSmooth = smooth3(perFrameData.map(f=>f.rAnkY));
+  // ── #29 Phase B (SHADOW ONLY — enabled by runParams.contactMode === 'feet') ──────────────
+  // Feet-aware contact mode. "foot-low" = the lowest image point of the foot (max y of
+  // heel / toe / ankle) — the part that actually meets the belt. It peaks sharply at contact
+  // for heel, midfoot AND forefoot strikers; the ankle alone is nearly flat through a forefoot
+  // contact, so those contacts were smoothed away (Alana: 8 of ~11 strides found, 166 vs ~190 spm).
+  // Requires heel/toe on ≥60% of frames (MediaPipe); MoveNet frames have none → ankle mode.
+  const _feetMode = (runParams.contactMode === 'feet')
+    && perFrameData.filter(f => f.lHeelY != null && f.lToeY != null && f.rHeelY != null && f.rToeY != null).length >= perFrameData.length * 0.6;
+  const _footLow = (f, side) => {
+    const ys = [f[side+'HeelY'], f[side+'ToeY'], f[side+'AnkY']].filter(v => v != null);
+    return ys.length ? Math.max(...ys) : null;
+  };
+  const lAnkSmooth = smooth3(perFrameData.map(f => _feetMode ? _footLow(f,'l') : f.lAnkY));
+  const rAnkSmooth = smooth3(perFrameData.map(f => _feetMode ? _footLow(f,'r') : f.rAnkY));
+  const lToeSmooth  = _feetMode ? smooth3(perFrameData.map(f=>f.lToeY))  : null;
+  const rToeSmooth  = _feetMode ? smooth3(perFrameData.map(f=>f.rToeY))  : null;
+  const lHeelSmooth = _feetMode ? smooth3(perFrameData.map(f=>f.lHeelY)) : null;
+  const rHeelSmooth = _feetMode ? smooth3(perFrameData.map(f=>f.rHeelY)) : null;
+  if(_feetMode) console.log('[StrideEngine:feet] contact signal = foot-low (max-y of heel/toe/ankle); toe-off = toe lift (25% of stride excursion); foot-strike = heel-vs-toe height at IC (provisional ±0.12 of foot length)');
+  else if(runParams.contactMode === 'feet') console.warn('[StrideEngine:feet] requested but heel/toe present on <60% of frames — using ankle mode');
   const lKneeSmooth = smooth3(perFrameData.map(f=>f.lKnee));
   const rKneeSmooth = smooth3(perFrameData.map(f=>f.rKnee));
   const lHipSmooth  = smooth3(perFrameData.map(f=>f.lHip));
@@ -8841,7 +8864,34 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     let gcPct = null;
 
     // Try ankle Y method first
-    if(gctReliable) {
+    if(_feetMode) {
+      // #29 Phase B (shadow): toe-off = the toe lifting off its stance plateau. The threshold is
+      // relative to THIS stride's toe excursion. (The ankle rule below — "below 85% of contact y" —
+      // at y≈0.9 demands ~25 cm of lift, so it almost never fires and the hip-min fallback takes over.)
+      const toeArr = REF==='L' ? lToeSmooth : rToeSmooth;
+      const sVals = strideIdxs.map(i=>toeArr[i]).filter(v=>v!=null);
+      if(sVals.length > 4) {
+        const toeMin = Math.min(...sVals);
+        // stance plateau = highest (lowest-in-frame) toe y within the first 45% of the stride
+        const _pEnd = startIdx + Math.round((endIdx - startIdx) * 0.45);
+        let plateau = -Infinity;
+        for(let i = startIdx; i <= _pEnd && i < N; i++) if(toeArr[i] != null && toeArr[i] > plateau) plateau = toeArr[i];
+        if(isFinite(plateau) && plateau - toeMin >= 0.02) {
+          const lift = plateau - 0.25 * (plateau - toeMin);
+          let _onPlateau = false;
+          for(let i = startIdx; i <= endIdx && i < N; i++) {
+            const v = toeArr[i]; if(v == null) continue;
+            if(!_onPlateau) { if(v >= lift) _onPlateau = true; continue; } // wait until the toe is actually down
+            if(v < lift) { toeoffIdx = i; break; }
+          }
+        }
+      }
+      if(toeoffIdx != null && toeoffIdx < endIdx) {
+        const stanceFrames = toeoffIdx - startIdx;
+        const rawGcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
+        if(rawGcPct >= 20 && rawGcPct <= 80) gcPct = rawGcPct; else toeoffIdx = null;
+      } else toeoffIdx = null;
+    } else if(gctReliable) {
       const contactPeak = refAnkArr[startIdx] ?? 0;
       for(let i = startIdx + 1; i <= endIdx && i < N; i++) {
         const v = refAnkArr[i];
@@ -9001,7 +9051,26 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // Foot strike pattern: ankle angle at contact
     const refAnkLM = perFrameData[trueIcIdx];
     let footStrike = 'unknown';
-    if(refAnkLM) {
+    let footStrikeRatio = null;
+    if(_feetMode && refAnkLM) {
+      // #29 Phase B (shadow): heel-vs-toe height at the refined IC frame and the next frame
+      // (foot settling). Positive = heel lower in frame = heel strike. Normalised by foot length.
+      // PROVISIONAL thresholds ±0.12 — clinical calibration with Brian pending.
+      const _fsSide = REF==='L' ? 'l' : 'r';
+      const _hs = REF==='L' ? lHeelSmooth : rHeelSmooth, _ts = REF==='L' ? lToeSmooth : rToeSmooth;
+      const _rs = [];
+      [trueIcIdx, Math.min(trueIcIdx + 1, N - 1)].forEach(i => {
+        const f = perFrameData[i]; const hy = _hs[i], ty = _ts[i];
+        const hx = f?.[_fsSide+'HeelX'], tx = f?.[_fsSide+'ToeX'];
+        if(hy == null || ty == null || hx == null || tx == null) return;
+        const footLen = Math.hypot(hx - tx, hy - ty); if(footLen < 0.01) return;
+        _rs.push((hy - ty) / footLen);
+      });
+      if(_rs.length) {
+        footStrikeRatio = +(_rs.reduce((a,b)=>a+b,0) / _rs.length).toFixed(3);
+        footStrike = footStrikeRatio > 0.12 ? 'heel' : footStrikeRatio < -0.12 ? 'forefoot' : 'midfoot';
+      }
+    } else if(refAnkLM) {
       const hipAtContact  = refHSm[trueIcIdx];
       const kneeAtContact = refKSm[trueIcIdx]; // included angle: 180°=straight, <180°=flexed
 
@@ -9029,7 +9098,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // prevents mid-swing frames (knee ~100°) from inflating the knee-flex-at-contact metric.
     const kneeContactIncluded = refKSm[trueIcIdx] ?? null;
     return {
-      durationS, gcPct, floatPct, peakKneeFlex, hipAtToeoff, footStrike,
+      durationS, gcPct, floatPct, peakKneeFlex, hipAtToeoff, footStrike, footStrikeRatio,
       stepAsymProxy, startIdx, endIdx, toeoffIdx, trueIcIdx,
       kneeContactIncluded,
       oppKneeContactIncluded: oppKAtContact, // trailing-leg knee at contralateral IC (leg recovery)
@@ -9577,6 +9646,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     bestStrideDetails: bestStride,
     allStrideDetails:  strideDetails,
     flags,
+    contactMode: _feetMode ? 'feet' : 'ankle', // #29: which contact detector produced these metrics
     videoDurationS:   videoDuration,
     fps,
     // Raw contact indices for downstream use
