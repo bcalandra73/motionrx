@@ -9068,7 +9068,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       // The foot flattens within a frame or two of IC, so averaging dilutes the strike angle;
       // take the STRONGEST (largest |ratio|) of IC-1, IC, IC+1.
       const _rs = [];
-      [Math.max(0, trueIcIdx - 1), trueIcIdx, Math.min(trueIcIdx + 1, N - 1)].forEach(i => {
+      [trueIcIdx, Math.min(trueIcIdx + 1, N - 1)].forEach(i => { // IC-1 dropped: still late-swing (plantarflexed) on some strides
         const f = perFrameData[i]; const hy = _hs[i], ty = _ts[i];
         const hx = f?.[_fsSide+'HeelX'], tx = f?.[_fsSide+'ToeX'];
         if(hy == null || ty == null || hx == null || tx == null) { _rs.push(null); return; }
@@ -9079,7 +9079,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       if(_valid.length) {
         footStrikeRatio = _valid.reduce((a, b) => Math.abs(b) > Math.abs(a) ? b : a, _valid[0]);
         footStrike = footStrikeRatio > 0.12 ? 'heel' : footStrikeRatio < -0.12 ? 'forefoot' : 'midfoot';
-        console.log(`[StrideEngine:feet] FS stride@IC ${trueIcIdx}: ratios IC-1/IC/IC+1 = ${_rs.map(v => v == null ? '—' : v).join(' / ')} → ${footStrikeRatio} (${footStrike}; provisional ±0.12)`);
+        console.log(`[StrideEngine:feet] FS stride@IC ${trueIcIdx}: ratios IC/IC+1 = ${_rs.map(v => v == null ? '—' : v).join(' / ')} → ${footStrikeRatio} (${footStrike}; provisional ±0.12)`);
       }
     } else if(refAnkLM) {
       const hipAtContact  = refHSm[trueIcIdx];
@@ -9558,7 +9558,16 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
               const f = perFrameData[sd.trueIcIdx]; if(!f || f[_refAnkKeyOS] == null || f.hipMidX == null) return null;
               return _facesLeft ? (f.hipMidX - f[_refAnkKeyOS]) : (f[_refAnkKeyOS] - f.hipMidX); // + = foot ahead of hip
             }).filter(v => v != null).sort((a,b) => a-b);
-            if(_icOff.length) overstrideDistCmIC = Math.round(_icOff[Math.floor(_icOff.length/2)] * _oaspect * cmPerFrac);
+            // Scale: the median hip→ankle vertical distance (medLegFrac) is taken over the whole stride,
+            // where the knee is flexed most of the time, so it under-states leg length and inflates cm.
+            // Use the 90th percentile (≈ full extension) for the shadow metric; log both.
+            const _p90LegFrac = legFracs[Math.min(legFracs.length - 1, Math.floor(legFracs.length * 0.9))];
+            const _cmPerFrac90 = _p90LegFrac > 0 ? legLenCm / _p90LegFrac : cmPerFrac;
+            if(_icOff.length) {
+              const _medOff = _icOff[Math.floor(_icOff.length/2)];
+              overstrideDistCmIC = Math.round(_medOff * _oaspect * _cmPerFrac90);
+              console.log(`[StrideEngine] overstride@IC (shadow): median offset ${(_medOff*_oaspect).toFixed(3)} frame-h → ${Math.round(_medOff*_oaspect*cmPerFrac)} cm @median-leg scale (legFrac ${medLegFrac.toFixed(3)}) | ${overstrideDistCmIC} cm @p90-leg scale (legFrac ${_p90LegFrac.toFixed(3)}, ×${(medLegFrac/_p90LegFrac).toFixed(2)} smaller) | n=${_icOff.length} strides, legLen ${Math.round(legLenCm)} cm`);
+            }
           } catch(e) { /* shadow metric — never fatal */ }
           // v0.17.3: grade overstride as % of LEG LENGTH (morphology-normalized) so a short
           // runner who lands the foot well ahead is flagged proportionally rather than
