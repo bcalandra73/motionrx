@@ -7052,7 +7052,7 @@ function _logMigrateCompare(smA, smB, variant, smC = null, variantC = null) {
     ['stridesDetected','strides'], ['strideOutliersRejected','rejected'], ['cadenceSpm','cadence spm'],
     ['strideDurationS','stride s'], ['cvStridePct','stride CV %'], ['gcPct','GCT %'], ['floatPct','float %'],
     ['shinAngleAtContactDeg','shin @IC °'], ['shinAngleIQR','shin IQR °'], ['shinAngleReliable','shin reliable'],
-    ['overstrideDistCm','overstride cm'], ['overstridePctLeg','overstride %leg'], ['overstrideGrade','overstride grade'],
+    ['overstrideDistCm','overstride cm (current estimator)'], ['overstrideDistCmIC','overstride cm @refined IC, REF leg (shadow)'], ['overstridePctLeg','overstride %leg'], ['overstrideGrade','overstride grade'],
     ['verticalOscillationCm','VO cm'], ['stepLengthAsymPct','step asym %'], ['kneeFlexAtContact','knee @IC °'],
     ['backKneeFlexAtContact','back knee @IC °'], ['hipExtAtToeoff','hip ext @TO °'], ['peakKneeFlex','peak knee °'],
     ['fsConsensus','foot strike'], ['refSide','ref side'], ['cameraNearLeg','near leg'], ['contactMode','contact mode'],
@@ -8868,29 +8868,36 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       // #29 Phase B (shadow): toe-off = the toe lifting off its stance plateau. The threshold is
       // relative to THIS stride's toe excursion. (The ankle rule below — "below 85% of contact y" —
       // at y≈0.9 demands ~25 cm of lift, so it almost never fires and the hip-min fallback takes over.)
+      // The foot-low contact peak sits MID-stance (the foot is flat on the belt for several frames,
+      // so the smoothed maximum lands in the middle of the plateau), so stance is measured from
+      // TOE-DOWN (scan back from the peak while the toe is still on the plateau) to toe LIFT.
       const toeArr = REF==='L' ? lToeSmooth : rToeSmooth;
       const sVals = strideIdxs.map(i=>toeArr[i]).filter(v=>v!=null);
+      let _dbg = `stride ${startIdx}→${endIdx}`;
       if(sVals.length > 4) {
         const toeMin = Math.min(...sVals);
-        // stance plateau = highest (lowest-in-frame) toe y within the first 45% of the stride
         const _pEnd = startIdx + Math.round((endIdx - startIdx) * 0.45);
         let plateau = -Infinity;
-        for(let i = startIdx; i <= _pEnd && i < N; i++) if(toeArr[i] != null && toeArr[i] > plateau) plateau = toeArr[i];
+        for(let i = Math.max(0, startIdx - 2); i <= _pEnd && i < N; i++) if(toeArr[i] != null && toeArr[i] > plateau) plateau = toeArr[i];
+        _dbg += ` plateau=${isFinite(plateau)?plateau.toFixed(3):'—'} toeMin=${toeMin.toFixed(3)}`;
         if(isFinite(plateau) && plateau - toeMin >= 0.02) {
           const lift = plateau - 0.25 * (plateau - toeMin);
-          let _onPlateau = false;
-          for(let i = startIdx; i <= endIdx && i < N; i++) {
-            const v = toeArr[i]; if(v == null) continue;
-            if(!_onPlateau) { if(v >= lift) _onPlateau = true; continue; } // wait until the toe is actually down
-            if(v < lift) { toeoffIdx = i; break; }
-          }
-        }
-      }
-      if(toeoffIdx != null && toeoffIdx < endIdx) {
-        const stanceFrames = toeoffIdx - startIdx;
-        const rawGcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
-        if(rawGcPct >= 20 && rawGcPct <= 80) gcPct = rawGcPct; else toeoffIdx = null;
-      } else toeoffIdx = null;
+          // toe-down: walk back from the peak while the toe stays on the plateau (max half a stride)
+          let toeDownIdx = startIdx;
+          const _back = Math.max(0, startIdx - Math.round((endIdx - startIdx) * 0.5));
+          for(let i = startIdx - 1; i >= _back; i--) { const v = toeArr[i]; if(v == null) continue; if(v >= lift) toeDownIdx = i; else break; }
+          // toe-off: first frame after the peak where the toe has lifted
+          for(let i = startIdx + 1; i <= endIdx && i < N; i++) { const v = toeArr[i]; if(v != null && v < lift) { toeoffIdx = i; break; } }
+          _dbg += ` lift=${lift.toFixed(3)} toeDown=${toeDownIdx} toeOff=${toeoffIdx ?? '—'}`;
+          if(toeoffIdx != null && toeoffIdx < endIdx) {
+            const stanceFrames = toeoffIdx - toeDownIdx;
+            const rawGcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
+            _dbg += ` stance=${stanceFrames}f gc=${rawGcPct}%`;
+            if(rawGcPct >= 20 && rawGcPct <= 80) gcPct = rawGcPct; else { toeoffIdx = null; _dbg += ' (out of 20–80 → hip-min fallback)'; }
+          } else { toeoffIdx = null; _dbg += ' (no lift found → hip-min fallback)'; }
+        } else _dbg += ' (toe excursion <0.02 → hip-min fallback)';
+      } else _dbg += ' (toe sparse → hip-min fallback)';
+      console.log('[StrideEngine:feet] TO ' + _dbg);
     } else if(gctReliable) {
       const contactPeak = refAnkArr[startIdx] ?? 0;
       for(let i = startIdx + 1; i <= endIdx && i < N; i++) {
@@ -9058,17 +9065,21 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       // PROVISIONAL thresholds ±0.12 — clinical calibration with Brian pending.
       const _fsSide = REF==='L' ? 'l' : 'r';
       const _hs = REF==='L' ? lHeelSmooth : rHeelSmooth, _ts = REF==='L' ? lToeSmooth : rToeSmooth;
+      // The foot flattens within a frame or two of IC, so averaging dilutes the strike angle;
+      // take the STRONGEST (largest |ratio|) of IC-1, IC, IC+1.
       const _rs = [];
-      [trueIcIdx, Math.min(trueIcIdx + 1, N - 1)].forEach(i => {
+      [Math.max(0, trueIcIdx - 1), trueIcIdx, Math.min(trueIcIdx + 1, N - 1)].forEach(i => {
         const f = perFrameData[i]; const hy = _hs[i], ty = _ts[i];
         const hx = f?.[_fsSide+'HeelX'], tx = f?.[_fsSide+'ToeX'];
-        if(hy == null || ty == null || hx == null || tx == null) return;
-        const footLen = Math.hypot(hx - tx, hy - ty); if(footLen < 0.01) return;
-        _rs.push((hy - ty) / footLen);
+        if(hy == null || ty == null || hx == null || tx == null) { _rs.push(null); return; }
+        const footLen = Math.hypot(hx - tx, hy - ty); if(footLen < 0.01) { _rs.push(null); return; }
+        _rs.push(+((hy - ty) / footLen).toFixed(3));
       });
-      if(_rs.length) {
-        footStrikeRatio = +(_rs.reduce((a,b)=>a+b,0) / _rs.length).toFixed(3);
+      const _valid = _rs.filter(v => v != null);
+      if(_valid.length) {
+        footStrikeRatio = _valid.reduce((a, b) => Math.abs(b) > Math.abs(a) ? b : a, _valid[0]);
         footStrike = footStrikeRatio > 0.12 ? 'heel' : footStrikeRatio < -0.12 ? 'forefoot' : 'midfoot';
+        console.log(`[StrideEngine:feet] FS stride@IC ${trueIcIdx}: ratios IC-1/IC/IC+1 = ${_rs.map(v => v == null ? '—' : v).join(' / ')} → ${footStrikeRatio} (${footStrike}; provisional ±0.12)`);
       }
     } else if(refAnkLM) {
       const hipAtContact  = refHSm[trueIcIdx];
@@ -9501,6 +9512,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
   // direction of travel, then classify.
   // Expressed in cm using the same height calibration as stride length.
   let overstrideDistCm = null;
+  let overstrideDistCmIC = null; // #29 shadow metric: REF ankle vs hip at the REFINED IC, per-stride median (see note below)
   let overstridePctLeg = null; // overstride as % of leg length (morphology-normalized)
   let overstrideGrade  = null; // 'none' | 'mild' | 'moderate' | 'severe'
   if(runParams.heightCm && (lContactIdxs.length + rContactIdxs.length) > 0) {
@@ -9535,6 +9547,19 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
           // portrait video inflates the overstride distance. offset × (width/height) × cmPerFrac.
           const _oaspect = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1;
           overstrideDistCm = Math.round(Math.abs(meanOffset) * _oaspect * cmPerFrac);
+          // #29 Phase B (shadow metric, logged only): the estimate above samples the RAW contact
+          // peaks and reads `f.lAnkX ?? f.rAnkX` — i.e. the LEFT ankle even at right-foot contacts,
+          // where the left foot is mid-swing — so left/right offsets partly cancel and the result is
+          // under-called (Brian: 1 cm on a visually mild overstrider). This one takes the REF leg's
+          // ankle at each stride's refined IC and reports the median, facing-corrected.
+          try {
+            const _refAnkKeyOS = REF==='L' ? 'lAnkX' : 'rAnkX';
+            const _icOff = strideDetails.map(sd => {
+              const f = perFrameData[sd.trueIcIdx]; if(!f || f[_refAnkKeyOS] == null || f.hipMidX == null) return null;
+              return _facesLeft ? (f.hipMidX - f[_refAnkKeyOS]) : (f[_refAnkKeyOS] - f.hipMidX); // + = foot ahead of hip
+            }).filter(v => v != null).sort((a,b) => a-b);
+            if(_icOff.length) overstrideDistCmIC = Math.round(_icOff[Math.floor(_icOff.length/2)] * _oaspect * cmPerFrac);
+          } catch(e) { /* shadow metric — never fatal */ }
           // v0.17.3: grade overstride as % of LEG LENGTH (morphology-normalized) so a short
           // runner who lands the foot well ahead is flagged proportionally rather than
           // under-called by absolute cm. Thresholds map the prior cm bands onto a reference
@@ -9612,7 +9637,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     cadenceSpm,
     // New metrics
     verticalOscillationCm,
-    overstrideDistCm, overstridePctLeg, overstrideGrade,
+    overstrideDistCm, overstridePctLeg, overstrideGrade, overstrideDistCmIC,
     shinAngleAtContactDeg, shinAngleReliable, shinAngleIQR,
     cadenceStride,
     cvStridePct:      cvDuration,
