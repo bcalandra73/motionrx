@@ -8862,6 +8862,7 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
     // the 10-20° near-neutral that true toe-off produces.
     let toeoffIdx = null;
     let gcPct = null;
+    let _toeDownIdx = null, _heelDownIdx = null; // #29 feet mode: first-down events (for foot-strike timing)
 
     // Try ankle Y method first
     if(_feetMode) {
@@ -8888,7 +8889,24 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
           for(let i = startIdx - 1; i >= _back; i--) { const v = toeArr[i]; if(v == null) continue; if(v >= lift) toeDownIdx = i; else break; }
           // toe-off: first frame after the peak where the toe has lifted
           for(let i = startIdx + 1; i <= endIdx && i < N; i++) { const v = toeArr[i]; if(v != null && v < lift) { toeoffIdx = i; break; } }
-          _dbg += ` lift=${lift.toFixed(3)} toeDown=${toeDownIdx} toeOff=${toeoffIdx ?? '—'}`;
+          _toeDownIdx = toeDownIdx;
+          // heel-down by the same plateau/lift logic on the heel trajectory
+          try {
+            const heelArr = REF==='L' ? lHeelSmooth : rHeelSmooth;
+            const hVals = strideIdxs.map(i=>heelArr[i]).filter(v=>v!=null);
+            if(hVals.length > 4) {
+              const heelMin = Math.min(...hVals);
+              let plateauH = -Infinity;
+              for(let i = Math.max(0, startIdx - 2); i <= _pEnd && i < N; i++) if(heelArr[i] != null && heelArr[i] > plateauH) plateauH = heelArr[i];
+              if(isFinite(plateauH) && plateauH - heelMin >= 0.02) {
+                const liftH = plateauH - 0.25 * (plateauH - heelMin);
+                let hd = startIdx;
+                for(let i = startIdx - 1; i >= _back; i--) { const v = heelArr[i]; if(v == null) continue; if(v >= liftH) hd = i; else break; }
+                _heelDownIdx = hd;
+              }
+            }
+          } catch(e) {}
+          _dbg += ` lift=${lift.toFixed(3)} toeDown=${toeDownIdx} heelDown=${_heelDownIdx ?? '—'} toeOff=${toeoffIdx ?? '—'}`;
           if(toeoffIdx != null && toeoffIdx < endIdx) {
             const stanceFrames = toeoffIdx - toeDownIdx;
             const rawGcPct = Math.round((stanceFrames / (endIdx - startIdx)) * 100);
@@ -9076,11 +9094,20 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
         _rs.push(+((hy - ty) / footLen).toFixed(3));
       });
       const _valid = _rs.filter(v => v != null);
-      if(_valid.length) {
-        footStrikeRatio = _valid.reduce((a, b) => Math.abs(b) > Math.abs(a) ? b : a, _valid[0]);
+      if(_valid.length) footStrikeRatio = _valid.reduce((a, b) => Math.abs(b) > Math.abs(a) ? b : a, _valid[0]);
+      // TIMING method (primary): which part of the foot reaches the belt first. At ~28 ms/frame
+      // the foot is flat by the refined-IC frame for heel AND forefoot strikers (Brian 0.03–0.09 vs
+      // Alana 0.06–0.12 — reversed), so the height ratio can't discriminate; first-down order can.
+      // +Δ = heel down first (heel strike), 0 = same frame (midfoot), −Δ = toe first (forefoot).
+      let _fsDeltaFrames = null, _fsDeltaMs = null;
+      if(_toeDownIdx != null && _heelDownIdx != null) {
+        _fsDeltaFrames = _toeDownIdx - _heelDownIdx;
+        _fsDeltaMs = Math.round(_fsDeltaFrames / _effFps * 1000);
+        footStrike = _fsDeltaFrames >= 1 ? 'heel' : _fsDeltaFrames <= -1 ? 'forefoot' : 'midfoot';
+      } else if(footStrikeRatio != null) {
         footStrike = footStrikeRatio > 0.12 ? 'heel' : footStrikeRatio < -0.12 ? 'forefoot' : 'midfoot';
-        console.log(`[StrideEngine:feet] FS stride@IC ${trueIcIdx}: ratios IC/IC+1 = ${_rs.map(v => v == null ? '—' : v).join(' / ')} → ${footStrikeRatio} (${footStrike}; provisional ±0.12)`);
       }
+      console.log(`[StrideEngine:feet] FS stride@IC ${trueIcIdx}: heelDown=${_heelDownIdx ?? '—'} toeDown=${_toeDownIdx ?? '—'} → toe−heel ${_fsDeltaFrames ?? '—'} frames (${_fsDeltaMs ?? '—'} ms) ⇒ ${footStrike}${_fsDeltaFrames == null ? ' (from height ratio — timing unavailable)' : ''} | height ratio IC/IC+1 = ${_rs.map(v => v == null ? '—' : v).join(' / ')}`);
     } else if(refAnkLM) {
       const hipAtContact  = refHSm[trueIcIdx];
       const kneeAtContact = refKSm[trueIcIdx]; // included angle: 180°=straight, <180°=flexed
