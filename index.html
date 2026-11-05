@@ -8888,9 +8888,10 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
           // heel swings far higher than the toe, so an excursion-relative threshold trips the heel
           // early on every runner and made everyone "heel-first" by construction.
           const _sideFL = REF==='L' ? 'l' : 'r';
-          const _flVals = strideIdxs.map(i => { const f = perFrameData[i]; return (f && f[_sideFL+'HeelX'] != null && f[_sideFL+'ToeX'] != null && f[_sideFL+'HeelY'] != null && f[_sideFL+'ToeY'] != null) ? Math.hypot(f[_sideFL+'HeelX'] - f[_sideFL+'ToeX'], f[_sideFL+'HeelY'] - f[_sideFL+'ToeY']) : null; }).filter(v => v != null).sort((a,b)=>a-b);
-          const _footLen = _flVals.length ? _flVals[Math.floor(_flVals.length/2)] : 0.04;
-          const _downEps = Math.max(0.004, 0.15 * _footLen);
+          const _aspFL = (typeof window !== 'undefined' && window._videoAspect && isFinite(window._videoAspect)) ? window._videoAspect : 1; // x→frame-height units
+          const _flVals = strideIdxs.map(i => { const f = perFrameData[i]; return (f && f[_sideFL+'HeelX'] != null && f[_sideFL+'ToeX'] != null && f[_sideFL+'HeelY'] != null && f[_sideFL+'ToeY'] != null) ? Math.hypot((f[_sideFL+'HeelX'] - f[_sideFL+'ToeX']) * _aspFL, f[_sideFL+'HeelY'] - f[_sideFL+'ToeY']) : null; }).filter(v => v != null).sort((a,b)=>a-b);
+          const _footLen = _flVals.length ? _flVals[Math.floor(_flVals.length/2)] : 0.10; // frame-height units (~0.10 for a 28 cm foot in a 2.5 m frame)
+          const _downEps = Math.max(0.004, 0.10 * _footLen);
           // toe-down: walk back from the peak while the toe stays within eps of its plateau (max half a stride)
           let toeDownIdx = startIdx;
           const _back = Math.max(0, startIdx - Math.round((endIdx - startIdx) * 0.5));
@@ -9112,18 +9113,24 @@ function detectStridesAndComputeMetrics(perFrameData, videoDuration, fps, camera
       // Alana 0.06–0.12 — reversed), so the height ratio can't discriminate; first-down order can.
       // +Δ = heel down first (heel strike), 0 = same frame (midfoot), −Δ = toe first (forefoot).
       let _fsDeltaFrames = null, _fsDeltaMs = null;
-      let _fsMethod = 'none';
+      // VERDICT (2026-11-04, Brian + Alana): neither heel/toe timing nor heel-vs-toe height discriminates
+      // strike pattern from the dense landmarks at the 800 px capture (a 28 cm foot ≈ 35 px; 15° of
+      // pitch ≈ 9 px, inside the ~3 cm landmark noise measured against tape). Both runners read the
+      // same. So feet mode classifies with the SAME kinematic heuristic as ankle mode (hip/knee at the
+      // refined IC) and keeps the heel/toe numbers as log-only diagnostics for a future higher-res capture.
       if(_toeDownIdx != null && _heelDownIdx != null) {
         _fsDeltaFrames = _toeDownIdx - _heelDownIdx;
         _fsDeltaMs = Math.round(_fsDeltaFrames / _effFps * 1000);
       }
-      if(_fsDeltaFrames != null && Math.abs(_fsDeltaFrames) >= 2) {
-        footStrike = _fsDeltaFrames > 0 ? 'heel' : 'forefoot'; _fsMethod = 'timing';
-      } else if(footStrikeRatio != null) {
-        // PROVISIONAL ±0.10 at the first-down frame — calibrate against Brian (heel) / Alana (fore-mid)
-        footStrike = footStrikeRatio > 0.10 ? 'heel' : footStrikeRatio < -0.10 ? 'forefoot' : 'midfoot'; _fsMethod = 'ratio@firstDown';
-      } else if(_fsDeltaFrames != null) {
-        footStrike = 'midfoot'; _fsMethod = 'timing(≈0)';
+      const _fsMethod = 'kinematic-heuristic (heel/toe diagnostics only)';
+      {
+        const hipAtContact  = refHSm[trueIcIdx];
+        const kneeAtContact = refKSm[trueIcIdx];
+        if(hipAtContact != null) {
+          if(hipAtContact > 38) footStrike = 'heel';
+          else if(hipAtContact > 24) footStrike = (kneeAtContact != null && kneeAtContact > 162) ? 'heel' : 'midfoot';
+          else footStrike = (kneeAtContact != null && kneeAtContact < 150) ? 'forefoot' : 'midfoot';
+        }
       }
       console.log(`[StrideEngine:feet] FS stride@IC ${trueIcIdx}: heelDown=${_heelDownIdx ?? '—'} toeDown=${_toeDownIdx ?? '—'} (toe−heel ${_fsDeltaFrames ?? '—'}f / ${_fsDeltaMs ?? '—'} ms) | ratio @firstDown−1 / @firstDown(${_fsAnchor}) = ${_rs.map(v => v == null ? '—' : v).join(' / ')} ⇒ ${footStrike} [${_fsMethod}]`);
     } else if(refAnkLM) {
